@@ -1,0 +1,42 @@
+[ollama]
+url = "http://localhost:11434"
+model = "qwen2.5:7b"
+temperature = 0.3
+max_tokens = 4096
+
+[docker]
+image = "ubuntu:24.04"
+socket_path = "/var/run/docker.sock"
+runtime = "runc"
+memory_limit = 268435456
+cpu_quota = 50000
+timeout_secs = 120
+
+[db]
+path = "~/.athena/athena.db"
+
+[manager]
+max_steps = 15
+sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+
+[[agents]]
+name = "coder"
+description = "Reads, writes, and modifies code files. Can run build/test commands."
+tools = ["file_read", "file_write", "shell"]
+strategy = "react"
+
+[[agents.mounts]]
+host_path = "."
+container_path = "/workspace"
+read_only = false
+
+[[agents]]
+name = "scout"
+description = "Explores files and runs read-only commands. Cannot modify anything."
+tools = ["file_read", "shell"]
+strategy = "react"
+
+[[agents.mounts]]
+host_path = "."
+container_path = "/workspace"
+read_only = true
