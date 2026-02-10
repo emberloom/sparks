@@ -15,7 +15,12 @@ pub struct Manager {
 }
 
 impl Manager {
-    pub fn new(config: &Config, llm: OllamaClient, memory: std::sync::Arc<MemoryStore>) -> Self {
+    pub fn new(
+        config: &Config,
+        agents: Vec<AgentConfig>,
+        llm: OllamaClient,
+        memory: std::sync::Arc<MemoryStore>,
+    ) -> Self {
         let executor = Executor::new(
             config.docker.clone(),
             config.manager.max_steps,
@@ -25,7 +30,7 @@ impl Manager {
         Self {
             llm,
             executor,
-            agents: config.agents.clone(),
+            agents,
             memory,
         }
     }

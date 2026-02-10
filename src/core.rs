@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::llm::OllamaClient;
 use crate::manager::Manager;
 use crate::memory::MemoryStore;
+use crate::profiles;
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -115,8 +116,10 @@ impl AthenaCore {
             }
         }
 
-        let agents: Vec<AgentInfo> = config
-            .agents
+        // Merge config agents with ~/.athena/agents/*.toml profiles
+        let merged_agents = profiles::load_agents(&config)?;
+
+        let agents: Vec<AgentInfo> = merged_agents
             .iter()
             .map(|a| AgentInfo {
                 name: a.name.clone(),
@@ -126,7 +129,7 @@ impl AthenaCore {
             })
             .collect();
 
-        let manager = Arc::new(Manager::new(&config, llm, memory.clone()));
+        let manager = Arc::new(Manager::new(&config, merged_agents, llm, memory.clone()));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop

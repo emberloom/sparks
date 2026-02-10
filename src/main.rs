@@ -8,6 +8,7 @@ mod executor;
 mod llm;
 mod manager;
 mod memory;
+mod profiles;
 mod strategy;
 mod tools;
 
