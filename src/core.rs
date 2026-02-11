@@ -5,9 +5,17 @@ use crate::config::Config;
 use crate::confirm::Confirmer;
 use crate::embeddings::Embedder;
 use crate::error::Result;
+use crate::heartbeat;
+use crate::knobs::{RuntimeKnobs, SharedKnobs};
 use crate::manager::Manager;
 use crate::memory::MemoryStore;
+use crate::mood::MoodState;
+use crate::observer::{ObserverCategory, ObserverHandle};
+use crate::proactive::{self, ActivityTracker};
 use crate::profiles;
+use crate::pulse::{self, Pulse, PulseBus};
+use crate::randomness;
+use crate::scheduler::CronEngine;
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -32,6 +40,8 @@ pub enum CoreEvent {
     Response(String),
     /// Error during execution
     Error(String),
+    /// Proactive pulse from background tasks
+    Pulse(String),
 }
 
 /// Request from any frontend to the core.
@@ -65,6 +75,13 @@ pub struct CoreHandle {
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Arc<Vec<GhostInfo>>,
     memory: Arc<MemoryStore>,
+    pub knobs: SharedKnobs,
+    pub observer: ObserverHandle,
+    pub pulse_bus: PulseBus,
+    pub activity: Arc<ActivityTracker>,
+    pub mood: Arc<MoodState>,
+    pub cron_engine: Option<Arc<CronEngine>>,
+    pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
 }
 
 impl CoreHandle {
@@ -174,6 +191,27 @@ impl AthenaCore {
             })
             .collect();
 
+        // --- Initialize new subsystems ---
+
+        // Observer
+        let observer = ObserverHandle::new(1024);
+        crate::observer::spawn_uds_listener(observer.clone());
+        observer.log(ObserverCategory::Startup, "Athena core started, observer active");
+
+        // Runtime knobs
+        let knobs: SharedKnobs = Arc::new(std::sync::RwLock::new(RuntimeKnobs::from_config(&config)));
+
+        // Mood state
+        let mood = Arc::new(MoodState::load(&memory, config.mood.timezone_offset));
+
+        // Pulse bus + consumer
+        let pulse_bus = PulseBus::new(256);
+        let (delivered_tx, delivered_rx) = mpsc::channel::<Pulse>(64);
+        pulse::spawn_pulse_consumer(pulse_bus.clone(), observer.clone(), delivered_tx, knobs.clone());
+
+        // Activity tracker
+        let activity = Arc::new(ActivityTracker::new());
+
         // Spawn periodic conversation cleanup
         {
             let memory_for_cleanup = memory.clone();
@@ -190,18 +228,111 @@ impl AthenaCore {
             });
         }
 
+        // Spawn mood drift loop
+        {
+            let mood = mood.clone();
+            let knobs = knobs.clone();
+            let observer = observer.clone();
+            let memory_for_mood = memory.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (interval, enabled, all) = {
+                        let k = knobs.read().unwrap();
+                        (k.mood_drift_interval_secs, k.mood_enabled, k.all_proactive)
+                    };
+                    if !all || !enabled {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    let dur = randomness::jitter_interval(interval, 0.2);
+                    tokio::time::sleep(dur).await;
+                    {
+                        let k = knobs.read().unwrap();
+                        if !k.all_proactive || !k.mood_enabled {
+                            continue;
+                        }
+                    }
+                    mood.drift(&observer);
+                    mood.save(&memory_for_mood);
+                }
+            });
+        }
+
+        // Spawn heartbeat loop
+        heartbeat::spawn_heartbeat_loop(
+            knobs.clone(),
+            observer.clone(),
+            pulse_bus.clone(),
+            llm.clone(),
+            memory.clone(),
+            mood.clone(),
+            config.heartbeat.soul_file.clone(),
+        );
+
+        // Spawn memory scanner
+        proactive::spawn_memory_scanner(
+            knobs.clone(),
+            observer.clone(),
+            pulse_bus.clone(),
+            llm.clone(),
+            memory.clone(),
+        );
+
+        // Spawn idle musings
+        proactive::spawn_idle_musings(
+            knobs.clone(),
+            observer.clone(),
+            pulse_bus.clone(),
+            llm.clone(),
+            memory.clone(),
+            activity.clone(),
+        );
+
+        // Cron engine
+        let cron_engine = Arc::new(CronEngine::new(
+            memory.clone(),
+            observer.clone(),
+            pulse_bus.clone(),
+            llm.clone(),
+            knobs.clone(),
+        ));
+        cron_engine.clone().spawn_tick_loop();
+
         let persona_soul = config.persona.soul.clone();
         let manager = Arc::new(Manager::new(
             &config, merged_ghosts, llm, classifier, memory.clone(), embedder, persona_soul,
+            mood.clone(), knobs.clone(),
         ));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop
+        let pulse_bus_for_reentry = pulse_bus.clone();
+        let knobs_for_reentry = knobs.clone();
+        let observer_for_reentry = observer.clone();
+        let memory_for_reentry = memory.clone();
+        let llm_for_reentry = manager.llm_ref();
+        let activity_for_events = activity.clone();
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 tracing::debug!(input = %req.input, "Core received request");
                 let manager = manager.clone();
+                let activity = activity_for_events.clone();
+                let knobs = knobs_for_reentry.clone();
+                let observer = observer_for_reentry.clone();
+                let pulse_bus = pulse_bus_for_reentry.clone();
+                let memory = memory_for_reentry.clone();
+                let llm = llm_for_reentry.clone();
+                let session_key = req.session.session_key();
                 tokio::spawn(async move {
+                    activity.touch();
+
+                    observer.emit(
+                        crate::observer::ObserverEvent::new(
+                            ObserverCategory::ChatIn,
+                            format!("{} \"{}\"", session_key, truncate_obs(&req.input, 80)),
+                        )
+                    );
+
                     let _ = req
                         .event_tx
                         .send(CoreEvent::Status("Thinking...".into()))
@@ -214,16 +345,28 @@ impl AthenaCore {
                     {
                         Ok(response) => {
                             tracing::debug!(len = response.len(), "Manager returned response");
+                            observer.emit(
+                                crate::observer::ObserverEvent::new(
+                                    ObserverCategory::ChatOut,
+                                    format!("{} ({} chars)", session_key, response.len()),
+                                ).with_details(truncate_obs(&response, 100))
+                            );
                             let _ = req.event_tx.send(CoreEvent::Response(response)).await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Manager returned error");
+                            observer.log(ObserverCategory::ChatOut, format!("{} ERROR: {}", session_key, e));
                             let _ = req
                                 .event_tx
                                 .send(CoreEvent::Error(e.to_string()))
                                 .await;
                         }
                     }
+
+                    // Maybe schedule conversation re-entry
+                    proactive::maybe_schedule_reentry(
+                        knobs, observer, pulse_bus, llm, memory, session_key,
+                    );
                 });
             }
         });
@@ -232,6 +375,13 @@ impl AthenaCore {
             tx,
             ghosts: Arc::new(ghosts),
             memory,
+            knobs,
+            observer,
+            pulse_bus,
+            activity,
+            mood,
+            cron_engine: Some(cron_engine),
+            delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
         })
     }
 }
@@ -271,4 +421,16 @@ pub fn backfill_embeddings(memory: &MemoryStore, embedder: &Embedder) {
         }
     }
     tracing::info!("Backfilled {}/{} memory embeddings", done, missing.len());
+}
+
+fn truncate_obs(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.replace('\n', " ")
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", s[..end].replace('\n', " "))
+    }
 }

@@ -474,6 +474,231 @@ impl MemoryStore {
         )?;
         Ok(())
     }
+
+    // --- Mood state persistence ---
+
+    /// Load the singleton mood state row.
+    pub fn load_mood_state(&self) -> Result<(f32, f32, String)> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT energy, valence, active_modifier FROM mood_state WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)? as f32,
+                    row.get::<_, f64>(1)? as f32,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ).map_err(|e| AthenaError::Db(e))
+    }
+
+    /// Persist mood state.
+    pub fn save_mood_state(&self, energy: f32, valence: f32, modifier: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE mood_state SET energy = ?1, valence = ?2, active_modifier = ?3, updated_at = datetime('now') WHERE id = 1",
+            rusqlite::params![energy as f64, valence as f64, modifier],
+        )?;
+        Ok(())
+    }
+
+    // --- Scheduled jobs ---
+
+    pub fn create_scheduled_job(
+        &self, id: &str, name: &str, schedule_type: &str, schedule_data: &str,
+        ghost: Option<&str>, prompt: &str, next_run: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO scheduled_jobs (id, name, schedule_type, schedule_data, ghost, prompt, next_run)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, name, schedule_type, schedule_data, ghost, prompt, next_run],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_scheduled_jobs(&self) -> Result<Vec<crate::scheduler::Job>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, schedule_type, schedule_data, ghost, prompt, target, enabled, next_run, last_run
+             FROM scheduled_jobs ORDER BY created_at"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(JobRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                schedule_type: row.get(2)?,
+                schedule_data: row.get(3)?,
+                ghost: row.get(4)?,
+                prompt: row.get(5)?,
+                target: row.get(6)?,
+                enabled: row.get::<_, i32>(7)? != 0,
+                next_run: row.get(8)?,
+                last_run: row.get(9)?,
+            })
+        })?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            let r = row?;
+            let schedule = crate::scheduler::Schedule::from_db(&r.schedule_type, &r.schedule_data)
+                .unwrap_or(crate::scheduler::Schedule::Interval { every_secs: 3600, jitter: 0.1 });
+            let next_run = r.next_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            let last_run = r.last_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            jobs.push(crate::scheduler::Job {
+                id: r.id,
+                name: r.name,
+                schedule,
+                ghost: r.ghost,
+                prompt: r.prompt,
+                target: r.target,
+                enabled: r.enabled,
+                next_run,
+                last_run,
+            });
+        }
+        Ok(jobs)
+    }
+
+    pub fn due_scheduled_jobs(&self) -> Result<Vec<crate::scheduler::Job>> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, schedule_type, schedule_data, ghost, prompt, target, enabled, next_run, last_run
+             FROM scheduled_jobs WHERE enabled = 1 AND next_run IS NOT NULL AND next_run <= ?1"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![now], |row| {
+            Ok(JobRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                schedule_type: row.get(2)?,
+                schedule_data: row.get(3)?,
+                ghost: row.get(4)?,
+                prompt: row.get(5)?,
+                target: row.get(6)?,
+                enabled: row.get::<_, i32>(7)? != 0,
+                next_run: row.get(8)?,
+                last_run: row.get(9)?,
+            })
+        })?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            let r = row?;
+            let schedule = crate::scheduler::Schedule::from_db(&r.schedule_type, &r.schedule_data)
+                .unwrap_or(crate::scheduler::Schedule::Interval { every_secs: 3600, jitter: 0.1 });
+            let next_run = r.next_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            let last_run = r.last_run.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            jobs.push(crate::scheduler::Job {
+                id: r.id,
+                name: r.name,
+                schedule,
+                ghost: r.ghost,
+                prompt: r.prompt,
+                target: r.target,
+                enabled: r.enabled,
+                next_run,
+                last_run,
+            });
+        }
+        Ok(jobs)
+    }
+
+    pub fn update_job_run(&self, id: &str, next_run: Option<&str>, last_run: &str, disable: bool) -> Result<()> {
+        let conn = self.conn()?;
+        if disable {
+            conn.execute(
+                "UPDATE scheduled_jobs SET next_run = ?1, last_run = ?2, enabled = 0 WHERE id = ?3",
+                rusqlite::params![next_run, last_run, id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE scheduled_jobs SET next_run = ?1, last_run = ?2 WHERE id = ?3",
+                rusqlite::params![next_run, last_run, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_scheduled_job(&self, id: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let deleted = conn.execute("DELETE FROM scheduled_jobs WHERE id = ?1", rusqlite::params![id])?;
+        Ok(deleted > 0)
+    }
+
+    pub fn toggle_scheduled_job(&self, id: &str, enabled: bool) -> Result<bool> {
+        let conn = self.conn()?;
+        let updated = conn.execute(
+            "UPDATE scheduled_jobs SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled as i32, id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    // --- Relationship tracking ---
+
+    pub fn record_relationship(&self, user_id: &str, message_length: usize) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO relationship_stats (user_id, total_interactions, last_interaction, avg_message_length)
+             VALUES (?1, 1, datetime('now'), ?2)
+             ON CONFLICT(user_id) DO UPDATE SET
+                total_interactions = total_interactions + 1,
+                last_interaction = datetime('now'),
+                avg_message_length = (avg_message_length * total_interactions + ?2) / (total_interactions + 1)",
+            rusqlite::params![user_id, message_length as f64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_relationship(&self, user_id: &str) -> Result<Option<UserRelationship>> {
+        let conn = self.conn()?;
+        match conn.query_row(
+            "SELECT user_id, total_interactions, last_interaction, avg_message_length, warmth_level
+             FROM relationship_stats WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| {
+                Ok(UserRelationship {
+                    user_id: row.get(0)?,
+                    total_interactions: row.get(1)?,
+                    last_interaction: row.get(2)?,
+                    avg_message_length: row.get::<_, f64>(3)? as f32,
+                    warmth_level: row.get::<_, f64>(4)? as f32,
+                })
+            },
+        ) {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AthenaError::Db(e)),
+        }
+    }
+}
+
+struct JobRow {
+    id: String,
+    name: String,
+    schedule_type: String,
+    schedule_data: String,
+    ghost: Option<String>,
+    prompt: String,
+    target: String,
+    enabled: bool,
+    next_run: Option<String>,
+    last_run: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserRelationship {
+    pub user_id: String,
+    pub total_interactions: i64,
+    pub last_interaction: String,
+    pub avg_message_length: f32,
+    pub warmth_level: f32,
 }
 
 /// Exponential time-decay factor: 0.5^(days_old / half_life_days).

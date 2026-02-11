@@ -38,6 +38,40 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (user_id, key)
     );",
+    // v6: scheduled jobs for cron engine
+    "CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        schedule_type TEXT NOT NULL,
+        schedule_data TEXT NOT NULL,
+        ghost TEXT,
+        prompt TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT 'broadcast',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        next_run TEXT,
+        last_run TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_enabled_next ON scheduled_jobs(enabled, next_run);",
+    // v7: relationship stats for tracking user interaction patterns
+    "CREATE TABLE IF NOT EXISTS relationship_stats (
+        user_id TEXT PRIMARY KEY,
+        total_interactions INTEGER NOT NULL DEFAULT 0,
+        last_interaction TEXT NOT NULL DEFAULT (datetime('now')),
+        avg_message_length REAL NOT NULL DEFAULT 0.0,
+        topics_json TEXT NOT NULL DEFAULT '[]',
+        sentiment_avg REAL NOT NULL DEFAULT 0.0,
+        warmth_level REAL NOT NULL DEFAULT 0.5
+    );",
+    // v8: mood state singleton for persistence across restarts
+    "CREATE TABLE IF NOT EXISTS mood_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        energy REAL NOT NULL DEFAULT 0.7,
+        valence REAL NOT NULL DEFAULT 0.0,
+        active_modifier TEXT NOT NULL DEFAULT 'calm',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT OR IGNORE INTO mood_state (id) VALUES (1);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

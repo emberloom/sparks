@@ -238,6 +238,9 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                     .edit_message_text(chat_id, status_msg.id, "An error occurred while processing your request.")
                     .await;
             }
+            CoreEvent::Pulse(p) => {
+                bot.send_message(chat_id, format!("[pulse] {}", p)).await?;
+            }
         }
     }
 

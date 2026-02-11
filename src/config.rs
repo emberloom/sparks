@@ -32,6 +32,14 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub mood: MoodConfig,
+    #[serde(default)]
+    pub proactive: ProactiveConfig,
+    #[serde(default)]
+    pub initiative: InitiativeConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -184,6 +192,100 @@ impl Default for MemoryConfig {
 
 fn default_half_life() -> f32 { 30.0 }
 fn default_dedup_threshold() -> f32 { 0.95 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HeartbeatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_heartbeat_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_heartbeat_jitter")]
+    pub jitter: f64,
+    pub soul_file: Option<String>,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_heartbeat_interval(),
+            jitter: default_heartbeat_jitter(),
+            soul_file: None,
+        }
+    }
+}
+
+fn default_heartbeat_interval() -> u64 { 1800 }
+fn default_heartbeat_jitter() -> f64 { 0.2 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MoodConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub timezone_offset: i32,
+    #[serde(default = "default_mood_drift_interval")]
+    pub drift_interval_secs: u64,
+}
+
+impl Default for MoodConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timezone_offset: 0,
+            drift_interval_secs: default_mood_drift_interval(),
+        }
+    }
+}
+
+fn default_mood_drift_interval() -> u64 { 900 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProactiveConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_memory_scan_interval")]
+    pub memory_scan_interval_secs: u64,
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold_secs: u64,
+    #[serde(default = "default_spontaneity")]
+    pub spontaneity: f32,
+}
+
+impl Default for ProactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            memory_scan_interval_secs: default_memory_scan_interval(),
+            idle_threshold_secs: default_idle_threshold(),
+            spontaneity: default_spontaneity(),
+        }
+    }
+}
+
+fn default_memory_scan_interval() -> u64 { 3600 }
+fn default_idle_threshold() -> u64 { 1800 }
+fn default_spontaneity() -> f32 { 0.3 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct InitiativeConfig {
+    #[serde(default = "default_tolerance")]
+    pub tolerance: f32,
+    pub quiet_hours_start: Option<u32>,
+    pub quiet_hours_end: Option<u32>,
+}
+
+impl Default for InitiativeConfig {
+    fn default() -> Self {
+        Self {
+            tolerance: default_tolerance(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+        }
+    }
+}
+
+fn default_tolerance() -> f32 { 0.5 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
@@ -354,6 +456,10 @@ impl Default for Config {
             telegram: TelegramConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
+            heartbeat: HeartbeatConfig::default(),
+            mood: MoodConfig::default(),
+            proactive: ProactiveConfig::default(),
+            initiative: InitiativeConfig::default(),
         }
     }
 }
