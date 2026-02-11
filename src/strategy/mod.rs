@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::confirm::Confirmer;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
-use crate::llm::OllamaClient;
+use crate::llm::LlmProvider;
 use crate::tools::ToolRegistry;
 
 /// A task contract passed from Manager to Executor
@@ -24,7 +24,7 @@ pub trait LoopStrategy: Send + Sync {
         contract: &TaskContract,
         tools: &ToolRegistry,
         docker: &DockerSession,
-        llm: &OllamaClient,
+        llm: &dyn LlmProvider,
         max_steps: usize,
         sensitive_patterns: &[String],
         confirmer: &dyn Confirmer,

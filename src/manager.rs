@@ -1,25 +1,29 @@
+use std::sync::Arc;
+
 use crate::confirm::Confirmer;
 use crate::config::{AgentConfig, Config};
 use crate::core::SessionContext;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
-use crate::llm::{self, Message, OllamaClient};
+use crate::llm::{self, LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::strategy::TaskContract;
 
 pub struct Manager {
-    llm: OllamaClient,
+    llm: Arc<dyn LlmProvider>,
+    classifier: Arc<dyn LlmProvider>,
     executor: Executor,
     agents: Vec<AgentConfig>,
-    memory: std::sync::Arc<MemoryStore>,
+    memory: Arc<MemoryStore>,
 }
 
 impl Manager {
     pub fn new(
         config: &Config,
         agents: Vec<AgentConfig>,
-        llm: OllamaClient,
-        memory: std::sync::Arc<MemoryStore>,
+        llm: Arc<dyn LlmProvider>,
+        classifier: Arc<dyn LlmProvider>,
+        memory: Arc<MemoryStore>,
     ) -> Self {
         let executor = Executor::new(
             config.docker.clone(),
@@ -29,6 +33,7 @@ impl Manager {
 
         Self {
             llm,
+            classifier,
             executor,
             agents,
             memory,
@@ -66,7 +71,7 @@ impl Manager {
                     constraints: vec![],
                 };
 
-                let result = self.executor.run(&contract, agent, &self.llm, confirmer).await?;
+                let result = self.executor.run(&contract, agent, &*self.llm, confirmer).await?;
 
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;
@@ -105,7 +110,7 @@ Respond with JSON:
             Message::user(user_input),
         ];
 
-        let response = self.llm.chat(&messages).await?;
+        let response = self.classifier.chat(&messages).await?;
 
         // Parse classification
         if let Some(json) = llm::extract_json(&response) {

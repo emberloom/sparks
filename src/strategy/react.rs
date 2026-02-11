@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::confirm::{self, Confirmer};
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
-use crate::llm::{self, Message, OllamaClient};
+use crate::llm::{self, LlmProvider, Message};
 use crate::tools::ToolRegistry;
 
 use super::{LoopStrategy, TaskContract};
@@ -17,7 +17,7 @@ impl LoopStrategy for ReactStrategy {
         contract: &TaskContract,
         tools: &ToolRegistry,
         docker: &DockerSession,
-        llm: &OllamaClient,
+        llm: &dyn LlmProvider,
         max_steps: usize,
         sensitive_patterns: &[String],
         confirmer: &dyn Confirmer,

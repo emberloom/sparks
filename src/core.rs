@@ -4,7 +4,6 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::confirm::Confirmer;
 use crate::error::Result;
-use crate::llm::OllamaClient;
 use crate::manager::Manager;
 use crate::memory::MemoryStore;
 use crate::profiles;
@@ -104,15 +103,26 @@ pub struct AthenaCore;
 
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
-        let llm = OllamaClient::new(config.ollama.clone());
+        let llm = config.build_llm_provider()?;
+        let classifier = config.build_classifier_provider(&llm)?;
 
         // Health check
-        eprint!("Connecting to Ollama... ");
+        eprint!("Connecting to {}... ", llm.provider_name());
         match llm.health_check().await {
-            Ok(()) => eprintln!("ok (model: {})", config.ollama.model),
+            Ok(()) => eprintln!("ok"),
             Err(e) => {
                 eprintln!("failed: {}", e);
                 return Err(e);
+            }
+        }
+        if classifier.provider_name() != llm.provider_name() {
+            eprint!("Connecting to {}... ", classifier.provider_name());
+            match classifier.health_check().await {
+                Ok(()) => eprintln!("ok"),
+                Err(e) => {
+                    eprintln!("failed: {}", e);
+                    return Err(e);
+                }
             }
         }
 
@@ -129,7 +139,7 @@ impl AthenaCore {
             })
             .collect();
 
-        let manager = Arc::new(Manager::new(&config, merged_agents, llm, memory.clone()));
+        let manager = Arc::new(Manager::new(&config, merged_agents, llm, classifier, memory.clone()));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop

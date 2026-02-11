@@ -2,7 +2,7 @@ use crate::confirm::Confirmer;
 use crate::config::{AgentConfig, DockerConfig};
 use crate::docker::DockerSession;
 use crate::error::Result;
-use crate::llm::OllamaClient;
+use crate::llm::LlmProvider;
 use crate::strategy::{self, TaskContract};
 use crate::tools::ToolRegistry;
 
@@ -22,7 +22,7 @@ impl Executor {
         &self,
         contract: &TaskContract,
         agent: &AgentConfig,
-        llm: &OllamaClient,
+        llm: &dyn LlmProvider,
         confirmer: &dyn Confirmer,
     ) -> Result<String> {
         tracing::info!(agent = %agent.name, goal = %contract.goal, "Starting executor");

@@ -1,9 +1,23 @@
+use std::time::Instant;
+
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::OllamaConfig;
 use crate::error::{AthenaError, Result};
+
+// ---------------------------------------------------------------------------
+// Provider trait
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+pub trait LlmProvider: Send + Sync {
+    async fn chat(&self, messages: &[Message]) -> Result<String>;
+    async fn health_check(&self) -> Result<()>;
+    fn provider_name(&self) -> &str;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,27 +47,35 @@ impl Message {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ollama-specific request/response types
+// ---------------------------------------------------------------------------
+
 #[derive(Serialize)]
-struct ChatRequest {
+struct OllamaChatRequest {
     model: String,
     messages: Vec<Message>,
     stream: bool,
-    options: ChatOptions,
+    options: OllamaChatOptions,
 }
 
 #[derive(Serialize)]
-struct ChatOptions {
+struct OllamaChatOptions {
     temperature: f32,
     num_predict: u32,
 }
 
 #[derive(Deserialize)]
-struct ChatResponse {
-    message: ChatResponseMessage,
+struct OllamaChatResponse {
+    message: OllamaChatResponseMessage,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
-struct ChatResponseMessage {
+struct OllamaChatResponseMessage {
     content: String,
 }
 
@@ -69,37 +91,56 @@ impl OllamaClient {
             config,
         }
     }
+}
 
-    /// Send a chat completion request
-    pub async fn chat(&self, messages: &[Message]) -> Result<String> {
-        let req = ChatRequest {
+#[async_trait]
+impl LlmProvider for OllamaClient {
+    async fn chat(&self, messages: &[Message]) -> Result<String> {
+        tracing::info!(
+            provider = "Ollama",
+            model = %self.config.model,
+            messages = messages.len(),
+            "LLM request"
+        );
+
+        let req = OllamaChatRequest {
             model: self.config.model.clone(),
             messages: messages.to_vec(),
             stream: false,
-            options: ChatOptions {
+            options: OllamaChatOptions {
                 temperature: self.config.temperature,
                 num_predict: self.config.max_tokens,
             },
         };
 
+        let start = Instant::now();
         let resp = self.client
             .post(format!("{}/api/chat", self.config.url))
             .json(&req)
             .send()
             .await?;
+        let latency = start.elapsed();
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            tracing::error!(provider = "Ollama", %status, "LLM error");
             return Err(AthenaError::Llm(format!("Ollama returned {}: {}", status, body)));
         }
 
-        let chat_resp: ChatResponse = resp.json().await?;
+        let chat_resp: OllamaChatResponse = resp.json().await?;
+        tracing::info!(
+            provider = "Ollama",
+            latency_ms = latency.as_millis() as u64,
+            prompt_tokens = chat_resp.prompt_eval_count,
+            completion_tokens = chat_resp.eval_count,
+            response_len = chat_resp.message.content.len(),
+            "LLM response"
+        );
         Ok(chat_resp.message.content)
     }
 
-    /// Check if Ollama is reachable and the model is available
-    pub async fn health_check(&self) -> Result<()> {
+    async fn health_check(&self) -> Result<()> {
         let resp = self.client
             .get(format!("{}/api/tags", self.config.url))
             .send()
@@ -128,7 +169,153 @@ impl OllamaClient {
 
         Ok(())
     }
+
+    fn provider_name(&self) -> &str {
+        "Ollama"
+    }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible client (OpenRouter, Opencode Zen, etc.)
+// ---------------------------------------------------------------------------
+
+pub struct OpenAiCompatibleConfig {
+    pub url: String,
+    pub api_key: String,
+    pub model: String,
+    pub temperature: f32,
+    pub max_tokens: u32,
+}
+
+pub struct OpenAiCompatibleClient {
+    client: Client,
+    config: OpenAiCompatibleConfig,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatRequest {
+    model: String,
+    messages: Vec<Message>,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Deserialize)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenAiMessage {
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
+impl OpenAiCompatibleClient {
+    pub fn new(config: OpenAiCompatibleConfig, name: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            config,
+            name: name.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatibleClient {
+    async fn chat(&self, messages: &[Message]) -> Result<String> {
+        tracing::info!(
+            provider = %self.name,
+            model = %self.config.model,
+            messages = messages.len(),
+            "LLM request"
+        );
+
+        let req = OpenAiChatRequest {
+            model: self.config.model.clone(),
+            messages: messages.to_vec(),
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+        };
+
+        let start = Instant::now();
+        let resp = self.client
+            .post(format!("{}/chat/completions", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .json(&req)
+            .send()
+            .await?;
+        let latency = start.elapsed();
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!(provider = %self.name, %status, "LLM error");
+            return Err(AthenaError::Llm(format!("{} returned {}: {}", self.name, status, body)));
+        }
+
+        let chat_resp: OpenAiChatResponse = resp.json().await?;
+        let (prompt_tok, completion_tok) = chat_resp.usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
+        let resolved_model = chat_resp.model.as_deref().unwrap_or(&self.config.model);
+        tracing::info!(
+            provider = %self.name,
+            model = resolved_model,
+            latency_ms = latency.as_millis() as u64,
+            prompt_tokens = prompt_tok,
+            completion_tokens = completion_tok,
+            "LLM response"
+        );
+
+        let content = chat_resp.choices.into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| AthenaError::Llm(format!("{} returned empty choices", self.name)))?;
+        Ok(content)
+    }
+
+    async fn health_check(&self) -> Result<()> {
+        let resp = self.client
+            .get(format!("{}/models", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|e| AthenaError::Llm(format!("Cannot reach {} at {}: {}", self.name, self.config.url, e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AthenaError::Llm(format!("{} health check failed ({}): {}", self.name, status, body)));
+        }
+
+        Ok(())
+    }
+
+    fn provider_name(&self) -> &str {
+        &self.name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON extraction helpers
+// ---------------------------------------------------------------------------
 
 /// Sanitize common LLM JSON errors:
 /// - \' → ' (invalid JSON escape, common in shell-influenced output)
