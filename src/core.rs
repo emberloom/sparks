@@ -42,9 +42,9 @@ struct CoreRequest {
     event_tx: mpsc::Sender<CoreEvent>,
 }
 
-/// Info about a configured agent (returned by list_agents).
+/// Info about a configured ghost (returned by list_ghosts).
 #[derive(Debug, Clone)]
-pub struct AgentInfo {
+pub struct GhostInfo {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
@@ -63,7 +63,7 @@ pub struct MemoryInfo {
 #[derive(Clone)]
 pub struct CoreHandle {
     tx: mpsc::Sender<CoreRequest>,
-    agents: Arc<Vec<AgentInfo>>,
+    ghosts: Arc<Vec<GhostInfo>>,
     memory: Arc<MemoryStore>,
 }
 
@@ -88,8 +88,8 @@ impl CoreHandle {
         Ok(event_rx)
     }
 
-    pub fn list_agents(&self) -> Vec<AgentInfo> {
-        self.agents.as_ref().clone()
+    pub fn list_ghosts(&self) -> Vec<GhostInfo> {
+        self.ghosts.as_ref().clone()
     }
 
     pub fn list_memories(&self) -> Result<Vec<MemoryInfo>> {
@@ -161,16 +161,16 @@ impl AthenaCore {
             });
         }
 
-        // Merge config agents with ~/.athena/agents/*.toml profiles
-        let merged_agents = profiles::load_agents(&config)?;
+        // Merge config ghosts with ~/.athena/ghosts/*.toml profiles
+        let merged_ghosts = profiles::load_ghosts(&config)?;
 
-        let agents: Vec<AgentInfo> = merged_agents
+        let ghosts: Vec<GhostInfo> = merged_ghosts
             .iter()
-            .map(|a| AgentInfo {
-                name: a.name.clone(),
-                description: a.description.clone(),
-                tools: a.tools.clone(),
-                strategy: a.strategy.clone(),
+            .map(|g| GhostInfo {
+                name: g.name.clone(),
+                description: g.description.clone(),
+                tools: g.tools.clone(),
+                strategy: g.strategy.clone(),
             })
             .collect();
 
@@ -190,8 +190,9 @@ impl AthenaCore {
             });
         }
 
+        let persona_soul = config.persona.soul.clone();
         let manager = Arc::new(Manager::new(
-            &config, merged_agents, llm, classifier, memory.clone(), embedder,
+            &config, merged_ghosts, llm, classifier, memory.clone(), embedder, persona_soul,
         ));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
@@ -229,7 +230,7 @@ impl AthenaCore {
 
         Ok(CoreHandle {
             tx,
-            agents: Arc::new(agents),
+            ghosts: Arc::new(ghosts),
             memory,
         })
     }

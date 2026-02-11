@@ -23,7 +23,9 @@ pub struct Config {
     #[serde(default)]
     pub manager: ManagerConfig,
     #[serde(default)]
-    pub agents: Vec<AgentConfig>,
+    pub ghosts: Vec<GhostConfig>,
+    #[serde(default)]
+    pub persona: PersonaConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
@@ -227,7 +229,7 @@ pub struct ManagerConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct AgentConfig {
+pub struct GhostConfig {
     pub name: String,
     pub description: String,
     #[serde(default)]
@@ -236,6 +238,20 @@ pub struct AgentConfig {
     pub mounts: Vec<MountConfig>,
     #[serde(default = "default_strategy")]
     pub strategy: String,
+    /// Path to a soul file (markdown identity document)
+    pub soul_file: Option<String>,
+    /// Runtime-loaded soul content (not serialized)
+    #[serde(skip)]
+    pub soul: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PersonaConfig {
+    /// Path to Athena's soul file
+    pub soul_file: Option<String>,
+    /// Runtime-loaded soul content (not serialized)
+    #[serde(skip)]
+    pub soul: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -333,7 +349,8 @@ impl Default for Config {
             docker: DockerConfig::default(),
             db: DbConfig::default(),
             manager: ManagerConfig::default(),
-            agents: default_agents(),
+            ghosts: default_ghosts(),
+            persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
@@ -341,9 +358,9 @@ impl Default for Config {
     }
 }
 
-fn default_agents() -> Vec<AgentConfig> {
+fn default_ghosts() -> Vec<GhostConfig> {
     vec![
-        AgentConfig {
+        GhostConfig {
             name: "coder".into(),
             description: "Reads, writes, and modifies code files. Can run build/test commands.".into(),
             tools: vec!["file_read".into(), "file_write".into(), "shell".into()],
@@ -353,8 +370,10 @@ fn default_agents() -> Vec<AgentConfig> {
                 read_only: false,
             }],
             strategy: "react".into(),
+            soul_file: None,
+            soul: None,
         },
-        AgentConfig {
+        GhostConfig {
             name: "scout".into(),
             description: "Explores files and runs read-only commands. Cannot modify anything.".into(),
             tools: vec!["file_read".into(), "shell".into()],
@@ -364,6 +383,8 @@ fn default_agents() -> Vec<AgentConfig> {
                 read_only: true,
             }],
             strategy: "react".into(),
+            soul_file: None,
+            soul: None,
         },
     ]
 }
@@ -393,11 +414,36 @@ impl Config {
         let contents = std::fs::read_to_string(&config_path)
             .map_err(|e| AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e)))?;
 
-        let config: Config = toml::from_str(&contents)
+        let mut config: Config = toml::from_str(&contents)
             .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
 
         config.validate();
+        config.load_souls();
         Ok(config)
+    }
+
+    /// Load soul file contents for persona and all ghosts
+    fn load_souls(&mut self) {
+        if let Some(ref path) = self.persona.soul_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded persona soul from {}", path);
+                    self.persona.soul = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load persona soul {}: {}", path, e),
+            }
+        }
+        for ghost in &mut self.ghosts {
+            if let Some(ref path) = ghost.soul_file {
+                match load_soul_file(path) {
+                    Ok(content) => {
+                        tracing::info!("Loaded soul for ghost '{}' from {}", ghost.name, path);
+                        ghost.soul = Some(content);
+                    }
+                    Err(e) => tracing::warn!("Failed to load soul for ghost '{}' from {}: {}", ghost.name, path, e),
+                }
+            }
+        }
     }
 
     /// Warn about potentially insecure configuration
@@ -563,4 +609,17 @@ impl Config {
             host_path.into()
         }
     }
+}
+
+/// Resolve a path (expanding ~) and read the file contents.
+fn load_soul_file(path: &str) -> std::result::Result<String, String> {
+    let resolved = if path.starts_with("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(&path[2..]))
+            .ok_or_else(|| "Cannot find home directory".to_string())?
+    } else {
+        PathBuf::from(path)
+    };
+    std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("{}: {}", resolved.display(), e))
 }

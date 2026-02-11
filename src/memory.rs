@@ -445,6 +445,35 @@ impl MemoryStore {
         )?;
         Ok(deleted)
     }
+
+    /// Get all profile key-value pairs for a user.
+    pub fn get_user_profile(&self, user_id: &str) -> Result<HashMap<String, String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT key, value FROM user_profiles WHERE user_id = ?1"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut profile = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            profile.insert(k, v);
+        }
+        Ok(profile)
+    }
+
+    /// Upsert a single key-value pair in a user's profile.
+    pub fn set_user_profile(&self, user_id: &str, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, key, value, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![user_id, key, value],
+        )?;
+        Ok(())
+    }
 }
 
 /// Exponential time-decay factor: 0.5^(days_old / half_life_days).
@@ -528,7 +557,14 @@ mod tests {
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);"
+            CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, key)
+            );"
         ).unwrap();
         MemoryStore::new(conn, half_life, dedup_threshold)
     }

@@ -121,21 +121,21 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
     if text == "/start" || text == "/help" {
         bot.send_message(
             chat_id,
-            "Send me a message and I'll process it. Use /agents to list agents, /memories to list memories.",
+            "Send me a message and I'll process it. Use /ghosts to list ghosts, /memories to list memories.",
         )
         .await?;
         return Ok(());
     }
 
-    if text == "/agents" {
-        let agents = state.handle.list_agents();
-        let mut out = String::from("Configured agents:\n\n");
-        for a in &agents {
+    if text == "/ghosts" {
+        let ghosts = state.handle.list_ghosts();
+        let mut out = String::from("Active ghosts:\n\n");
+        for g in &ghosts {
             out.push_str(&format!(
                 "- {} — {} [{}]\n",
-                a.name,
-                a.description,
-                a.tools.join(", ")
+                g.name,
+                g.description,
+                g.tools.join(", ")
             ));
         }
         bot.send_message(chat_id, &out).await?;
@@ -361,7 +361,7 @@ pub async fn run_telegram(handle: CoreHandle, config: TelegramConfig) -> anyhow:
     // Register bot commands menu (the "/" button in Telegram)
     let commands = vec![
         BotCommand::new("help", "Show available commands"),
-        BotCommand::new("agents", "List configured agents"),
+        BotCommand::new("ghosts", "List active ghosts"),
         BotCommand::new("memories", "List saved memories"),
     ];
     bot.set_my_commands(commands)

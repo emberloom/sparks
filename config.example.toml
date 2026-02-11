@@ -10,7 +10,7 @@ max_tokens = 4096
 
 # Uncomment to use OpenRouter (set OPENROUTER_API_KEY env or api_key below)
 # [openrouter]
-# model = "google/gemini-2.5-flash"                # agent/ReAct loop
+# model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
 # url = "https://openrouter.ai/api/v1"
 # api_key = ""
@@ -44,24 +44,33 @@ max_steps = 15
 # Sensitive patterns have comprehensive defaults — uncomment to override:
 # sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
 
-[[agents]]
+# Athena's persona — soul file is a freeform markdown identity document
+# loaded at startup and injected as the first section of the manager's system prompt.
+[persona]
+# soul_file = "~/.athena/souls/athena.md"
+
+# Ghosts are sub-agents that execute tasks inside Docker containers.
+# Each ghost can have its own soul file for personality/identity.
+[[ghosts]]
 name = "coder"
 description = "Reads, writes, and modifies code files. Can run build/test commands."
 tools = ["file_read", "file_write", "shell"]
 strategy = "react"
+# soul_file = "~/.athena/souls/coder.md"
 
-[[agents.mounts]]
+[[ghosts.mounts]]
 host_path = "."
 container_path = "/workspace"
 read_only = false
 
-[[agents]]
+[[ghosts]]
 name = "scout"
 description = "Explores files and runs read-only commands. Cannot modify anything."
 tools = ["file_read", "shell"]
 strategy = "react"
+# soul_file = "~/.athena/souls/scout.md"
 
-[[agents.mounts]]
+[[ghosts.mounts]]
 host_path = "."
 container_path = "/workspace"
 read_only = true

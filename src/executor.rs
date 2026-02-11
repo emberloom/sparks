@@ -1,5 +1,5 @@
 use crate::confirm::{Confirmer, SensitivePatterns};
-use crate::config::{AgentConfig, DockerConfig};
+use crate::config::{GhostConfig, DockerConfig};
 use crate::docker::DockerSession;
 use crate::error::Result;
 use crate::llm::LlmProvider;
@@ -18,20 +18,20 @@ impl Executor {
         Self { docker_config, max_steps, sensitive_patterns: compiled }
     }
 
-    /// Run a task contract using the specified agent
+    /// Run a task contract using the specified ghost
     pub async fn run(
         &self,
         contract: &TaskContract,
-        agent: &AgentConfig,
+        ghost: &GhostConfig,
         llm: &dyn LlmProvider,
         confirmer: &dyn Confirmer,
     ) -> Result<String> {
-        tracing::info!(agent = %agent.name, goal = %contract.goal, "Starting executor");
+        tracing::info!(ghost = %ghost.name, goal = %contract.goal, "Starting executor");
 
         // Create session-scoped container
-        let session = DockerSession::new(agent, &self.docker_config).await?;
-        let tools = ToolRegistry::for_agent(agent);
-        let strategy = strategy::strategy_from_config(&agent.strategy)?;
+        let session = DockerSession::new(ghost, &self.docker_config).await?;
+        let tools = ToolRegistry::for_ghost(ghost);
+        let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
         // Run the strategy loop
         let result = strategy.run(
@@ -51,11 +51,11 @@ impl Executor {
 
         match result {
             Ok(output) => {
-                tracing::info!(agent = %agent.name, "Task completed");
+                tracing::info!(ghost = %ghost.name, "Task completed");
                 Ok(output)
             }
             Err(e) => {
-                tracing::error!(agent = %agent.name, error = %e, "Task failed");
+                tracing::error!(ghost = %ghost.name, error = %e, "Task failed");
                 Err(e)
             }
         }

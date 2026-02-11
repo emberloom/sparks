@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::config::AgentConfig;
+use crate::config::GhostConfig;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 
@@ -172,8 +172,8 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Build a registry scoped to an agent's allowed tools
-    pub fn for_agent(agent: &AgentConfig) -> Self {
+    /// Build a registry scoped to a ghost's allowed tools
+    pub fn for_ghost(ghost: &GhostConfig) -> Self {
         let all_tools: Vec<Box<dyn Tool>> = vec![
             Box::new(ShellTool),
             Box::new(FileReadTool),
@@ -182,7 +182,7 @@ impl ToolRegistry {
 
         let tools: HashMap<String, Box<dyn Tool>> = all_tools
             .into_iter()
-            .filter(|t| agent.tools.contains(&t.name().to_string()))
+            .filter(|t| ghost.tools.contains(&t.name().to_string()))
             .map(|t| (t.name().to_string(), t))
             .collect();
 

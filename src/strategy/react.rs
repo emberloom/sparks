@@ -117,8 +117,13 @@ fn build_system_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String 
             .join("\n")
     };
 
+    let soul_section = match &contract.soul {
+        Some(soul) => format!("{}\n\n", soul),
+        None => String::new(),
+    };
+
     format!(
-r#"You are an autonomous agent executing a task inside a Docker container.
+r#"{}You are an autonomous agent executing a task inside a Docker container.
 
 CONTEXT: {}
 
@@ -135,6 +140,7 @@ INSTRUCTIONS:
 - When you have the answer, respond with plain text (no JSON).
 - Be concise and efficient. Minimize the number of tool calls.
 - If a tool call fails, try a different approach."#,
+        soul_section,
         contract.context,
         tools.descriptions(),
         constraints,

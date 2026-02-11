@@ -8,7 +8,7 @@ use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
 
-use crate::config::{AgentConfig, Config, DockerConfig};
+use crate::config::{GhostConfig, Config, DockerConfig};
 use crate::error::{AthenaError, Result};
 
 pub struct DockerSession {
@@ -18,9 +18,9 @@ pub struct DockerSession {
 }
 
 impl DockerSession {
-    /// Create and start a hardened container for an agent task
+    /// Create and start a hardened container for a ghost task
     pub async fn new(
-        agent: &AgentConfig,
+        ghost: &GhostConfig,
         docker_config: &DockerConfig,
     ) -> Result<Self> {
         let docker = Docker::connect_with_socket(
@@ -30,7 +30,7 @@ impl DockerSession {
         )?;
 
         // Build mounts
-        let mounts: Vec<Mount> = agent.mounts.iter().map(|m| {
+        let mounts: Vec<Mount> = ghost.mounts.iter().map(|m| {
             let host = Config::resolve_mount_path(&m.host_path);
             Mount {
                 target: Some(m.container_path.clone()),
@@ -57,14 +57,14 @@ impl DockerSession {
             ..Default::default()
         };
 
-        let container_name = format!("athena-{}-{}", agent.name, uuid::Uuid::new_v4().simple());
+        let container_name = format!("athena-{}-{}", ghost.name, uuid::Uuid::new_v4().simple());
 
         let config = ContainerConfig {
             image: Some(docker_config.image.clone()),
             user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             working_dir: Some(
-                agent.mounts.first()
+                ghost.mounts.first()
                     .map(|m| m.container_path.clone())
                     .unwrap_or_else(|| "/".into())
             ),
@@ -83,7 +83,7 @@ impl DockerSession {
             .start_container(&resp.id, None::<StartContainerOptions<String>>)
             .await?;
 
-        tracing::info!(container_id = %resp.id, agent = %agent.name, "Container started");
+        tracing::info!(container_id = %resp.id, ghost = %ghost.name, "Container started");
 
         Ok(Self {
             docker,

@@ -30,6 +30,14 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);",
+    // v5: user profiles — key-value store per user for cross-session context
+    "CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id, key)
+    );",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {
@@ -42,7 +50,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
 
     // Enable WAL mode for better concurrency
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
 
     run_migrations(&conn)?;
 
@@ -84,7 +92,23 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             continue;
         }
         tracing::info!("Running database migration v{}", version);
-        conn.execute_batch(migration)?;
+        // Run each statement individually — execute_batch chokes on
+        // statements that return results (e.g. INSERT...SELECT).
+        for stmt in migration.split(';') {
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            tracing::debug!("  Running: {}", &stmt[..stmt.len().min(80)]);
+            // Use execute() for DML (INSERT/UPDATE/DELETE) since execute_batch
+            // fails on statements that return results.
+            let upper = stmt.to_uppercase();
+            if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE") {
+                conn.execute(stmt, [])?;
+            } else {
+                conn.execute_batch(&format!("{};", stmt))?;
+            }
+        }
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
             [version],

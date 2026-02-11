@@ -50,8 +50,8 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
-    /// List configured agents
-    Agents,
+    /// List configured ghosts
+    Ghosts,
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
@@ -125,11 +125,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Memory { action }) => handle_memory(action, &memory, embedder.as_ref())?,
-        Some(Commands::Agents) => {
-            // Start core to get merged agent list (config + profiles)
+        Some(Commands::Ghosts) => {
+            // Start core to get merged ghost list (config + profiles)
             let handle = AthenaCore::start(config, memory).await?;
-            for a in handle.list_agents() {
-                println!("  {} — {} [{}]", a.name, a.description, a.tools.join(", "));
+            for g in handle.list_ghosts() {
+                println!("  {} — {} [{}]", g.name, g.description, g.tools.join(", "));
             }
         }
         #[cfg(feature = "telegram")]
@@ -229,19 +229,19 @@ async fn run_chat(
             "/quit" | "/exit" | "/q" => break,
             "/help" | "/h" => {
                 println!("Commands:");
-                println!("  /agents    — List configured agents");
+                println!("  /ghosts    — List active ghosts");
                 println!("  /memories  — List saved memories");
                 println!("  /help      — This help");
                 println!("  /quit      — Exit");
                 continue;
             }
-            "/agents" => {
-                for a in handle.list_agents() {
+            "/ghosts" => {
+                for g in handle.list_ghosts() {
                     println!(
                         "  {} — {} [{}]",
-                        a.name,
-                        a.description,
-                        a.tools.join(", ")
+                        g.name,
+                        g.description,
+                        g.tools.join(", ")
                     );
                 }
                 continue;
