@@ -361,6 +361,11 @@ pub struct PersonaConfig {
     /// Runtime-loaded self-knowledge content (not serialized)
     #[serde(skip)]
     pub self_knowledge: Option<String>,
+    /// Path to tool reference document (injected into ghost system prompts)
+    pub tools_file: Option<String>,
+    /// Runtime-loaded tools document content (not serialized)
+    #[serde(skip)]
+    pub tools_doc: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -557,6 +562,15 @@ impl Config {
                 Err(e) => tracing::warn!("Failed to load self-knowledge {}: {}", path, e),
             }
         }
+        if let Some(ref path) = self.persona.tools_file {
+            match load_soul_file(path) {
+                Ok(content) => {
+                    tracing::info!("Loaded tools reference from {}", path);
+                    self.persona.tools_doc = Some(content);
+                }
+                Err(e) => tracing::warn!("Failed to load tools reference {}: {}", path, e),
+            }
+        }
         for ghost in &mut self.ghosts {
             if let Some(ref path) = ghost.soul_file {
                 match load_soul_file(path) {
@@ -636,8 +650,8 @@ impl Config {
         }
     }
 
-    /// Build the classifier LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_classifier_provider(&self, fallback: &Arc<dyn LlmProvider>) -> Result<Arc<dyn LlmProvider>> {
+    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
+    pub fn build_orchestrator_provider(&self, fallback: &Arc<dyn LlmProvider>) -> Result<Arc<dyn LlmProvider>> {
         match self.llm.provider.as_str() {
             "ollama" => {
                 match &self.ollama.classifier_model {
@@ -664,7 +678,7 @@ impl Config {
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
                             },
-                            "OpenRouter/classifier",
+                            "OpenRouter/orchestrator",
                         )))
                     }
                     None => Ok(fallback.clone()),
@@ -685,7 +699,7 @@ impl Config {
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
                             },
-                            "Zen/classifier",
+                            "Zen/orchestrator",
                         )))
                     }
                     None => Ok(fallback.clone()),

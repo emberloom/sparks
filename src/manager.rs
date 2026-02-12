@@ -14,13 +14,14 @@ use crate::strategy::TaskContract;
 
 pub struct Manager {
     llm: Arc<dyn LlmProvider>,
-    classifier: Arc<dyn LlmProvider>,
+    orchestrator: Arc<dyn LlmProvider>,
     executor: Executor,
     ghosts: Vec<GhostConfig>,
     memory: Arc<MemoryStore>,
     embedder: Option<Arc<Embedder>>,
     persona_soul: Option<String>,
     self_knowledge: Option<String>,
+    tools_doc: Option<String>,
     mood: Arc<MoodState>,
     knobs: SharedKnobs,
 }
@@ -30,11 +31,12 @@ impl Manager {
         config: &Config,
         ghosts: Vec<GhostConfig>,
         llm: Arc<dyn LlmProvider>,
-        classifier: Arc<dyn LlmProvider>,
+        orchestrator: Arc<dyn LlmProvider>,
         memory: Arc<MemoryStore>,
         embedder: Option<Arc<Embedder>>,
         persona_soul: Option<String>,
         self_knowledge: Option<String>,
+        tools_doc: Option<String>,
         mood: Arc<MoodState>,
         knobs: SharedKnobs,
     ) -> Self {
@@ -46,13 +48,14 @@ impl Manager {
 
         Self {
             llm,
-            classifier,
+            orchestrator,
             executor,
             ghosts,
             memory,
             embedder,
             persona_soul,
             self_knowledge,
+            tools_doc,
             mood,
             knobs,
         }
@@ -75,7 +78,7 @@ impl Manager {
         let session_key = session.session_key();
 
         // Get recent conversation context BEFORE saving current turn
-        let recent = self.memory.recent_turns(&session_key, 3).unwrap_or_default();
+        let recent = self.memory.recent_turns(&session_key, 20).unwrap_or_default();
 
         // Save user turn
         if let Err(e) = self.memory.save_turn(&session_key, "user", user_input) {
@@ -175,10 +178,10 @@ impl Manager {
             }
         };
 
-        // Classify the request
+        // Classify the request (pass conversation history for context)
         let classification = self.classify(
             user_input, &memory_context, &user_context_section,
-            &mood_section, &relationship_section,
+            &mood_section, &relationship_section, &recent,
         ).await?;
 
         let answer = match classification {
@@ -195,6 +198,7 @@ impl Manager {
                     goal,
                     constraints: vec![],
                     soul: ghost.soul.clone(),
+                    tools_doc: self.tools_doc.clone(),
                 };
 
                 let result = self.executor.run(&contract, ghost, &*self.llm, confirmer).await?;
@@ -217,11 +221,20 @@ impl Manager {
     async fn classify(
         &self, user_input: &str, memory_context: &str, user_context: &str,
         mood_section: &str, relationship_section: &str,
+        recent_turns: &[(String, String)],
     ) -> Result<Classification> {
         let ghost_list: String = self.ghosts.iter()
             .map(|g| format!("- {} — {}", g.name, g.description))
             .collect::<Vec<_>>()
             .join("\n");
+
+        // Collect unique tool names across all ghosts for the prompt
+        let mut all_tools: Vec<String> = self.ghosts.iter()
+            .flat_map(|g| g.tools.iter().cloned())
+            .collect();
+        all_tools.sort();
+        all_tools.dedup();
+        let tool_list = all_tools.join(", ");
 
         let persona_section = match &self.persona_soul {
             Some(soul) => format!("{}\n\n", soul),
@@ -236,6 +249,9 @@ impl Manager {
         let system = format!(
 r#"{}{}You are a manager that classifies user requests and delegates tasks.
 When answering simple questions directly, stay in character — use the personality and tone from your soul document above. You know the user personally; use their profile to give personal, contextual answers.
+
+YOUR TOOL SYSTEM: You operate through specialized tools, NOT Unix commands. Your tools are: {}
+Each ghost below has a subset of these tools. When asked about your capabilities or tools, list ONLY these. Never mention Unix commands like curl, wget, ls, cat, etc. — those are internal implementation details, not your tools.
 
 Available ghosts:
 {}
@@ -254,6 +270,7 @@ Respond with JSON:
 - Complex: {{"type": "complex", "ghost": "<ghost_name>", "goal": "<clear goal for ghost>", "context": "<relevant context>"}}"#,
             persona_section,
             self_knowledge_section,
+            tool_list,
             ghost_list,
             memory_context,
             user_context,
@@ -261,12 +278,18 @@ Respond with JSON:
             relationship_section,
         );
 
-        let messages = vec![
-            Message::system(&system),
-            Message::user(user_input),
-        ];
+        // Build message list: system prompt, then recent conversation history, then current input
+        let mut messages = vec![Message::system(&system)];
+        for (role, content) in recent_turns {
+            match role.as_str() {
+                "user" => messages.push(Message::user(content)),
+                "assistant" => messages.push(Message::assistant(content)),
+                _ => {}
+            }
+        }
+        messages.push(Message::user(user_input));
 
-        let response = self.classifier.chat(&messages).await?;
+        let response = self.orchestrator.chat(&messages).await?;
 
         // Parse classification
         if let Some(json) = llm::extract_json(&response) {

@@ -16,6 +16,8 @@ pub struct TaskContract {
     pub constraints: Vec<String>,
     /// Ghost soul — identity document prepended to the system prompt
     pub soul: Option<String>,
+    /// Tool reference document — detailed usage guide injected into system prompt
+    pub tools_doc: Option<String>,
 }
 
 /// Pluggable execution loop strategy

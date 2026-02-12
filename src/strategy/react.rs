@@ -122,13 +122,18 @@ fn build_system_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String 
         None => String::new(),
     };
 
+    let tools_section = match &contract.tools_doc {
+        Some(doc) => format!("\n\nTOOL REFERENCE:\n{}", doc),
+        None => String::new(),
+    };
+
     format!(
 r#"{}You are an autonomous agent executing a task inside a Docker container.
 
 CONTEXT: {}
 
 AVAILABLE TOOLS:
-{}
+{}{}
 
 CONSTRAINTS:
 {}
@@ -143,6 +148,7 @@ INSTRUCTIONS:
         soul_section,
         contract.context,
         tools.descriptions(),
+        tools_section,
         constraints,
     )
 }

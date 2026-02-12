@@ -184,8 +184,27 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "telegram")]
         Some(Commands::Telegram) => {
+            let system_info = telegram::SystemInfo {
+                provider: config.llm.provider.clone(),
+                model: match config.llm.provider.as_str() {
+                    "openrouter" => config.openrouter.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
+                    "zen" => config.zen.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
+                    _ => config.ollama.model.clone(),
+                },
+                temperature: match config.llm.provider.as_str() {
+                    "openrouter" => config.openrouter.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    _ => config.ollama.temperature,
+                },
+                max_tokens: match config.llm.provider.as_str() {
+                    "openrouter" => config.openrouter.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    _ => config.ollama.max_tokens,
+                },
+                started_at: tokio::time::Instant::now(),
+            };
             let handle = AthenaCore::start(config.clone(), memory).await?;
-            telegram::run_telegram(handle, config.telegram).await?;
+            telegram::run_telegram(handle, config.telegram, system_info).await?;
         }
         Some(Commands::Observe) => unreachable!(), // handled above
         Some(Commands::Jobs { action }) => {

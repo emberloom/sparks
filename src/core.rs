@@ -74,7 +74,7 @@ pub struct MemoryInfo {
 pub struct CoreHandle {
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Arc<Vec<GhostInfo>>,
-    memory: Arc<MemoryStore>,
+    pub memory: Arc<MemoryStore>,
     pub knobs: SharedKnobs,
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
@@ -128,7 +128,7 @@ pub struct AthenaCore;
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
         let llm = config.build_llm_provider()?;
-        let classifier = config.build_classifier_provider(&llm)?;
+        let orchestrator = config.build_orchestrator_provider(&llm)?;
 
         // Health check
         eprint!("Connecting to {}... ", llm.provider_name());
@@ -139,9 +139,9 @@ impl AthenaCore {
                 return Err(e);
             }
         }
-        if classifier.provider_name() != llm.provider_name() {
-            eprint!("Connecting to {}... ", classifier.provider_name());
-            match classifier.health_check().await {
+        if orchestrator.provider_name() != llm.provider_name() {
+            eprint!("Connecting to {}... ", orchestrator.provider_name());
+            match orchestrator.health_check().await {
                 Ok(()) => eprintln!("ok"),
                 Err(e) => {
                     eprintln!("failed: {}", e);
@@ -300,9 +300,10 @@ impl AthenaCore {
 
         let persona_soul = config.persona.soul.clone();
         let self_knowledge = config.persona.self_knowledge.clone();
+        let tools_doc = config.persona.tools_doc.clone();
         let manager = Arc::new(Manager::new(
-            &config, merged_ghosts, llm, classifier, memory.clone(), embedder, persona_soul,
-            self_knowledge, mood.clone(), knobs.clone(),
+            &config, merged_ghosts, llm, orchestrator, memory.clone(), embedder, persona_soul,
+            self_knowledge, tools_doc, mood.clone(), knobs.clone(),
         ));
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
