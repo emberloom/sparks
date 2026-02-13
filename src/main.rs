@@ -485,11 +485,30 @@ async fn run_chat(
             }
         };
 
+        let mut streaming = false;
         while let Some(event) = events.recv().await {
             match event {
                 CoreEvent::Status(s) => eprintln!("  {}", s),
-                CoreEvent::Response(r) => println!("\n{}\n", r),
+                CoreEvent::StreamChunk(chunk) => {
+                    use std::io::Write;
+                    if !streaming {
+                        streaming = true;
+                        print!("\n");
+                    }
+                    print!("{}", chunk);
+                    let _ = std::io::stdout().flush();
+                }
+                CoreEvent::Response(r) => {
+                    if streaming {
+                        println!("\n");
+                    } else {
+                        println!("\n{}\n", r);
+                    }
+                }
                 CoreEvent::Error(e) => {
+                    if streaming {
+                        println!();
+                    }
                     if e.contains("cancelled") {
                         println!("Action cancelled.");
                     } else {

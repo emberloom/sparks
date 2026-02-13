@@ -5,14 +5,15 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::confirm::Confirmer;
+use crate::core::CoreEvent;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::llm::LlmProvider;
 use crate::tools::ToolRegistry;
 
-/// Channel for sending status updates to the frontend (Telegram, etc.)
-pub type StatusSender = mpsc::Sender<String>;
+/// Channel for sending core events (status, stream chunks) to the frontend.
+pub type StatusSender = mpsc::Sender<CoreEvent>;
 
 /// A task contract passed from Manager to Executor
 #[derive(Debug, Clone)]

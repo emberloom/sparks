@@ -660,6 +660,10 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
     // so if we block here, callback queries (confirmations) for this chat
     // would deadlock waiting for this handler to finish.
     tokio::spawn(async move {
+        let mut stream_buffer = String::new();
+        let mut last_edit = tokio::time::Instant::now();
+        let edit_interval = tokio::time::Duration::from_millis(500);
+
         while let Some(event) = events.recv().await {
             match event {
                 CoreEvent::Status(s) => {
@@ -668,12 +672,38 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                         .parse_mode(ParseMode::Html)
                         .await;
                 }
+                CoreEvent::StreamChunk(chunk) => {
+                    stream_buffer.push_str(&chunk);
+                    // Throttle edits to avoid Telegram rate limits
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_edit) >= edit_interval {
+                        let preview = escape_html(&stream_buffer);
+                        // Truncate display to avoid hitting message size limits
+                        let display = if preview.len() > 3800 {
+                            format!("{}...", &preview[..preview.floor_char_boundary(3800)])
+                        } else {
+                            preview
+                        };
+                        let _ = bot
+                            .edit_message_text(chat_id, status_msg.id, format!("<pre>{}</pre>", display))
+                            .parse_mode(ParseMode::Html)
+                            .await;
+                        last_edit = now;
+                    }
+                }
                 CoreEvent::Response(r) => {
                     // Delete the status message
                     let _ = bot.delete_message(chat_id, status_msg.id).await;
 
+                    // If we were streaming, use the buffer as the response
+                    let response_text = if !stream_buffer.is_empty() {
+                        stream_buffer.clone()
+                    } else {
+                        r
+                    };
+
                     // Send response, escaped and chunked
-                    let escaped = escape_html(&r);
+                    let escaped = escape_html(&response_text);
                     for chunk in chunk_message(&escaped, 4000) {
                         let _ = bot.send_message(chat_id, chunk)
                             .parse_mode(ParseMode::Html)

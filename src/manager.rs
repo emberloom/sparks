@@ -234,7 +234,7 @@ impl Manager {
 
                 // Send delegation status if we have a sender
                 if let Some(tx) = status_tx {
-                    let _ = tx.send(format!("Delegating to {} ghost...", ghost.name)).await;
+                    let _ = tx.send(crate::core::CoreEvent::Status(format!("Delegating to {} ghost...", ghost.name))).await;
                 }
 
                 let result = self.executor.run(&contract, ghost, &*self.llm, confirmer, status_tx).await?;

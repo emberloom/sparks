@@ -37,6 +37,8 @@ impl SessionContext {
 pub enum CoreEvent {
     /// Agent is working on something
     Status(String),
+    /// Incremental text chunk from the LLM (streamed)
+    StreamChunk(String),
     /// Final complete response
     Response(String),
     /// Error during execution
@@ -375,14 +377,12 @@ impl AthenaCore {
                         .send(CoreEvent::Status("Thinking...".into()))
                         .await;
 
-                    // Create a status bridge: strategy sends String → core maps to CoreEvent::Status
-                    let (status_tx, mut status_rx) = mpsc::channel::<String>(16);
+                    // Create a status bridge: strategy sends CoreEvent → core forwards to frontend
+                    let (status_tx, mut status_rx) = mpsc::channel::<CoreEvent>(16);
                     let event_tx_for_status = req.event_tx.clone();
                     tokio::spawn(async move {
-                        while let Some(msg) = status_rx.recv().await {
-                            let _ = event_tx_for_status
-                                .send(CoreEvent::Status(msg))
-                                .await;
+                        while let Some(event) = status_rx.recv().await {
+                            let _ = event_tx_for_status.send(event).await;
                         }
                     });
 

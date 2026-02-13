@@ -4,7 +4,8 @@ use crate::confirm::Confirmer;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
-use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message};
+use crate::core::CoreEvent;
+use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall};
 use crate::tools::ToolRegistry;
 
 use super::{LoopStrategy, StatusSender, TaskContract};
@@ -22,10 +23,10 @@ impl LoopStrategy for ReactStrategy {
         max_steps: usize,
         executor: &Executor,
         confirmer: &dyn Confirmer,
-        _status_tx: Option<&StatusSender>,
+        status_tx: Option<&StatusSender>,
     ) -> Result<String> {
         if llm.supports_tools() {
-            self.run_native(contract, tools, docker, llm, max_steps, executor, confirmer)
+            self.run_native(contract, tools, docker, llm, max_steps, executor, confirmer, status_tx)
                 .await
         } else {
             self.run_text_fallback(contract, tools, docker, llm, max_steps, executor, confirmer)
@@ -36,6 +37,7 @@ impl LoopStrategy for ReactStrategy {
 
 impl ReactStrategy {
     /// Native function calling path: uses `ChatMessage` + `chat_with_tools()`.
+    /// When streaming is supported, text deltas are forwarded to the frontend in real time.
     async fn run_native(
         &self,
         contract: &TaskContract,
@@ -45,6 +47,7 @@ impl ReactStrategy {
         max_steps: usize,
         executor: &Executor,
         confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
     ) -> Result<String> {
         let system_prompt = build_system_prompt_native(contract);
         let schemas = tools.tool_schemas();
@@ -54,39 +57,143 @@ impl ReactStrategy {
             ChatMessage::User(contract.goal.clone()),
         ];
 
+        let mut budget = TokenBudget::new(llm.context_window());
+        let use_streaming = llm.supports_streaming();
+
         for step in 0..max_steps {
-            tracing::debug!(step, path = "native", "ReAct step");
+            tracing::debug!(step, path = "native", stream = use_streaming, "ReAct step");
 
-            let response = llm.chat_with_tools(&history, &schemas).await?;
+            if use_streaming {
+                // Streaming path: consume StreamEvents
+                let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
 
-            match response {
-                ChatResponse::ToolCalls { tool_calls, text } => {
-                    // Push assistant message with tool_calls
+                let mut text_accum = String::new();
+                let mut tool_calls: Vec<ToolCall> = Vec::new();
+                let mut usage = None;
+
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        StreamEvent::TextDelta(delta) => {
+                            // Forward to frontend for real-time display
+                            if let Some(tx) = status_tx {
+                                let _ = tx.send(CoreEvent::StreamChunk(delta.clone())).await;
+                            }
+                            text_accum.push_str(&delta);
+                        }
+                        StreamEvent::ToolCallComplete(tc) => {
+                            tool_calls.push(tc);
+                        }
+                        StreamEvent::Usage(u) => {
+                            usage = Some(u);
+                        }
+                        StreamEvent::Done => break,
+                    }
+                }
+
+                // Record token usage
+                if let Some(ref u) = usage {
+                    budget.record_usage(u);
+                    tracing::debug!(
+                        utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                        prompt_tokens = u.prompt_tokens,
+                        call_count = budget.call_count,
+                        "Token budget"
+                    );
+                    if budget.needs_compression(0.80) {
+                        tracing::info!(
+                            utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                            "Context window >80%, compressing history"
+                        );
+                        compress_history(&mut history);
+                    }
+                }
+
+                if !tool_calls.is_empty() {
+                    let text = if text_accum.is_empty() { None } else { Some(text_accum) };
                     history.push(ChatMessage::Assistant {
                         content: text,
                         tool_calls: Some(tool_calls.clone()),
                     });
 
-                    // Execute each tool call and push results
-                    for tc in &tool_calls {
+                    // Execute tool calls in parallel
+                    let futs: Vec<_> = tool_calls.iter().map(|tc| async move {
                         let json = serde_json::json!({
                             "tool": tc.name,
                             "params": tc.arguments,
                         });
-                        let tool_output = executor
+                        let result = executor
                             .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                            .await?;
+                            .await;
+                        (tc, result)
+                    }).collect();
 
+                    let results = futures::future::join_all(futs).await;
+                    for (tc, result) in results {
+                        let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
                         tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
                         history.push(ChatMessage::Tool {
                             tool_call_id: tc.id.clone(),
-                            content: tool_output,
+                            content: output,
                         });
                     }
+                } else {
+                    // Pure text response — done
+                    tracing::info!(step, path = "native", "ReAct complete (streamed text)");
+                    return Ok(text_accum);
                 }
-                ChatResponse::Text(text) => {
-                    tracing::info!(step, path = "native", "ReAct complete (text response)");
-                    return Ok(text);
+            } else {
+                // Non-streaming fallback path
+                let (response, usage) = llm.chat_with_tools(&history, &schemas).await?;
+
+                if let Some(ref u) = usage {
+                    budget.record_usage(u);
+                    tracing::debug!(
+                        utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                        prompt_tokens = u.prompt_tokens,
+                        call_count = budget.call_count,
+                        "Token budget"
+                    );
+                    if budget.needs_compression(0.80) {
+                        tracing::info!(
+                            utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                            "Context window >80%, compressing history"
+                        );
+                        compress_history(&mut history);
+                    }
+                }
+
+                match response {
+                    ChatResponse::ToolCalls { tool_calls, text } => {
+                        history.push(ChatMessage::Assistant {
+                            content: text,
+                            tool_calls: Some(tool_calls.clone()),
+                        });
+
+                        let futs: Vec<_> = tool_calls.iter().map(|tc| async move {
+                            let json = serde_json::json!({
+                                "tool": tc.name,
+                                "params": tc.arguments,
+                            });
+                            let result = executor
+                                .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                                .await;
+                            (tc, result)
+                        }).collect();
+
+                        let results = futures::future::join_all(futs).await;
+                        for (tc, result) in results {
+                            let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                            tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
+                            history.push(ChatMessage::Tool {
+                                tool_call_id: tc.id.clone(),
+                                content: output,
+                            });
+                        }
+                    }
+                    ChatResponse::Text(text) => {
+                        tracing::info!(step, path = "native", "ReAct complete (text response)");
+                        return Ok(text);
+                    }
                 }
             }
         }
@@ -226,4 +333,55 @@ INSTRUCTIONS:
         tools_section,
         constraints,
     )
+}
+
+/// Compress conversation history when context window fills up.
+/// Preserves: system prompt (index 0), initial user goal (index 1), last 6 messages.
+/// Replaces middle messages with a single summary.
+pub fn compress_history(history: &mut Vec<ChatMessage>) {
+    let preserve_tail = 6; // last 3 round-trips
+    let preserve_head = 2; // system + initial user goal
+
+    if history.len() <= preserve_head + preserve_tail {
+        return; // nothing to compress
+    }
+
+    let middle_end = history.len() - preserve_tail;
+
+    // Build a summary of the middle messages
+    let mut summary_parts: Vec<String> = Vec::new();
+    for msg in &history[preserve_head..middle_end] {
+        match msg {
+            ChatMessage::Assistant { tool_calls: Some(tcs), .. } => {
+                let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
+                summary_parts.push(format!("Called: {}", names.join(", ")));
+            }
+            ChatMessage::Tool { content, .. } => {
+                let preview: String = content.chars().take(80).collect();
+                summary_parts.push(format!("Result: {}", preview));
+            }
+            ChatMessage::Assistant { content: Some(text), .. } => {
+                let preview: String = text.chars().take(80).collect();
+                summary_parts.push(format!("Said: {}", preview));
+            }
+            _ => {}
+        }
+    }
+
+    let summary = format!(
+        "[Compressed {} messages]\n{}",
+        middle_end - preserve_head,
+        summary_parts.join("\n")
+    );
+
+    // Replace middle with a single user message summary
+    let tail: Vec<ChatMessage> = history.split_off(middle_end);
+    history.truncate(preserve_head);
+    history.push(ChatMessage::User(summary));
+    history.extend(tail);
+
+    tracing::debug!(
+        new_len = history.len(),
+        "History compressed"
+    );
 }

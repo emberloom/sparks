@@ -5,7 +5,8 @@ use crate::confirm::Confirmer;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
-use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message, ToolSchema};
+use crate::core::CoreEvent;
+use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall, ToolSchema};
 use crate::tools::ToolRegistry;
 
 use super::{LoopStrategy, StatusSender, TaskContract};
@@ -102,72 +103,107 @@ impl CodeStrategy {
             ChatMessage::User(contract.goal.clone()),
         ];
 
+        let mut budget = TokenBudget::new(llm.context_window());
+        let use_streaming = llm.supports_streaming();
+
         for step in 0..MAX_EXPLORE_STEPS {
             tracing::debug!(step, path = "native", "EXPLORE step");
 
-            let response = llm.chat_with_tools(&history, &schemas).await?;
-
-            match response {
-                ChatResponse::ToolCalls { tool_calls, text } => {
-                    // Check if the text portion contains a plan
-                    if let Some(ref t) = text {
-                        if let Some(plan) = extract_plan(t) {
-                            tracing::info!(step, path = "native", "EXPLORE complete — got plan from text");
-                            return Ok(plan);
-                        }
+            // Get response (streaming or non-streaming)
+            let (text_accum, tool_calls, usage) = if use_streaming {
+                let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
+                consume_stream(&mut rx, status_tx).await
+            } else {
+                let (response, usage) = llm.chat_with_tools(&history, &schemas).await?;
+                match response {
+                    ChatResponse::ToolCalls { tool_calls, text } => {
+                        (text.unwrap_or_default(), tool_calls, usage)
                     }
-
-                    history.push(ChatMessage::Assistant {
-                        content: text,
-                        tool_calls: Some(tool_calls.clone()),
-                    });
-
-                    for tc in &tool_calls {
-                        if !EXPLORE_TOOLS.contains(&tc.name.as_str()) {
-                            history.push(ChatMessage::Tool {
-                                tool_call_id: tc.id.clone(),
-                                content: format!(
-                                    "Tool '{}' is not allowed in the exploration phase. Use only: {}",
-                                    tc.name,
-                                    EXPLORE_TOOLS.join(", ")
-                                ),
-                            });
-                            continue;
-                        }
-
-                        send_status(status_tx, &format!("Exploring: {} ...", tc.name)).await;
-
-                        let json = serde_json::json!({
-                            "tool": tc.name,
-                            "params": tc.arguments,
-                        });
-                        let tool_output = executor
-                            .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                            .await?;
-
-                        tracing::debug!(step, tool = %tc.name, path = "native", "EXPLORE tool executed");
-                        history.push(ChatMessage::Tool {
-                            tool_call_id: tc.id.clone(),
-                            content: tool_output,
-                        });
-                    }
+                    ChatResponse::Text(text) => (text, vec![], usage),
                 }
-                ChatResponse::Text(text) => {
-                    if let Some(plan) = extract_plan(&text) {
-                        tracing::info!(step, path = "native", "EXPLORE complete — got plan");
+            };
+
+            if let Some(ref u) = usage {
+                budget.record_usage(u);
+                if budget.needs_compression(0.80) {
+                    tracing::info!(
+                        utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                        "EXPLORE: context >80%, compressing history"
+                    );
+                    super::react::compress_history(&mut history);
+                }
+            }
+
+            if !tool_calls.is_empty() {
+                // Check if the text portion contains a plan
+                if !text_accum.is_empty() {
+                    if let Some(plan) = extract_plan(&text_accum) {
+                        tracing::info!(step, path = "native", "EXPLORE complete — got plan from text");
                         return Ok(plan);
                     }
-                    // No plan — nudge
-                    history.push(ChatMessage::Assistant {
-                        content: Some(text),
-                        tool_calls: None,
-                    });
-                    history.push(ChatMessage::User(
-                        "You need to either call a read-only tool to explore, or output your plan as JSON:\n\
-                         {\"plan\": \"<step-by-step plan>\", \"context\": \"<what you learned>\", \"files\": \"<key file paths and excerpts>\"}\n\
-                         Keep exploring if you need more context, then output the plan JSON.".to_string(),
-                    ));
                 }
+
+                let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+                history.push(ChatMessage::Assistant {
+                    content: text,
+                    tool_calls: Some(tool_calls.clone()),
+                });
+
+                // Split into allowed and disallowed tool calls
+                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls.iter()
+                    .partition(|tc| EXPLORE_TOOLS.contains(&tc.name.as_str()));
+
+                for tc in &disallowed {
+                    history.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: format!(
+                            "Tool '{}' is not allowed in the exploration phase. Use only: {}",
+                            tc.name,
+                            EXPLORE_TOOLS.join(", ")
+                        ),
+                    });
+                }
+
+                // Execute allowed tool calls in parallel
+                for tc in &allowed {
+                    send_status(status_tx, &format!("Exploring: {} ...", tc.name)).await;
+                }
+                let futs: Vec<_> = allowed.iter().map(|tc| async move {
+                    let json = serde_json::json!({
+                        "tool": tc.name,
+                        "params": tc.arguments,
+                    });
+                    let result = executor
+                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                        .await;
+                    (*tc, result)
+                }).collect();
+
+                let results = futures::future::join_all(futs).await;
+                for (tc, result) in results {
+                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    tracing::debug!(step, tool = %tc.name, path = "native", "EXPLORE tool executed");
+                    history.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: output,
+                    });
+                }
+            } else {
+                // Pure text response
+                if let Some(plan) = extract_plan(&text_accum) {
+                    tracing::info!(step, path = "native", "EXPLORE complete — got plan");
+                    return Ok(plan);
+                }
+                // No plan — nudge
+                history.push(ChatMessage::Assistant {
+                    content: Some(text_accum),
+                    tool_calls: None,
+                });
+                history.push(ChatMessage::User(
+                    "You need to either call a read-only tool to explore, or output your plan as JSON:\n\
+                     {\"plan\": \"<step-by-step plan>\", \"context\": \"<what you learned>\", \"files\": \"<key file paths and excerpts>\"}\n\
+                     Keep exploring if you need more context, then output the plan JSON.".to_string(),
+                ));
             }
         }
 
@@ -177,7 +213,7 @@ impl CodeStrategy {
             "You've used all exploration steps. Output your plan NOW as JSON:\n\
              {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}".to_string(),
         ));
-        let response = llm.chat_with_tools(&history, &[]).await?;
+        let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         if let ChatResponse::Text(text) = &response {
             if let Some(plan) = extract_plan(text) {
                 return Ok(plan);
@@ -396,52 +432,87 @@ impl CodeStrategy {
             ),
         ];
 
+        let mut budget = TokenBudget::new(llm.context_window());
+        let use_streaming = llm.supports_streaming();
+
         for step in 0..MAX_VERIFY_STEPS {
             tracing::debug!(step, path = "native", "VERIFY step");
 
-            let response = llm.chat_with_tools(&history, &schemas).await?;
-
-            match response {
-                ChatResponse::ToolCalls { tool_calls, text } => {
-                    history.push(ChatMessage::Assistant {
-                        content: text,
-                        tool_calls: Some(tool_calls.clone()),
-                    });
-
-                    for tc in &tool_calls {
-                        if !VERIFY_TOOLS.contains(&tc.name.as_str()) {
-                            history.push(ChatMessage::Tool {
-                                tool_call_id: tc.id.clone(),
-                                content: format!(
-                                    "Tool '{}' is not allowed in the verification phase. Use only: {}",
-                                    tc.name,
-                                    VERIFY_TOOLS.join(", ")
-                                ),
-                            });
-                            continue;
-                        }
-
-                        send_status(status_tx, &format!("Verifying: {} ...", tc.name)).await;
-
-                        let json = serde_json::json!({
-                            "tool": tc.name,
-                            "params": tc.arguments,
-                        });
-                        let tool_output = executor
-                            .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                            .await?;
-
-                        tracing::debug!(step, tool = %tc.name, path = "native", "VERIFY tool executed");
-                        history.push(ChatMessage::Tool {
-                            tool_call_id: tc.id.clone(),
-                            content: tool_output,
-                        });
+            // Get response (streaming or non-streaming)
+            let (text_accum, tool_calls, usage) = if use_streaming {
+                let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
+                consume_stream(&mut rx, status_tx).await
+            } else {
+                let (response, usage) = llm.chat_with_tools(&history, &schemas).await?;
+                match response {
+                    ChatResponse::ToolCalls { tool_calls, text } => {
+                        (text.unwrap_or_default(), tool_calls, usage)
                     }
+                    ChatResponse::Text(text) => (text, vec![], usage),
                 }
-                ChatResponse::Text(text) => {
-                    tracing::info!(step, path = "native", "VERIFY complete");
-                    return Ok(text);
+            };
+
+            if let Some(ref u) = usage {
+                budget.record_usage(u);
+                if budget.needs_compression(0.80) {
+                    tracing::info!(
+                        utilization = format!("{:.1}%", budget.utilization() * 100.0),
+                        "VERIFY: context >80%, compressing history"
+                    );
+                    super::react::compress_history(&mut history);
                 }
+            }
+
+            if !tool_calls.is_empty() {
+                let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+                history.push(ChatMessage::Assistant {
+                    content: text,
+                    tool_calls: Some(tool_calls.clone()),
+                });
+
+                // Split into allowed and disallowed tool calls
+                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls.iter()
+                    .partition(|tc| VERIFY_TOOLS.contains(&tc.name.as_str()));
+
+                for tc in &disallowed {
+                    history.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: format!(
+                            "Tool '{}' is not allowed in the verification phase. Use only: {}",
+                            tc.name,
+                            VERIFY_TOOLS.join(", ")
+                        ),
+                    });
+                }
+
+                // Execute allowed tool calls in parallel
+                for tc in &allowed {
+                    send_status(status_tx, &format!("Verifying: {} ...", tc.name)).await;
+                }
+                let futs: Vec<_> = allowed.iter().map(|tc| async move {
+                    let json = serde_json::json!({
+                        "tool": tc.name,
+                        "params": tc.arguments,
+                    });
+                    let result = executor
+                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                        .await;
+                    (*tc, result)
+                }).collect();
+
+                let results = futures::future::join_all(futs).await;
+                for (tc, result) in results {
+                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    tracing::debug!(step, tool = %tc.name, path = "native", "VERIFY tool executed");
+                    history.push(ChatMessage::Tool {
+                        tool_call_id: tc.id.clone(),
+                        content: output,
+                    });
+                }
+            } else {
+                // Pure text response — verification complete
+                tracing::info!(step, path = "native", "VERIFY complete");
+                return Ok(text_accum);
             }
         }
 
@@ -449,7 +520,7 @@ impl CodeStrategy {
         history.push(ChatMessage::User(
             "Verification step limit reached. Provide your final summary now.".to_string(),
         ));
-        let response = llm.chat_with_tools(&history, &[]).await?;
+        let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         match response {
             ChatResponse::Text(text) => Ok(text),
             ChatResponse::ToolCalls { text, .. } => Ok(text.unwrap_or_default()),
@@ -533,8 +604,39 @@ fn phase_schemas(tools: &ToolRegistry, allowed: &[&str]) -> Vec<ToolSchema> {
 /// Send a status update to the frontend (if a sender is available).
 async fn send_status(tx: Option<&StatusSender>, msg: &str) {
     if let Some(tx) = tx {
-        let _ = tx.send(msg.to_string()).await;
+        let _ = tx.send(CoreEvent::Status(msg.to_string())).await;
     }
+}
+
+/// Consume a streaming response into text + tool_calls + usage (same shape as non-streaming).
+/// Forwards text deltas to the frontend.
+async fn consume_stream(
+    rx: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
+    status_tx: Option<&StatusSender>,
+) -> (String, Vec<ToolCall>, Option<crate::llm::TokenUsage>) {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut usage = None;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            StreamEvent::TextDelta(delta) => {
+                if let Some(tx) = status_tx {
+                    let _ = tx.send(CoreEvent::StreamChunk(delta.clone())).await;
+                }
+                text.push_str(&delta);
+            }
+            StreamEvent::ToolCallComplete(tc) => {
+                tool_calls.push(tc);
+            }
+            StreamEvent::Usage(u) => {
+                usage = Some(u);
+            }
+            StreamEvent::Done => break,
+        }
+    }
+
+    (text, tool_calls, usage)
 }
 
 /// Try to extract a structured plan from the LLM response.

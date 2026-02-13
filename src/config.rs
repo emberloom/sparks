@@ -67,6 +67,8 @@ pub struct OpenRouterConfig {
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
 }
 
 impl std::fmt::Debug for OpenRouterConfig {
@@ -78,11 +80,13 @@ impl std::fmt::Debug for OpenRouterConfig {
             .field("classifier_model", &self.classifier_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
             .finish()
     }
 }
 
 fn default_openrouter_url() -> String { "https://openrouter.ai/api/v1".into() }
+fn default_context_window() -> u64 { 128_000 }
 
 #[derive(Deserialize, Clone)]
 pub struct ZenConfig {
@@ -95,6 +99,8 @@ pub struct ZenConfig {
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
 }
 
 impl std::fmt::Debug for ZenConfig {
@@ -106,6 +112,7 @@ impl std::fmt::Debug for ZenConfig {
             .field("classifier_model", &self.classifier_model)
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
             .finish()
     }
 }
@@ -661,6 +668,7 @@ impl Config {
                         model: cfg.model.clone(),
                         temperature: cfg.temperature,
                         max_tokens: cfg.max_tokens,
+                        context_window: cfg.context_window,
                     },
                     "OpenRouter",
                 )))
@@ -682,6 +690,7 @@ impl Config {
                         model: cfg.model.clone(),
                         temperature: cfg.temperature,
                         max_tokens: cfg.max_tokens,
+                        context_window: cfg.context_window,
                     },
                     "Opencode Zen",
                 )))
@@ -717,6 +726,7 @@ impl Config {
                                 model: model.clone(),
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
                             },
                             "OpenRouter/orchestrator",
                         )))
@@ -738,6 +748,7 @@ impl Config {
                                 model: model.clone(),
                                 temperature: cfg.temperature,
                                 max_tokens: cfg.max_tokens,
+                                context_window: cfg.context_window,
                             },
                             "Zen/orchestrator",
                         )))
