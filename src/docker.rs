@@ -30,7 +30,7 @@ impl DockerSession {
         )?;
 
         // Build mounts
-        let mounts: Vec<Mount> = ghost.mounts.iter().map(|m| {
+        let mut mounts: Vec<Mount> = ghost.mounts.iter().map(|m| {
             let host = Config::resolve_mount_path(&m.host_path);
             Mount {
                 target: Some(m.container_path.clone()),
@@ -40,6 +40,20 @@ impl DockerSession {
                 ..Default::default()
             }
         }).collect();
+
+        // Mount host cargo registry (read-only) so `cargo check/test` works offline
+        let cargo_home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
+        let cargo_registry = format!("{}/registry", cargo_home);
+        if std::path::Path::new(&cargo_registry).exists() {
+            mounts.push(Mount {
+                target: Some("/usr/local/cargo/registry".into()),
+                source: Some(cargo_registry),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
 
         let host_config = HostConfig {
             mounts: Some(mounts),

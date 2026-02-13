@@ -14,6 +14,7 @@ pub enum PulseSource {
     IdleMusing,
     MoodShift,
     ConversationReentry,
+    AutonomousTask,
 }
 
 impl PulseSource {
@@ -25,6 +26,7 @@ impl PulseSource {
             Self::IdleMusing => "idle_musing",
             Self::MoodShift => "mood_shift",
             Self::ConversationReentry => "conversation_reentry",
+            Self::AutonomousTask => "autonomous_task",
         }
     }
 }
@@ -148,6 +150,9 @@ impl PulseGate {
     }
 }
 
+/// Max pulse deliveries per hour (prevents feedback-loop flooding).
+const MAX_DELIVERIES_PER_HOUR: usize = 4;
+
 /// Spawn the pulse consumer task that gates and delivers pulses.
 pub fn spawn_pulse_consumer(
     bus: PulseBus,
@@ -157,6 +162,10 @@ pub fn spawn_pulse_consumer(
 ) {
     tokio::spawn(async move {
         let mut rx = bus.subscribe();
+        // Sliding window of recent delivery timestamps for rate limiting
+        let mut delivery_times: std::collections::VecDeque<std::time::Instant> =
+            std::collections::VecDeque::new();
+
         loop {
             let pulse = match rx.recv().await {
                 Ok(p) => p,
@@ -181,13 +190,7 @@ pub fn spawn_pulse_consumer(
                 }
             };
 
-            if gate.should_deliver(&pulse) {
-                observer.log(
-                    ObserverCategory::PulseDelivered,
-                    format!("Delivered: {}", pulse.source.label()),
-                );
-                let _ = delivered_tx.send(pulse).await;
-            } else {
+            if !gate.should_deliver(&pulse) {
                 let reason = if pulse.urgency == Urgency::Silent {
                     "silent"
                 } else if gate.is_quiet_hours() {
@@ -199,7 +202,31 @@ pub fn spawn_pulse_consumer(
                     ObserverCategory::PulseSuppressed,
                     format!("Suppressed: {} ({})", pulse.source.label(), reason),
                 );
+                continue;
             }
+
+            // Rate limit: drop old timestamps and check window
+            let now = std::time::Instant::now();
+            let one_hour = std::time::Duration::from_secs(3600);
+            while delivery_times.front().map_or(false, |t| now.duration_since(*t) > one_hour) {
+                delivery_times.pop_front();
+            }
+
+            // High-urgency pulses bypass rate limit
+            if pulse.urgency != Urgency::High && delivery_times.len() >= MAX_DELIVERIES_PER_HOUR {
+                observer.log(
+                    ObserverCategory::PulseSuppressed,
+                    format!("Suppressed: {} (rate limit: {}/hr)", pulse.source.label(), MAX_DELIVERIES_PER_HOUR),
+                );
+                continue;
+            }
+
+            delivery_times.push_back(now);
+            observer.log(
+                ObserverCategory::PulseDelivered,
+                format!("Delivered: {}", pulse.source.label()),
+            );
+            let _ = delivered_tx.send(pulse).await;
         }
     });
 }

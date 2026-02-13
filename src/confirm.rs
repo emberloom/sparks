@@ -45,6 +45,18 @@ impl Confirmer for CliConfirmer {
     }
 }
 
+/// Auto-approve confirmer for autonomous tasks (safety via Docker sandbox).
+#[derive(Clone, Copy)]
+pub struct AutoConfirmer;
+
+#[async_trait]
+impl Confirmer for AutoConfirmer {
+    async fn confirm(&self, action: &str) -> Result<bool> {
+        tracing::info!(action = %action, "Auto-approved (autonomous task)");
+        Ok(true)
+    }
+}
+
 /// Precompiled sensitive patterns for O(1) matching via RegexSet
 pub struct SensitivePatterns {
     regex_set: regex::RegexSet,

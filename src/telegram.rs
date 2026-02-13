@@ -232,6 +232,37 @@ fn is_authorized(chat_id: i64, config: &TelegramConfig) -> bool {
     config.allow_all
 }
 
+// ── CLI tool picker helpers ──────────────────────────────────────────
+
+const CLI_TOOLS: &[(&str, &str)] = &[
+    ("claude_code", "Claude Code"),
+    ("codex", "Codex"),
+    ("opencode", "OpenCode"),
+];
+
+fn cli_display_name(tool_id: &str) -> String {
+    CLI_TOOLS
+        .iter()
+        .find(|(id, _)| *id == tool_id)
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| tool_id.to_string())
+}
+
+fn build_cli_keyboard(current: &str) -> InlineKeyboardMarkup {
+    let buttons: Vec<InlineKeyboardButton> = CLI_TOOLS
+        .iter()
+        .map(|(id, name)| {
+            let label = if *id == current {
+                format!("{} \u{2713}", name)
+            } else {
+                name.to_string()
+            };
+            InlineKeyboardButton::callback(label, format!("cli:{}", id))
+        })
+        .collect();
+    InlineKeyboardMarkup::new(vec![buttons])
+}
+
 // ── Message handler ──────────────────────────────────────────────────
 
 /// Handle an incoming message (text, voice, or photo).
@@ -293,8 +324,10 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
             /jobs — Scheduled cron jobs\n\
             /session — Current session info\n\
             /set <code>&lt;key&gt; &lt;value&gt;</code> — Modify a runtime knob\n\
+            /cli — Switch coding CLI tool\n\
             /ghosts — List active ghosts\n\
             /memories — List saved memories\n\
+            /dispatch <code>&lt;ghost&gt; &lt;goal&gt;</code> — Run an autonomous task\n\
             /help — This help message\n\n\
             Send any message to chat with Athena.";
         send_html(&bot, chat_id, help).await?;
@@ -477,6 +510,18 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         return Ok(());
     }
 
+    if text == "/cli" {
+        let current = state.handle.knobs.read().unwrap().cli_tool.clone();
+        let keyboard = build_cli_keyboard(&current);
+        let label = cli_display_name(&current);
+        let html = format!("<b>Coding CLI tool:</b> {}", escape_html(&label));
+        bot.send_message(chat_id, html)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await?;
+        return Ok(());
+    }
+
     if text.starts_with("/set") {
         let parts: Vec<&str> = text.split_whitespace().collect();
         match parts.len() {
@@ -513,6 +558,44 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
             _ => {
                 send_html(&bot, chat_id, "<i>Usage: /set or /set &lt;key&gt; &lt;value&gt;</i>").await?;
             }
+        }
+        return Ok(());
+    }
+
+    // /dispatch <ghost> <goal> — manually trigger an autonomous task
+    if text.starts_with("/dispatch") {
+        let rest = text.strip_prefix("/dispatch").unwrap().trim();
+        if rest.is_empty() {
+            send_html(&bot, chat_id, "<i>Usage: /dispatch &lt;ghost&gt; &lt;goal&gt;</i>").await?;
+            return Ok(());
+        }
+        let (ghost_name, goal) = match rest.split_once(' ') {
+            Some((g, goal)) => (Some(g.to_string()), goal.to_string()),
+            None => (None, rest.to_string()),
+        };
+        let uid = msg
+            .from
+            .as_ref()
+            .map(|u| u.id.0.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let target = crate::pulse::PulseTarget::Session(crate::core::SessionContext {
+            platform: "telegram".into(),
+            user_id: uid,
+            chat_id: chat_id.0.to_string(),
+        });
+        let task = crate::core::AutonomousTask {
+            goal,
+            context: String::new(),
+            ghost: ghost_name.clone(),
+            target,
+        };
+        if let Err(e) = state.handle.dispatch_task(task).await {
+            let html = format!("<i>Failed to dispatch: {}</i>", escape_html(&e.to_string()));
+            send_html(&bot, chat_id, &html).await?;
+        } else {
+            let label = ghost_name.unwrap_or_else(|| "auto".into());
+            let html = format!("<i>⚡ Dispatched to {}</i>", escape_html(&label));
+            send_html(&bot, chat_id, &html).await?;
         }
         return Ok(());
     }
@@ -571,46 +654,51 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
             return Ok(());
         }
     };
-    tracing::debug!("Waiting for core events");
 
-    while let Some(event) = events.recv().await {
-        match event {
-            CoreEvent::Status(s) => {
-                let _ = bot
-                    .edit_message_text(chat_id, status_msg.id, format!("<i>{}</i>", escape_html(&s)))
-                    .parse_mode(ParseMode::Html)
-                    .await;
-            }
-            CoreEvent::Response(r) => {
-                // Delete the status message
-                let _ = bot.delete_message(chat_id, status_msg.id).await;
-
-                // Send response, escaped and chunked
-                let escaped = escape_html(&r);
-                for chunk in chunk_message(&escaped, 4000) {
-                    bot.send_message(chat_id, chunk)
+    // Spawn event listener so the message handler returns immediately.
+    // This is critical: teloxide dispatches updates per-chat sequentially,
+    // so if we block here, callback queries (confirmations) for this chat
+    // would deadlock waiting for this handler to finish.
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                CoreEvent::Status(s) => {
+                    let _ = bot
+                        .edit_message_text(chat_id, status_msg.id, format!("<i>{}</i>", escape_html(&s)))
                         .parse_mode(ParseMode::Html)
-                        .await?;
+                        .await;
+                }
+                CoreEvent::Response(r) => {
+                    // Delete the status message
+                    let _ = bot.delete_message(chat_id, status_msg.id).await;
+
+                    // Send response, escaped and chunked
+                    let escaped = escape_html(&r);
+                    for chunk in chunk_message(&escaped, 4000) {
+                        let _ = bot.send_message(chat_id, chunk)
+                            .parse_mode(ParseMode::Html)
+                            .await;
+                    }
+                }
+                CoreEvent::Error(e) => {
+                    // M2: Log details, send generic message to user
+                    tracing::error!(error = %e, chat_id = chat_id.0, "Task error");
+                    let _ = bot
+                        .edit_message_text(
+                            chat_id,
+                            status_msg.id,
+                            "<i>An error occurred while processing your request.</i>",
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .await;
+                }
+                CoreEvent::Pulse(p) => {
+                    let html = format!("<b>💬 pulse</b>\n{}", escape_html(&p));
+                    let _ = send_html(&bot, chat_id, &html).await;
                 }
             }
-            CoreEvent::Error(e) => {
-                // M2: Log details, send generic message to user
-                tracing::error!(error = %e, chat_id = chat_id.0, "Task error");
-                let _ = bot
-                    .edit_message_text(
-                        chat_id,
-                        status_msg.id,
-                        "<i>An error occurred while processing your request.</i>",
-                    )
-                    .parse_mode(ParseMode::Html)
-                    .await;
-            }
-            CoreEvent::Pulse(p) => {
-                let html = format!("<b>💬 pulse</b>\n{}", escape_html(&p));
-                let _ = send_html(&bot, chat_id, &html).await;
-            }
         }
-    }
+    });
 
     Ok(())
 }
@@ -628,8 +716,48 @@ async fn handle_callback(
         None => return Ok(()),
     };
 
-    // Parse "confirm:<id>:<yes|no>"
+    // Parse callback data by prefix
     let parts: Vec<&str> = data.splitn(3, ':').collect();
+
+    // Handle "cli:<tool_id>" callbacks
+    if parts.len() == 2 && parts[0] == "cli" {
+        let tool_id = parts[1];
+        let result = {
+            let mut k = state.handle.knobs.write().unwrap();
+            k.set("cli_tool", tool_id)
+        };
+        match result {
+            Ok(_) => {
+                state.handle.observer.emit(crate::observer::ObserverEvent::new(
+                    ObserverCategory::KnobChange,
+                    format!("cli_tool = {}", tool_id),
+                ));
+                let label = cli_display_name(tool_id);
+                let keyboard = build_cli_keyboard(tool_id);
+                let html = format!("<b>Coding CLI tool:</b> {}", escape_html(&label));
+                if let Some(msg) = &q.message {
+                    if let Some(regular) = msg.regular_message() {
+                        let _ = bot
+                            .edit_message_text(regular.chat.id, regular.id, &html)
+                            .parse_mode(ParseMode::Html)
+                            .reply_markup(keyboard)
+                            .await;
+                    }
+                }
+                bot.answer_callback_query(&q.id)
+                    .text(format!("Switched to {}", label))
+                    .await?;
+            }
+            Err(e) => {
+                bot.answer_callback_query(&q.id)
+                    .text(e)
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Handle "confirm:<id>:<yes|no>" callbacks
     if parts.len() != 3 || parts[0] != "confirm" {
         bot.answer_callback_query(&q.id).await?;
         return Ok(());
@@ -748,8 +876,10 @@ pub async fn run_telegram(
         BotCommand::new("jobs", "Scheduled cron jobs"),
         BotCommand::new("session", "Current session info"),
         BotCommand::new("set", "Modify a runtime knob"),
+        BotCommand::new("cli", "Switch coding CLI tool"),
         BotCommand::new("ghosts", "List active ghosts"),
         BotCommand::new("memories", "List saved memories"),
+        BotCommand::new("dispatch", "Dispatch autonomous task to ghost"),
     ];
     bot.set_my_commands(commands)
         .await
@@ -769,6 +899,7 @@ pub async fn run_telegram(
                     "idle_musing" => "💭 thought",
                     "conversation_reentry" => "🔄 follow-up",
                     "mood_shift" => "🎭 mood",
+                    "autonomous_task" => "⚡ task result",
                     other => other,
                 };
                 let html = format!(

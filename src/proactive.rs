@@ -237,7 +237,8 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
 }
 
 /// Schedule a possible conversation re-entry after a conversation ends.
-/// Call this after each conversation interaction with a 15% chance.
+/// Analyzes conversation history, related memories, and user profile to craft
+/// a contextual, in-character follow-up message delivered after a configurable delay.
 pub fn maybe_schedule_reentry(
     knobs: SharedKnobs,
     observer: ObserverHandle,
@@ -245,30 +246,40 @@ pub fn maybe_schedule_reentry(
     llm: Arc<dyn LlmProvider>,
     memory: Arc<MemoryStore>,
     session_key: String,
+    persona_soul: Option<String>,
 ) {
-    let mut rng = rand::thread_rng();
-    use rand::Rng;
-    if rng.gen::<f32>() > 0.15 {
+    // Read knobs for probability gate
+    let (spontaneity, enabled, all, delay_secs, jitter) = {
+        let k = knobs.read().unwrap();
+        (
+            k.spontaneity,
+            k.conversation_reentry_enabled,
+            k.all_proactive,
+            k.reentry_delay_secs,
+            k.reentry_jitter,
+        )
+    };
+
+    if !all || !enabled {
+        return;
+    }
+
+    // Stochastic trigger: spontaneity * 0.3 (at spontaneity=0.7 → ~21% chance)
+    if !randomness::should_speak(0.3, spontaneity) {
         return;
     }
 
     tokio::spawn(async move {
-        {
-            let k = knobs.read().unwrap();
-            if !k.all_proactive || !k.conversation_reentry_enabled {
-                return;
-            }
-        }
-
-        let delay = randomness::reentry_delay();
+        let delay = randomness::jitter_interval(delay_secs, jitter);
+        let delay_min = delay.as_secs() / 60;
         observer.log(
             ObserverCategory::Heartbeat,
-            format!("Scheduling conversation re-entry in {}h", delay.as_secs() / 3600),
+            format!("Scheduling conversation re-entry in ~{}min for {}", delay_min, session_key),
         );
 
         tokio::time::sleep(delay).await;
 
-        // Re-check knobs
+        // Re-check knobs after delay
         {
             let k = knobs.read().unwrap();
             if !k.all_proactive || !k.conversation_reentry_enabled {
@@ -276,40 +287,124 @@ pub fn maybe_schedule_reentry(
             }
         }
 
-        // Load conversation context
-        let recent = memory.recent_turns(&session_key, 5).unwrap_or_default();
-        if recent.is_empty() {
-            return;
+        // Load conversation context (15 turns)
+        let recent = memory.recent_turns(&session_key, 15).unwrap_or_default();
+        if recent.len() < 2 {
+            return; // need at least one exchange
         }
 
-        let context: Vec<String> = recent
+        // Summarize older turns, keep last 6 in full
+        let (summary_section, recent_section) = if recent.len() > 8 {
+            let split = recent.len() - 6;
+            let old_lines: Vec<String> = recent[..split]
+                .iter()
+                .map(|(role, content)| {
+                    format!("[{}] {}", role, truncate(content, 120))
+                })
+                .collect();
+            let recent_lines: Vec<String> = recent[split..]
+                .iter()
+                .map(|(role, content)| format!("{}: {}", role, content))
+                .collect();
+            (
+                format!("Earlier in the conversation (summarized):\n{}\n\n", old_lines.join("\n")),
+                recent_lines.join("\n"),
+            )
+        } else {
+            let lines: Vec<String> = recent
+                .iter()
+                .map(|(role, content)| format!("{}: {}", role, content))
+                .collect();
+            (String::new(), lines.join("\n"))
+        };
+
+        // Extract topics from recent user messages for memory search
+        let user_topics: String = recent
             .iter()
-            .map(|(role, content)| format!("{}: {}", role, truncate(content, 100)))
-            .collect();
+            .filter(|(role, _)| role == "user")
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Search related memories
+        let memories = memory
+            .search_hybrid(&user_topics, None, 5)
+            .unwrap_or_default();
+        let memory_section = if memories.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = memories
+                .iter()
+                .map(|m| format!("- [{}] {}", m.category, m.content))
+                .collect();
+            format!("\n\nRelated things you know:\n{}", items.join("\n"))
+        };
+
+        // Extract user_id from session_key for profile lookup
+        let user_id = session_key
+            .splitn(3, ':')
+            .nth(1)
+            .unwrap_or("unknown");
+        let user_profile = memory.get_user_profile(user_id).unwrap_or_default();
+        let profile_section = if user_profile.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = user_profile
+                .iter()
+                .map(|(k, v)| format!("- {}: {}", k, v))
+                .collect();
+            format!("\n\nAbout this person:\n{}", items.join("\n"))
+        };
+
+        // Build the persona preamble
+        let persona = persona_soul
+            .as_deref()
+            .map(|s| format!("{}\n\n", s))
+            .unwrap_or_default();
 
         let prompt = format!(
-            r#"You had this conversation earlier:
+            r#"{persona}You had this conversation with the user a while ago:
 
-{}
+{summary_section}Recent messages:
+{recent_section}{memory_section}{profile_section}
 
-Is there a meaningful follow-up thought or question you could share? Something that adds value, not just small talk.
-If yes, write it (1-2 sentences). If not, respond with: NO_FOLLOWUP"#,
-            context.join("\n")
+Time has passed since this conversation ended. Think about whether there's something genuinely valuable you could follow up on:
+- An unfinished thread worth revisiting
+- A solution or idea that came to mind since then
+- A relevant connection to something you know about them
+- A helpful resource or approach they might not have considered
+
+Write a natural, brief follow-up message (1-3 sentences) as if you're casually reaching out. Be specific — reference the actual topic. Don't be generic or vague.
+
+If there's genuinely nothing worth following up on, respond with exactly: NO_FOLLOWUP"#,
         );
 
         let messages = vec![Message::user(&prompt)];
         match llm.chat(&messages).await {
             Ok(response) => {
                 let trimmed = response.trim();
+
+                // Quality gate: reject refusals, too-short, or generic responses
                 if is_refusal(trimmed) {
+                    observer.log(ObserverCategory::Heartbeat, "Re-entry: nothing to follow up on");
                     return;
                 }
+                if trimmed.len() < 30 {
+                    observer.log(ObserverCategory::Heartbeat, "Re-entry: response too short, skipping");
+                    return;
+                }
+
+                observer.log(
+                    ObserverCategory::Heartbeat,
+                    format!("Re-entry generated: \"{}\"", truncate(trimmed, 80)),
+                );
+
                 let _ = memory.store("reentry", trimmed, None);
-                // Target the specific session that originated the conversation
+
                 let target = parse_session_target(&session_key);
                 let pulse = Pulse::new(
                     PulseSource::ConversationReentry,
-                    Urgency::Low,
+                    Urgency::Medium, // Medium = always delivers unless quiet hours
                     trimmed.to_string(),
                 ).with_target(target);
                 pulse_bus.send(pulse);

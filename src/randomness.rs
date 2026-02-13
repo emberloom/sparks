@@ -55,12 +55,6 @@ pub fn sample_indices(count: usize, total: usize) -> Vec<usize> {
     indices
 }
 
-/// Random delay between 2 and 8 hours for conversation re-entry.
-pub fn reentry_delay() -> Duration {
-    let mut rng = rand::thread_rng();
-    let hours: f64 = rng.gen_range(2.0..8.0);
-    Duration::from_secs_f64(hours * 3600.0)
-}
 
 #[cfg(test)]
 mod tests {
@@ -122,12 +116,4 @@ mod tests {
         assert_eq!(sorted.len(), 5);
     }
 
-    #[test]
-    fn test_reentry_delay_range() {
-        for _ in 0..20 {
-            let d = reentry_delay();
-            let hours = d.as_secs_f64() / 3600.0;
-            assert!(hours >= 2.0 && hours <= 8.0, "got {} hours", hours);
-        }
-    }
 }

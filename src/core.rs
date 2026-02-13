@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::config::Config;
-use crate::confirm::Confirmer;
+use crate::confirm::{AutoConfirmer, Confirmer};
 use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
@@ -44,6 +45,19 @@ pub enum CoreEvent {
     Pulse(String),
 }
 
+/// An autonomous task submitted by a background process (cron, heartbeat, etc.).
+#[derive(Debug, Clone)]
+pub struct AutonomousTask {
+    /// What to accomplish
+    pub goal: String,
+    /// Background context for the ghost
+    pub context: String,
+    /// Specific ghost to use (None = let orchestrator classify)
+    pub ghost: Option<String>,
+    /// Where to deliver the result (Broadcast if not specified)
+    pub target: crate::pulse::PulseTarget,
+}
+
 /// Request from any frontend to the core.
 struct CoreRequest {
     session: SessionContext,
@@ -82,9 +96,19 @@ pub struct CoreHandle {
     pub mood: Arc<MoodState>,
     pub cron_engine: Option<Arc<CronEngine>>,
     pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
+    pub auto_tx: mpsc::Sender<AutonomousTask>,
 }
 
 impl CoreHandle {
+    /// Submit an autonomous task for background execution by a ghost.
+    /// Results are delivered as pulses to the specified target.
+    pub async fn dispatch_task(&self, task: AutonomousTask) -> Result<()> {
+        self.auto_tx.send(task).await.map_err(|_| {
+            crate::error::AthenaError::Tool("Autonomous task queue full or shut down".into())
+        })?;
+        Ok(())
+    }
+
     /// Send a chat message, returns a receiver for streaming events.
     pub async fn chat(
         &self,
@@ -298,7 +322,11 @@ impl AthenaCore {
         ));
         cron_engine.clone().spawn_tick_loop();
 
+        // Autonomous task channel — created early so background tasks can receive auto_tx
+        let (auto_tx, mut auto_rx) = mpsc::channel::<AutonomousTask>(32);
+
         let persona_soul = config.persona.soul.clone();
+        let persona_soul_for_reentry = persona_soul.clone();
         let self_knowledge = config.persona.self_knowledge.clone();
         let tools_doc = config.persona.tools_doc.clone();
         let manager = Arc::new(Manager::new(
@@ -308,6 +336,7 @@ impl AthenaCore {
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop
+        let manager_for_auto = manager.clone(); // clone before moving into event loop
         let pulse_bus_for_reentry = pulse_bus.clone();
         let knobs_for_reentry = knobs.clone();
         let observer_for_reentry = observer.clone();
@@ -324,7 +353,13 @@ impl AthenaCore {
                 let pulse_bus = pulse_bus_for_reentry.clone();
                 let memory = memory_for_reentry.clone();
                 let llm = llm_for_reentry.clone();
+                let persona_soul = persona_soul_for_reentry.clone();
                 let session_key = req.session.session_key();
+                let request_id = uuid::Uuid::new_v4();
+                let request_span = tracing::info_span!(
+                    "request",
+                    id = %request_id,
+                );
                 tokio::spawn(async move {
                     activity.touch();
 
@@ -340,9 +375,20 @@ impl AthenaCore {
                         .send(CoreEvent::Status("Thinking...".into()))
                         .await;
 
+                    // Create a status bridge: strategy sends String → core maps to CoreEvent::Status
+                    let (status_tx, mut status_rx) = mpsc::channel::<String>(16);
+                    let event_tx_for_status = req.event_tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(msg) = status_rx.recv().await {
+                            let _ = event_tx_for_status
+                                .send(CoreEvent::Status(msg))
+                                .await;
+                        }
+                    });
+
                     tracing::debug!("Calling manager.handle()");
                     match manager
-                        .handle(&req.input, &req.session, req.confirmer.as_ref())
+                        .handle(&req.input, &req.session, req.confirmer.as_ref(), Some(&status_tx))
                         .await
                     {
                         Ok(response) => {
@@ -367,11 +413,62 @@ impl AthenaCore {
 
                     // Maybe schedule conversation re-entry
                     proactive::maybe_schedule_reentry(
-                        knobs, observer, pulse_bus, llm, memory, session_key,
+                        knobs, observer, pulse_bus, llm, memory, session_key, persona_soul,
                     );
-                });
+                }.instrument(request_span));
             }
         });
+
+        // Spawn autonomous task consumer
+        {
+            let manager = manager_for_auto;
+            let observer = observer.clone();
+            let pulse_bus = pulse_bus.clone();
+            tokio::spawn(async move {
+                let confirmer = AutoConfirmer;
+                while let Some(task) = auto_rx.recv().await {
+                    let manager = manager.clone();
+                    let observer = observer.clone();
+                    let pulse_bus = pulse_bus.clone();
+                    let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
+
+                    observer.log(
+                        ObserverCategory::AutonomousTask,
+                        format!("Dispatching: {} → {}", ghost_label, truncate_obs(&task.goal, 80)),
+                    );
+
+                    // Spawn each task independently so they don't block the queue
+                    tokio::spawn(async move {
+                        match manager
+                            .execute_task(&task.goal, &task.context, task.ghost.as_deref(), &confirmer)
+                            .await
+                        {
+                            Ok(result) => {
+                                observer.log(
+                                    ObserverCategory::AutonomousTask,
+                                    format!("Completed: {} ({} chars)", ghost_label, result.len()),
+                                );
+                                let pulse = Pulse::new(
+                                    crate::pulse::PulseSource::AutonomousTask,
+                                    crate::pulse::Urgency::Medium,
+                                    result,
+                                )
+                                .with_target(task.target)
+                                .with_ghost(ghost_label);
+                                pulse_bus.send(pulse);
+                            }
+                            Err(e) => {
+                                observer.log(
+                                    ObserverCategory::AutonomousTask,
+                                    format!("Failed: {} — {}", ghost_label, e),
+                                );
+                                tracing::error!(ghost = %ghost_label, error = %e, "Autonomous task failed");
+                            }
+                        }
+                    });
+                }
+            });
+        }
 
         Ok(CoreHandle {
             tx,
@@ -384,6 +481,7 @@ impl AthenaCore {
             mood,
             cron_engine: Some(cron_engine),
             delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
+            auto_tx,
         })
     }
 }

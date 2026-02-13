@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::config::GhostConfig;
 use crate::docker::DockerSession;
+use crate::dynamic_tools;
 use crate::error::{AthenaError, Result};
+use crate::llm::ToolSchema;
 
 const MAX_OUTPUT_LEN: usize = 2000;
 const SEARCH_OUTPUT_LEN: usize = 8000;
@@ -19,9 +22,18 @@ pub struct ToolResult {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
-    fn description(&self) -> &str;
+    fn description(&self) -> String;
     fn needs_confirmation(&self) -> bool;
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult>;
+
+    /// JSON Schema for this tool's parameters. Used for native function calling.
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        })
+    }
 }
 
 /// Sensitive filenames that should never be read or written inside containers
@@ -143,8 +155,18 @@ struct ShellTool;
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str { "shell" }
-    fn description(&self) -> &str { "Run a shell command: {\"tool\": \"shell\", \"params\": {\"command\": \"...\"}}" }
+    fn description(&self) -> String { "Run a shell command: {\"tool\": \"shell\", \"params\": {\"command\": \"...\"}}".into() }
     fn needs_confirmation(&self) -> bool { false } // Handled by sensitive pattern check in strategy
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "The shell command to execute" }
+            },
+            "required": ["command"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let cmd = params.get("command")
@@ -166,8 +188,18 @@ struct FileReadTool;
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str { "file_read" }
-    fn description(&self) -> &str { "Read a file: {\"tool\": \"file_read\", \"params\": {\"path\": \"...\"}}" }
+    fn description(&self) -> String { "Read a file: {\"tool\": \"file_read\", \"params\": {\"path\": \"...\"}}".into() }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to read" }
+            },
+            "required": ["path"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path")
@@ -197,8 +229,19 @@ struct FileWriteTool;
 #[async_trait]
 impl Tool for FileWriteTool {
     fn name(&self) -> &str { "file_write" }
-    fn description(&self) -> &str { "Write a file: {\"tool\": \"file_write\", \"params\": {\"path\": \"...\", \"content\": \"...\"}}" }
-    fn needs_confirmation(&self) -> bool { true }
+    fn description(&self) -> String { "Write a file: {\"tool\": \"file_write\", \"params\": {\"path\": \"...\", \"content\": \"...\"}}".into() }
+    fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to write" },
+                "content": { "type": "string", "description": "Content to write to the file" }
+            },
+            "required": ["path", "content"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path")
@@ -232,10 +275,22 @@ struct FileEditTool;
 #[async_trait]
 impl Tool for FileEditTool {
     fn name(&self) -> &str { "file_edit" }
-    fn description(&self) -> &str {
-        "Edit a file by replacing a string: {\"tool\": \"file_edit\", \"params\": {\"path\": \"...\", \"old_string\": \"...\", \"new_string\": \"...\"}}"
+    fn description(&self) -> String {
+        "Edit a file by replacing a string: {\"tool\": \"file_edit\", \"params\": {\"path\": \"...\", \"old_string\": \"...\", \"new_string\": \"...\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { true }
+    fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to edit" },
+                "old_string": { "type": "string", "description": "The exact string to find and replace (must be unique in the file)" },
+                "new_string": { "type": "string", "description": "The replacement string" }
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path")
@@ -301,10 +356,22 @@ struct GrepTool;
 #[async_trait]
 impl Tool for GrepTool {
     fn name(&self) -> &str { "grep" }
-    fn description(&self) -> &str {
-        "Search file contents: {\"tool\": \"grep\", \"params\": {\"pattern\": \"...\", \"path\": \".\", \"include\": \"*.rs\"}}"
+    fn description(&self) -> String {
+        "Search file contents: {\"tool\": \"grep\", \"params\": {\"pattern\": \"...\", \"path\": \".\", \"include\": \"*.rs\"}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                "path": { "type": "string", "description": "Directory or file to search in (default: \".\")" },
+                "include": { "type": "string", "description": "File glob pattern to filter (e.g. \"*.rs\")" }
+            },
+            "required": ["pattern"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let pattern = params.get("pattern")
@@ -363,10 +430,21 @@ struct GlobTool;
 #[async_trait]
 impl Tool for GlobTool {
     fn name(&self) -> &str { "glob" }
-    fn description(&self) -> &str {
-        "Find files by pattern: {\"tool\": \"glob\", \"params\": {\"pattern\": \"*.rs\", \"path\": \".\"}}"
+    fn description(&self) -> String {
+        "Find files by pattern: {\"tool\": \"glob\", \"params\": {\"pattern\": \"*.rs\", \"path\": \".\"}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Filename glob pattern (e.g. \"*.rs\", \"**/*.py\")" },
+                "path": { "type": "string", "description": "Directory to search in (default: \".\")" }
+            },
+            "required": ["pattern"]
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let pattern = params.get("pattern")
@@ -482,10 +560,20 @@ impl WebFetchTool {
 #[async_trait]
 impl Tool for WebFetchTool {
     fn name(&self) -> &str { "web_fetch" }
-    fn description(&self) -> &str {
-        "Fetch a URL: {\"tool\": \"web_fetch\", \"params\": {\"url\": \"https://...\"}}"
+    fn description(&self) -> String {
+        "Fetch a URL: {\"tool\": \"web_fetch\", \"params\": {\"url\": \"https://...\"}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "The URL to fetch (must be http or https)" }
+            },
+            "required": ["url"]
+        })
+    }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let url = params.get("url")
@@ -556,10 +644,21 @@ impl WebSearchTool {
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str { "web_search" }
-    fn description(&self) -> &str {
-        "Search the web: {\"tool\": \"web_search\", \"params\": {\"query\": \"...\", \"num_results\": 5}}"
+    fn description(&self) -> String {
+        "Search the web: {\"tool\": \"web_search\", \"params\": {\"query\": \"...\", \"num_results\": 5}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query" },
+                "num_results": { "type": "integer", "description": "Number of results to return (default: 5, max: 10)" }
+            },
+            "required": ["query"]
+        })
+    }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let query = params.get("query")
@@ -649,10 +748,20 @@ struct CodebaseMapTool;
 #[async_trait]
 impl Tool for CodebaseMapTool {
     fn name(&self) -> &str { "codebase_map" }
-    fn description(&self) -> &str {
-        "Show project structure and key symbols: {\"tool\": \"codebase_map\", \"params\": {\"path\": \".\", \"depth\": 3}}"
+    fn description(&self) -> String {
+        "Show project structure and key symbols: {\"tool\": \"codebase_map\", \"params\": {\"path\": \".\", \"depth\": 3}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Root directory to map (default: \".\")" },
+                "depth": { "type": "integer", "description": "Max directory depth (default: 3, max: 10)" }
+            }
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path")
@@ -788,10 +897,20 @@ fn detect_lint_command(path: &str) -> String {
 #[async_trait]
 impl Tool for LintTool {
     fn name(&self) -> &str { "lint" }
-    fn description(&self) -> &str {
-        "Check code for errors: {\"tool\": \"lint\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"lint\", \"params\": {\"command\": \"cargo check\"}}"
+    fn description(&self) -> String {
+        "Check code for errors: {\"tool\": \"lint\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"lint\", \"params\": {\"command\": \"cargo check\"}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path to lint (auto-detects language)" },
+                "command": { "type": "string", "description": "Explicit lint command to run (overrides path)" }
+            }
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path").and_then(|v| v.as_str());
@@ -832,10 +951,19 @@ struct DiffTool;
 #[async_trait]
 impl Tool for DiffTool {
     fn name(&self) -> &str { "diff" }
-    fn description(&self) -> &str {
-        "Show git changes: {\"tool\": \"diff\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"diff\", \"params\": {}}"
+    fn description(&self) -> String {
+        "Show git changes: {\"tool\": \"diff\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"diff\", \"params\": {}}".into()
     }
     fn needs_confirmation(&self) -> bool { false }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File or directory to diff (default: all files)" }
+            }
+        })
+    }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let path = params.get("path").and_then(|v| v.as_str());
@@ -885,6 +1013,154 @@ impl Tool for DiffTool {
     }
 }
 
+// ── Coding CLI tools (host-executed) ────────────────────────────────
+
+const CLI_OUTPUT_LEN: usize = 16_000;
+const CLI_TIMEOUT_SECS: u64 = 3600; // 1 hour
+
+/// Shared implementation for all coding CLI tools.
+/// Runs on the HOST (not in Docker) via tokio::process::Command.
+async fn run_cli_tool(
+    command: &str,
+    args: &[&str],
+    workspace: &str,
+    tool_name: &str,
+) -> Result<ToolResult> {
+    use tokio::process::Command;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(CLI_TIMEOUT_SECS),
+        Command::new(command)
+            .args(args)
+            .current_dir(workspace)
+            .env("TERM", "dumb") // avoid ANSI escape codes
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let combined = if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}\n[stderr]\n{}", stdout, stderr)
+            };
+            Ok(ToolResult {
+                success: output.status.success(),
+                output: truncate(&combined, CLI_OUTPUT_LEN),
+            })
+        }
+        Ok(Err(e)) => {
+            // Command failed to start (not installed, permission denied, etc.)
+            Ok(ToolResult {
+                success: false,
+                output: format!("{}: command failed — {}. Is it installed and in PATH?", tool_name, e),
+            })
+        }
+        Err(_) => {
+            Ok(ToolResult {
+                success: false,
+                output: format!("{}: timed out after {}s", tool_name, CLI_TIMEOUT_SECS),
+            })
+        }
+    }
+}
+
+/// Build an enriched prompt for CLI coding tools.
+/// Prepends optional context the ghost provides (files it read, constraints, etc.)
+/// so the coding agent starts with full awareness.
+fn build_cli_prompt(params: &Value) -> std::result::Result<String, AthenaError> {
+    let prompt = params.get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AthenaError::Tool("missing 'prompt' param".into()))?;
+
+    let context = params.get("context").and_then(|v| v.as_str());
+    let files = params.get("files").and_then(|v| v.as_str()); // optional: key file contents
+
+    let mut full = String::new();
+    if let Some(ctx) = context {
+        full.push_str("CONTEXT:\n");
+        full.push_str(ctx);
+        full.push_str("\n\n");
+    }
+    if let Some(f) = files {
+        full.push_str("RELEVANT FILES:\n");
+        full.push_str(f);
+        full.push_str("\n\n");
+    }
+    full.push_str("TASK:\n");
+    full.push_str(prompt);
+    Ok(full)
+}
+
+struct ClaudeCodeTool { workspace: String }
+
+impl ClaudeCodeTool {
+    fn new(workspace: &str) -> Self {
+        Self { workspace: workspace.to_string() }
+    }
+}
+
+#[async_trait]
+impl Tool for ClaudeCodeTool {
+    fn name(&self) -> &str { "claude_code" }
+    fn description(&self) -> String {
+        "Run Claude Code to implement a coding task (full agent with file editing, compilation, tests): {\"tool\": \"claude_code\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool { false }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let prompt = build_cli_prompt(params)?;
+        run_cli_tool("claude", &["-p", &prompt, "--output-format", "text", "--dangerously-skip-permissions"], &self.workspace, "claude_code").await
+    }
+}
+
+struct CodexTool { workspace: String }
+
+impl CodexTool {
+    fn new(workspace: &str) -> Self {
+        Self { workspace: workspace.to_string() }
+    }
+}
+
+#[async_trait]
+impl Tool for CodexTool {
+    fn name(&self) -> &str { "codex" }
+    fn description(&self) -> String {
+        "Run OpenAI Codex CLI to implement a coding task (full agent with file editing): {\"tool\": \"codex\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool { false }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let prompt = build_cli_prompt(params)?;
+        run_cli_tool("codex", &["exec", "--full-auto", &prompt], &self.workspace, "codex").await
+    }
+}
+
+struct OpenCodeTool { workspace: String }
+
+impl OpenCodeTool {
+    fn new(workspace: &str) -> Self {
+        Self { workspace: workspace.to_string() }
+    }
+}
+
+#[async_trait]
+impl Tool for OpenCodeTool {
+    fn name(&self) -> &str { "opencode" }
+    fn description(&self) -> String {
+        "Run OpenCode CLI to implement a coding task (full agent with file editing): {\"tool\": \"opencode\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool { false }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let prompt = build_cli_prompt(params)?;
+        run_cli_tool("opencode", &["run", &prompt], &self.workspace, "opencode").await
+    }
+}
+
 // ── Registry ────────────────────────────────────────────────────────
 
 pub struct ToolRegistry {
@@ -892,9 +1168,16 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Build a registry scoped to a ghost's allowed tools
-    pub fn for_ghost(ghost: &GhostConfig) -> Self {
-        let all_tools: Vec<Box<dyn Tool>> = vec![
+    /// Build a registry scoped to a ghost's allowed tools.
+    /// If `dynamic_tools_path` is provided, also loads YAML-defined tools from that directory.
+    pub fn for_ghost(ghost: &GhostConfig, dynamic_tools_path: Option<&Path>) -> Self {
+        // Resolve host workspace for CLI tools (first writable mount, or ".")
+        let host_workspace = ghost.mounts.iter()
+            .find(|m| !m.read_only)
+            .map(|m| m.host_path.clone())
+            .unwrap_or_else(|| ".".to_string());
+
+        let mut all_tools: Vec<Box<dyn Tool>> = vec![
             Box::new(ShellTool),
             Box::new(FileReadTool),
             Box::new(FileWriteTool),
@@ -906,7 +1189,23 @@ impl ToolRegistry {
             Box::new(CodebaseMapTool),
             Box::new(LintTool),
             Box::new(DiffTool),
+            Box::new(ClaudeCodeTool::new(&host_workspace)),
+            Box::new(CodexTool::new(&host_workspace)),
+            Box::new(OpenCodeTool::new(&host_workspace)),
         ];
+
+        // Load dynamic tools from YAML definitions
+        if let Some(path) = dynamic_tools_path {
+            match dynamic_tools::discover(path) {
+                Ok(dynamic) => {
+                    tracing::info!("Discovered {} dynamic tool(s) from {}", dynamic.len(), path.display());
+                    all_tools.extend(dynamic);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to discover dynamic tools: {}", e);
+                }
+            }
+        }
 
         let tools: HashMap<String, Box<dyn Tool>> = all_tools
             .into_iter()
@@ -931,6 +1230,18 @@ impl ToolRegistry {
 
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Generate `ToolSchema` definitions for all registered tools (for native function calling).
+    pub fn tool_schemas(&self) -> Vec<ToolSchema> {
+        self.tools
+            .values()
+            .map(|t| ToolSchema {
+                name: t.name().to_string(),
+                description: t.description(),
+                parameters: t.parameter_schema(),
+            })
+            .collect()
     }
 }
 
@@ -1225,7 +1536,7 @@ mod tests {
             "grep", "glob", "web_fetch", "codebase_map",
             "web_search", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 11);
         assert!(reg.get("codebase_map").is_some());
@@ -1240,7 +1551,7 @@ mod tests {
             "file_read", "shell", "grep", "glob",
             "codebase_map", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 6);
         assert!(reg.get("codebase_map").is_some());
@@ -1256,7 +1567,7 @@ mod tests {
     #[test]
     fn test_registry_filters_unknown_tools() {
         let ghost = make_ghost(vec!["shell", "nonexistent_tool"]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         assert_eq!(reg.tool_names().len(), 1);
         assert!(reg.get("shell").is_some());
         assert!(reg.get("nonexistent_tool").is_none());
@@ -1265,7 +1576,7 @@ mod tests {
     #[test]
     fn test_registry_empty_tools() {
         let ghost = make_ghost(vec![]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         assert_eq!(reg.tool_names().len(), 0);
     }
 
@@ -1276,7 +1587,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         assert_eq!(reg.tool_names().len(), 11);
     }
 
@@ -1289,7 +1600,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         // Every registered tool name must match what the tool reports
         for name in reg.tool_names() {
             let tool = reg.get(name).unwrap();
@@ -1304,7 +1615,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
         let desc = reg.descriptions();
         assert!(!desc.is_empty());
         // Each tool should have a description line
@@ -1322,11 +1633,11 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost);
+        let reg = ToolRegistry::for_ghost(&ghost, None);
 
-        // Only file_write and file_edit need confirmation
-        assert!(reg.get("file_write").unwrap().needs_confirmation());
-        assert!(reg.get("file_edit").unwrap().needs_confirmation());
+        // No tools require confirmation (Docker sandbox is the safety boundary)
+        assert!(!reg.get("file_write").unwrap().needs_confirmation());
+        assert!(!reg.get("file_edit").unwrap().needs_confirmation());
 
         // All Phase 2 tools are read-only — no confirmation
         assert!(!reg.get("codebase_map").unwrap().needs_confirmation());

@@ -262,6 +262,10 @@ pub struct ProactiveConfig {
     pub idle_threshold_secs: u64,
     #[serde(default = "default_spontaneity")]
     pub spontaneity: f32,
+    #[serde(default = "default_reentry_delay")]
+    pub reentry_delay_secs: u64,
+    #[serde(default = "default_reentry_jitter")]
+    pub reentry_jitter: f64,
 }
 
 impl Default for ProactiveConfig {
@@ -271,6 +275,8 @@ impl Default for ProactiveConfig {
             memory_scan_interval_secs: default_memory_scan_interval(),
             idle_threshold_secs: default_idle_threshold(),
             spontaneity: default_spontaneity(),
+            reentry_delay_secs: default_reentry_delay(),
+            reentry_jitter: default_reentry_jitter(),
         }
     }
 }
@@ -278,6 +284,8 @@ impl Default for ProactiveConfig {
 fn default_memory_scan_interval() -> u64 { 3600 }
 fn default_idle_threshold() -> u64 { 1800 }
 fn default_spontaneity() -> f32 { 0.3 }
+fn default_reentry_delay() -> u64 { 7200 } // 2 hours
+fn default_reentry_jitter() -> f64 { 0.7 } // ±70% → 36min to 3h24m
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InitiativeConfig {
@@ -340,6 +348,8 @@ pub struct ManagerConfig {
     pub max_steps: usize,
     #[serde(default = "default_sensitive_patterns")]
     pub sensitive_patterns: Vec<String>,
+    /// Directory containing dynamic tool YAML definitions (default: ~/.athena/dynamic_tools/)
+    pub dynamic_tools_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -461,7 +471,25 @@ impl Default for ManagerConfig {
         Self {
             max_steps: default_max_steps(),
             sensitive_patterns: default_sensitive_patterns(),
+            dynamic_tools_path: None,
         }
+    }
+}
+
+impl ManagerConfig {
+    /// Resolve the dynamic tools directory, expanding ~ to home dir.
+    /// Falls back to ~/.athena/dynamic_tools/ if not configured.
+    pub fn resolve_dynamic_tools_path(&self) -> Option<std::path::PathBuf> {
+        let raw = self.dynamic_tools_path.clone()
+            .unwrap_or_else(|| "~/.athena/dynamic_tools".into());
+
+        let path = if raw.starts_with("~/") {
+            dirs::home_dir().map(|h| h.join(&raw[2..]))?
+        } else {
+            std::path::PathBuf::from(&raw)
+        };
+
+        Some(path)
     }
 }
 

@@ -17,6 +17,9 @@ pub struct RuntimeKnobs {
     pub memory_scan_enabled: bool,
     pub idle_musings_enabled: bool,
     pub conversation_reentry_enabled: bool,
+
+    pub reentry_delay_secs: u64,
+    pub reentry_jitter: f64,
     pub relationship_tracking_enabled: bool,
     pub mood_injection_enabled: bool,
 
@@ -30,6 +33,7 @@ pub struct RuntimeKnobs {
     pub pulse_tolerance: f32,
     pub quiet_hours: Option<(u32, u32)>,
     pub timezone_offset: i32,
+    pub cli_tool: String,
 }
 
 impl RuntimeKnobs {
@@ -51,6 +55,8 @@ impl RuntimeKnobs {
             memory_scan_enabled: config.proactive.enabled,
             idle_musings_enabled: config.proactive.enabled,
             conversation_reentry_enabled: config.proactive.enabled,
+            reentry_delay_secs: config.proactive.reentry_delay_secs,
+            reentry_jitter: config.proactive.reentry_jitter,
             relationship_tracking_enabled: config.proactive.enabled,
             mood_injection_enabled: config.mood.enabled,
             spontaneity: config.proactive.spontaneity,
@@ -62,6 +68,7 @@ impl RuntimeKnobs {
             pulse_tolerance: config.initiative.tolerance,
             quiet_hours,
             timezone_offset: config.mood.timezone_offset,
+            cli_tool: "claude_code".to_string(),
         }
     }
 
@@ -106,6 +113,16 @@ impl RuntimeKnobs {
             "conversation_reentry" => {
                 self.conversation_reentry_enabled = parse_bool(value)?;
                 Ok(format!("Conversation re-entry: {}", on_off(self.conversation_reentry_enabled)))
+            }
+            "reentry.delay" => {
+                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                self.reentry_delay_secs = v.max(60);
+                Ok(format!("Re-entry delay: {}s", self.reentry_delay_secs))
+            }
+            "reentry.jitter" => {
+                let v: f64 = value.parse().map_err(|_| "Expected float 0.0-1.0".to_string())?;
+                self.reentry_jitter = v.clamp(0.0, 1.0);
+                Ok(format!("Re-entry jitter: {:.2}", self.reentry_jitter))
             }
             "relationship_tracking" => {
                 self.relationship_tracking_enabled = parse_bool(value)?;
@@ -173,6 +190,15 @@ impl RuntimeKnobs {
                 self.timezone_offset = v.clamp(-12, 14);
                 Ok(format!("Timezone offset: {}h", self.timezone_offset))
             }
+            "cli_tool" => {
+                const VALID: &[&str] = &["claude_code", "codex", "opencode"];
+                if VALID.contains(&value) {
+                    self.cli_tool = value.to_string();
+                    Ok(format!("CLI tool: {}", self.cli_tool))
+                } else {
+                    Err(format!("Invalid CLI tool: {}. Valid: {}", value, VALID.join(", ")))
+                }
+            }
             _ => Err(format!("Unknown knob: {}", key)),
         }
     }
@@ -188,6 +214,8 @@ impl RuntimeKnobs {
         let _ = writeln!(s, "  memory_scan            {}", on_off(self.memory_scan_enabled));
         let _ = writeln!(s, "  idle_musings           {}", on_off(self.idle_musings_enabled));
         let _ = writeln!(s, "  conversation_reentry   {}", on_off(self.conversation_reentry_enabled));
+        let _ = writeln!(s, "  reentry.delay          {}s", self.reentry_delay_secs);
+        let _ = writeln!(s, "  reentry.jitter         {:.2}", self.reentry_jitter);
         let _ = writeln!(s, "  relationship_tracking  {}", on_off(self.relationship_tracking_enabled));
         let _ = writeln!(s, "  mood_injection         {}", on_off(self.mood_injection_enabled));
         let _ = writeln!(s, "  spontaneity            {:.2}", self.spontaneity);
@@ -206,6 +234,7 @@ impl RuntimeKnobs {
             }
         );
         let _ = writeln!(s, "  timezone_offset        {}h", self.timezone_offset);
+        let _ = writeln!(s, "  cli_tool               {}", self.cli_tool);
         s
     }
 }

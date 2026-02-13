@@ -5,6 +5,7 @@ mod confirm;
 mod core;
 mod db;
 mod docker;
+mod dynamic_tools;
 mod embeddings;
 mod error;
 mod executor;
@@ -20,6 +21,7 @@ mod profiles;
 mod pulse;
 mod randomness;
 mod scheduler;
+mod self_heal;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
@@ -129,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_target(false)
         .with_ansi(std::io::stderr().is_terminal())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .compact()
         .with_writer(std::io::stderr)
         .init();
