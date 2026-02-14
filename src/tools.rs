@@ -1,12 +1,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::GhostConfig;
 use crate::docker::DockerSession;
 use crate::dynamic_tools;
 use crate::error::{AthenaError, Result};
+use crate::knobs::SharedKnobs;
 use crate::llm::ToolSchema;
 
 const MAX_OUTPUT_LEN: usize = 2000;
@@ -1095,11 +1097,11 @@ fn build_cli_prompt(params: &Value) -> std::result::Result<String, AthenaError> 
     Ok(full)
 }
 
-struct ClaudeCodeTool { workspace: String }
+struct ClaudeCodeTool { workspace: String, knobs: SharedKnobs }
 
 impl ClaudeCodeTool {
-    fn new(workspace: &str) -> Self {
-        Self { workspace: workspace.to_string() }
+    fn new(workspace: &str, knobs: SharedKnobs) -> Self {
+        Self { workspace: workspace.to_string(), knobs }
     }
 }
 
@@ -1113,15 +1115,21 @@ impl Tool for ClaudeCodeTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
-        run_cli_tool("claude", &["-p", &prompt, "--output-format", "text", "--dangerously-skip-permissions"], &self.workspace, "claude_code").await
+        let model = self.knobs.read().unwrap().cli_model.clone();
+        let mut args = vec!["-p", &prompt, "--output-format", "text", "--dangerously-skip-permissions"];
+        if !model.is_empty() {
+            args.push("--model");
+            args.push(&model);
+        }
+        run_cli_tool("claude", &args, &self.workspace, "claude_code").await
     }
 }
 
-struct CodexTool { workspace: String }
+struct CodexTool { workspace: String, knobs: SharedKnobs }
 
 impl CodexTool {
-    fn new(workspace: &str) -> Self {
-        Self { workspace: workspace.to_string() }
+    fn new(workspace: &str, knobs: SharedKnobs) -> Self {
+        Self { workspace: workspace.to_string(), knobs }
     }
 }
 
@@ -1135,15 +1143,22 @@ impl Tool for CodexTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
-        run_cli_tool("codex", &["exec", "--full-auto", &prompt], &self.workspace, "codex").await
+        let model = self.knobs.read().unwrap().cli_model.clone();
+        let mut args = vec!["exec", "--full-auto"];
+        if !model.is_empty() {
+            args.push("--model");
+            args.push(&model);
+        }
+        args.push(&prompt);
+        run_cli_tool("codex", &args, &self.workspace, "codex").await
     }
 }
 
-struct OpenCodeTool { workspace: String }
+struct OpenCodeTool { workspace: String, knobs: SharedKnobs }
 
 impl OpenCodeTool {
-    fn new(workspace: &str) -> Self {
-        Self { workspace: workspace.to_string() }
+    fn new(workspace: &str, knobs: SharedKnobs) -> Self {
+        Self { workspace: workspace.to_string(), knobs }
     }
 }
 
@@ -1157,20 +1172,409 @@ impl Tool for OpenCodeTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
-        run_cli_tool("opencode", &["run", &prompt], &self.workspace, "opencode").await
+        let model = self.knobs.read().unwrap().cli_model.clone();
+        let mut args = vec!["run"];
+        if !model.is_empty() {
+            args.push("--model");
+            args.push(&model);
+        }
+        args.push(&prompt);
+        run_cli_tool("opencode", &args, &self.workspace, "opencode").await
     }
 }
 
 // ── Registry ────────────────────────────────────────────────────────
 
+struct GhTool {
+    workspace: String,
+    token: Option<String>,
+}
+
+impl GhTool {
+    fn new(workspace: &str, token: Option<String>) -> Self {
+        Self { workspace: workspace.to_string(), token }
+    }
+
+    fn resolve_token(&self) -> Option<String> {
+        self.token.clone().or_else(|| std::env::var("GH_TOKEN").ok())
+    }
+}
+
+const GH_ALLOWED_SUBCOMMANDS: &[&str] = &[
+    "issue", "pr", "repo", "release", "run", "workflow",
+    "api", "search", "label", "project", "status",
+];
+
+const GH_TIMEOUT_SECS: u64 = 120;
+
+#[async_trait]
+impl Tool for GhTool {
+    fn name(&self) -> &str { "gh" }
+    fn description(&self) -> String {
+        "Execute GitHub CLI commands: {\"tool\": \"gh\", \"params\": {\"subcommand\": \"pr list --state open\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool { true }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "subcommand": { "type": "string", "description": "The gh subcommand and arguments (e.g. 'pr list --state open')" }
+            },
+            "required": ["subcommand"]
+        })
+    }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        use tokio::process::Command;
+
+        let subcommand = params.get("subcommand")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AthenaError::Tool("gh: missing 'subcommand' param".into()))?;
+
+        let parts: Vec<&str> = subcommand.split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(ToolResult { success: false, output: "gh: empty subcommand".into() });
+        }
+
+        if !GH_ALLOWED_SUBCOMMANDS.contains(&parts[0]) {
+            return Ok(ToolResult {
+                success: false,
+                output: format!("gh: subcommand '{}' is not allowed. Allowed: {}", parts[0], GH_ALLOWED_SUBCOMMANDS.join(", ")),
+            });
+        }
+
+        let token = self.resolve_token();
+        if token.is_none() {
+            return Ok(ToolResult {
+                success: false,
+                output: "gh: no GitHub token found. Set GH_TOKEN env var or configure [github] token in config.toml".into(),
+            });
+        }
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(GH_TIMEOUT_SECS),
+            Command::new("gh")
+                .args(&parts)
+                .current_dir(&self.workspace)
+                .env("GH_TOKEN", token.unwrap())
+                .env("TERM", "dumb")
+                .env("NO_COLOR", "1")
+                .output(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let combined = if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}\n[stderr]\n{}", stdout, stderr)
+                };
+                Ok(ToolResult {
+                    success: output.status.success(),
+                    output: truncate(&combined, CLI_OUTPUT_LEN),
+                })
+            }
+            Ok(Err(e)) => {
+                Ok(ToolResult {
+                    success: false,
+                    output: format!("gh: command failed — {}. Is gh installed and in PATH?", e),
+                })
+            }
+            Err(_) => {
+                Ok(ToolResult {
+                    success: false,
+                    output: format!("gh: timed out after {}s", GH_TIMEOUT_SECS),
+                })
+            }
+        }
+    }
+}
+
+// ── ManageTools meta-tool ────────────────────────────────────────────
+
+struct ManageToolsTool {
+    tools_path: PathBuf,
+}
+
+impl ManageToolsTool {
+    fn new(tools_path: PathBuf) -> Self {
+        Self { tools_path }
+    }
+
+    /// Validate a tool name: alphanumeric + underscores/hyphens only, no path traversal.
+    fn validate_name(name: &str) -> std::result::Result<(), String> {
+        if name.is_empty() {
+            return Err("Tool name cannot be empty".into());
+        }
+        if name.len() > 64 {
+            return Err("Tool name too long (max 64 chars)".into());
+        }
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            return Err("Tool name must contain only alphanumeric characters, underscores, and hyphens".into());
+        }
+        if name.contains("..") || name.contains('/') || name.contains('\\') {
+            return Err("Tool name contains path traversal characters".into());
+        }
+        Ok(())
+    }
+
+    /// Find an existing tool file (.yml or .yaml) by name.
+    fn find_tool_file(&self, name: &str) -> Option<PathBuf> {
+        let yml = self.tools_path.join(format!("{}.yml", name));
+        if yml.exists() {
+            return Some(yml);
+        }
+        let yaml = self.tools_path.join(format!("{}.yaml", name));
+        if yaml.exists() {
+            return Some(yaml);
+        }
+        None
+    }
+
+    fn handle_list(&self) -> Result<ToolResult> {
+        if !self.tools_path.is_dir() {
+            return Ok(ToolResult {
+                success: true,
+                output: "No dynamic tools directory found. No tools defined.".into(),
+            });
+        }
+
+        let entries = std::fs::read_dir(&self.tools_path)
+            .map_err(|e| AthenaError::Tool(format!("Failed to read tools directory: {}", e)))?;
+
+        let mut tools = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let file_path = entry.path();
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yml" && ext != "yaml" {
+                continue;
+            }
+            let contents = match std::fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let def: dynamic_tools::DynamicToolDefinition = match serde_yaml::from_str(&contents) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            tools.push(format!(
+                "- {} ({:?}) — {}",
+                def.name, def.execution, def.description
+            ));
+        }
+
+        if tools.is_empty() {
+            return Ok(ToolResult {
+                success: true,
+                output: "No dynamic tools defined yet.".into(),
+            });
+        }
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("Dynamic tools ({}):\n{}", tools.len(), tools.join("\n")),
+        })
+    }
+
+    fn handle_create(&self, name: &str, yaml_content: &str) -> Result<ToolResult> {
+        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+
+        // Validate YAML parses as a valid tool definition
+        let def: dynamic_tools::DynamicToolDefinition = serde_yaml::from_str(yaml_content)
+            .map_err(|e| AthenaError::Tool(format!("Invalid tool YAML: {}", e)))?;
+
+        // Name consistency check
+        if def.name != name {
+            return Ok(ToolResult {
+                success: false,
+                output: format!(
+                    "Name mismatch: requested '{}' but YAML defines '{}'",
+                    name, def.name
+                ),
+            });
+        }
+
+        // Check for existing file
+        if self.find_tool_file(name).is_some() {
+            return Ok(ToolResult {
+                success: false,
+                output: format!("Tool '{}' already exists. Use 'edit' to modify it.", name),
+            });
+        }
+
+        // Ensure directory exists
+        std::fs::create_dir_all(&self.tools_path)
+            .map_err(|e| AthenaError::Tool(format!("Failed to create tools directory: {}", e)))?;
+
+        let file_path = self.tools_path.join(format!("{}.yml", name));
+        std::fs::write(&file_path, yaml_content)
+            .map_err(|e| AthenaError::Tool(format!("Failed to write tool file: {}", e)))?;
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("Created tool '{}' at {}", name, file_path.display()),
+        })
+    }
+
+    fn handle_edit(&self, name: &str, yaml_content: &str) -> Result<ToolResult> {
+        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+
+        // Validate YAML
+        let def: dynamic_tools::DynamicToolDefinition = serde_yaml::from_str(yaml_content)
+            .map_err(|e| AthenaError::Tool(format!("Invalid tool YAML: {}", e)))?;
+
+        if def.name != name {
+            return Ok(ToolResult {
+                success: false,
+                output: format!(
+                    "Name mismatch: requested '{}' but YAML defines '{}'",
+                    name, def.name
+                ),
+            });
+        }
+
+        let file_path = match self.find_tool_file(name) {
+            Some(p) => p,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: format!("Tool '{}' not found. Use 'create' to add it.", name),
+                });
+            }
+        };
+
+        std::fs::write(&file_path, yaml_content)
+            .map_err(|e| AthenaError::Tool(format!("Failed to write tool file: {}", e)))?;
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("Updated tool '{}' at {}", name, file_path.display()),
+        })
+    }
+
+    fn handle_delete(&self, name: &str) -> Result<ToolResult> {
+        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+
+        let file_path = match self.find_tool_file(name) {
+            Some(p) => p,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: format!("Tool '{}' not found.", name),
+                });
+            }
+        };
+
+        std::fs::remove_file(&file_path)
+            .map_err(|e| AthenaError::Tool(format!("Failed to delete tool file: {}", e)))?;
+
+        Ok(ToolResult {
+            success: true,
+            output: format!("Deleted tool '{}'", name),
+        })
+    }
+}
+
+#[async_trait]
+impl Tool for ManageToolsTool {
+    fn name(&self) -> &str {
+        "manage_tools"
+    }
+
+    fn description(&self) -> String {
+        r#"Manage dynamic tool definitions (create/edit/delete/list YAML tool files).
+Actions:
+  - list: Show all defined tools
+  - create: Create a new tool (requires name + yaml)
+  - edit: Update an existing tool (requires name + yaml)
+  - delete: Remove a tool (requires name)
+Usage: {"tool": "manage_tools", "params": {"action": "list|create|edit|delete", "name": "tool_name", "yaml": "full YAML content"}}"#.into()
+    }
+
+    fn needs_confirmation(&self) -> bool {
+        true // Always require user approval for tool management
+    }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: list, create, edit, or delete",
+                    "enum": ["list", "create", "edit", "delete"]
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Tool name (required for create/edit/delete)"
+                },
+                "yaml": {
+                    "type": "string",
+                    "description": "Full YAML tool definition (required for create/edit). Required fields: name, description, command. Optional: execution (docker|host, default docker), needs_confirmation (bool), parameters (list), allowed_commands (list). Example:\nname: disk_usage\ndescription: \"Check disk usage\"\ncommand: \"df -h\"\nexecution: host"
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AthenaError::Tool("manage_tools: missing 'action' param".into()))?;
+
+        match action {
+            "list" => self.handle_list(),
+            "create" => {
+                let name = params.get("name").and_then(|v| v.as_str())
+                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'create' requires 'name' param".into()))?;
+                let yaml = params.get("yaml").and_then(|v| v.as_str())
+                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'create' requires 'yaml' param".into()))?;
+                self.handle_create(name, yaml)
+            }
+            "edit" => {
+                let name = params.get("name").and_then(|v| v.as_str())
+                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'edit' requires 'name' param".into()))?;
+                let yaml = params.get("yaml").and_then(|v| v.as_str())
+                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'edit' requires 'yaml' param".into()))?;
+                self.handle_edit(name, yaml)
+            }
+            "delete" => {
+                let name = params.get("name").and_then(|v| v.as_str())
+                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'delete' requires 'name' param".into()))?;
+                self.handle_delete(name)
+            }
+            _ => Ok(ToolResult {
+                success: false,
+                output: format!("manage_tools: unknown action '{}'. Use list/create/edit/delete.", action),
+            }),
+        }
+    }
+}
+
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
+    usage_store: Option<Arc<crate::tool_usage::ToolUsageStore>>,
 }
 
 impl ToolRegistry {
     /// Build a registry scoped to a ghost's allowed tools.
     /// If `dynamic_tools_path` is provided, also loads YAML-defined tools from that directory.
-    pub fn for_ghost(ghost: &GhostConfig, dynamic_tools_path: Option<&Path>) -> Self {
+    pub fn for_ghost(
+        ghost: &GhostConfig,
+        dynamic_tools_path: Option<&Path>,
+        knobs: SharedKnobs,
+        github_token: Option<String>,
+        usage_store: Option<Arc<crate::tool_usage::ToolUsageStore>>,
+    ) -> Self {
         // Resolve host workspace for CLI tools (first writable mount, or ".")
         let host_workspace = ghost.mounts.iter()
             .find(|m| !m.read_only)
@@ -1189,14 +1593,15 @@ impl ToolRegistry {
             Box::new(CodebaseMapTool),
             Box::new(LintTool),
             Box::new(DiffTool),
-            Box::new(ClaudeCodeTool::new(&host_workspace)),
-            Box::new(CodexTool::new(&host_workspace)),
-            Box::new(OpenCodeTool::new(&host_workspace)),
+            Box::new(ClaudeCodeTool::new(&host_workspace, knobs.clone())),
+            Box::new(CodexTool::new(&host_workspace, knobs.clone())),
+            Box::new(OpenCodeTool::new(&host_workspace, knobs)),
+            Box::new(GhTool::new(&host_workspace, github_token)),
         ];
 
         // Load dynamic tools from YAML definitions
         if let Some(path) = dynamic_tools_path {
-            match dynamic_tools::discover(path) {
+            match dynamic_tools::discover(path, &host_workspace) {
                 Ok(dynamic) => {
                     tracing::info!("Discovered {} dynamic tool(s) from {}", dynamic.len(), path.display());
                     all_tools.extend(dynamic);
@@ -1205,6 +1610,9 @@ impl ToolRegistry {
                     tracing::warn!("Failed to discover dynamic tools: {}", e);
                 }
             }
+
+            // Add manage_tools meta-tool (available if dynamic_tools_path is configured)
+            all_tools.push(Box::new(ManageToolsTool::new(path.to_path_buf())));
         }
 
         let tools: HashMap<String, Box<dyn Tool>> = all_tools
@@ -1213,17 +1621,26 @@ impl ToolRegistry {
             .map(|t| (t.name().to_string(), t))
             .collect();
 
-        Self { tools }
+        Self { tools, usage_store }
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|b| b.as_ref())
     }
 
-    /// Format tool descriptions for the LLM system prompt
+    /// Format tool descriptions for the LLM system prompt.
+    /// Enriches descriptions with usage stats when available.
     pub fn descriptions(&self) -> String {
         self.tools.values()
-            .map(|t| format!("- {}", t.description()))
+            .map(|t| {
+                let base = t.description();
+                if let Some(ref store) = self.usage_store {
+                    if let Ok(Some(stats)) = store.get(t.name()) {
+                        return format!("- {} {}", base, stats.summary());
+                    }
+                }
+                format!("- {}", base)
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1516,6 +1933,12 @@ mod tests {
 
     // ── Tool registry / ghost scoping ───────────────────────────────
 
+    fn test_knobs() -> SharedKnobs {
+        std::sync::Arc::new(std::sync::RwLock::new(
+            crate::knobs::RuntimeKnobs::default_for_test(),
+        ))
+    }
+
     fn make_ghost(tools: Vec<&str>) -> GhostConfig {
         GhostConfig {
             name: "test".into(),
@@ -1536,7 +1959,7 @@ mod tests {
             "grep", "glob", "web_fetch", "codebase_map",
             "web_search", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 11);
         assert!(reg.get("codebase_map").is_some());
@@ -1551,7 +1974,7 @@ mod tests {
             "file_read", "shell", "grep", "glob",
             "codebase_map", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 6);
         assert!(reg.get("codebase_map").is_some());
@@ -1567,7 +1990,7 @@ mod tests {
     #[test]
     fn test_registry_filters_unknown_tools() {
         let ghost = make_ghost(vec!["shell", "nonexistent_tool"]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 1);
         assert!(reg.get("shell").is_some());
         assert!(reg.get("nonexistent_tool").is_none());
@@ -1576,7 +1999,7 @@ mod tests {
     #[test]
     fn test_registry_empty_tools() {
         let ghost = make_ghost(vec![]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 0);
     }
 
@@ -1587,7 +2010,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 11);
     }
 
@@ -1600,7 +2023,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         // Every registered tool name must match what the tool reports
         for name in reg.tool_names() {
             let tool = reg.get(name).unwrap();
@@ -1615,7 +2038,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let desc = reg.descriptions();
         assert!(!desc.is_empty());
         // Each tool should have a description line
@@ -1633,7 +2056,7 @@ mod tests {
             "grep", "glob", "web_fetch", "web_search",
             "codebase_map", "lint", "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
 
         // No tools require confirmation (Docker sandbox is the safety boundary)
         assert!(!reg.get("file_write").unwrap().needs_confirmation());
@@ -1651,5 +2074,125 @@ mod tests {
         assert!(!reg.get("grep").unwrap().needs_confirmation());
         assert!(!reg.get("glob").unwrap().needs_confirmation());
         assert!(!reg.get("web_fetch").unwrap().needs_confirmation());
+    }
+
+    // ── ManageToolsTool ──────────────────────────────────────────────
+
+    #[test]
+    fn test_manage_tools_validate_name() {
+        assert!(ManageToolsTool::validate_name("my_tool").is_ok());
+        assert!(ManageToolsTool::validate_name("my-tool-2").is_ok());
+        assert!(ManageToolsTool::validate_name("").is_err());
+        assert!(ManageToolsTool::validate_name("../etc").is_err());
+        assert!(ManageToolsTool::validate_name("foo/bar").is_err());
+        assert!(ManageToolsTool::validate_name("a b").is_err());
+    }
+
+    #[test]
+    fn test_manage_tools_create_and_list() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_create");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = ManageToolsTool::new(dir.clone());
+
+        let yaml = r#"name: disk_usage
+description: "Check disk usage"
+command: "df -h"
+execution: host
+allowed_commands: ["df"]
+"#;
+        let result = tool.handle_create("disk_usage", yaml).unwrap();
+        assert!(result.success, "Create failed: {}", result.output);
+        assert!(dir.join("disk_usage.yml").exists());
+
+        // List should show it
+        let list = tool.handle_list().unwrap();
+        assert!(list.output.contains("disk_usage"));
+
+        // Duplicate create should fail
+        let dup = tool.handle_create("disk_usage", yaml).unwrap();
+        assert!(!dup.success);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manage_tools_edit() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_edit");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = ManageToolsTool::new(dir.clone());
+
+        let yaml1 = r#"name: my_tool
+description: "v1"
+command: "echo v1"
+"#;
+        tool.handle_create("my_tool", yaml1).unwrap();
+
+        let yaml2 = r#"name: my_tool
+description: "v2"
+command: "echo v2"
+"#;
+        let result = tool.handle_edit("my_tool", yaml2).unwrap();
+        assert!(result.success);
+
+        let contents = std::fs::read_to_string(dir.join("my_tool.yml")).unwrap();
+        assert!(contents.contains("v2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manage_tools_delete() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_delete");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = ManageToolsTool::new(dir.clone());
+
+        let yaml = r#"name: tmp_tool
+description: "temp"
+command: "echo hi"
+"#;
+        tool.handle_create("tmp_tool", yaml).unwrap();
+        assert!(dir.join("tmp_tool.yml").exists());
+
+        let result = tool.handle_delete("tmp_tool").unwrap();
+        assert!(result.success);
+        assert!(!dir.join("tmp_tool.yml").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manage_tools_name_mismatch() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = ManageToolsTool::new(dir.clone());
+
+        let yaml = r#"name: actual_name
+description: "test"
+command: "echo hi"
+"#;
+        let result = tool.handle_create("different_name", yaml).unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("mismatch"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manage_tools_invalid_yaml() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_bad_yaml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = ManageToolsTool::new(dir.clone());
+
+        let result = tool.handle_create("test", "not valid yaml tool def");
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manage_tools_needs_confirmation() {
+        let dir = std::env::temp_dir().join("athena_test_manage_tools_confirm");
+        let tool = ManageToolsTool::new(dir);
+        assert!(tool.needs_confirmation(), "manage_tools must always require confirmation");
     }
 }

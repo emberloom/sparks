@@ -25,6 +25,7 @@ mod self_heal;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+mod tool_usage;
 mod tools;
 
 use clap::{Parser, Subcommand};
@@ -420,6 +421,12 @@ async fn run_chat(
                 println!("Commands:");
                 println!("  /ghosts    — List active ghosts");
                 println!("  /memories  — List saved memories");
+                println!("  /model     — Show/switch LLM model");
+                println!("  /model <name>  — Switch LLM model");
+                println!("  /models    — List available models from API");
+                println!("  /cli_model — Show/switch model for CLI tools (Claude Code, Codex, OpenCode)");
+                println!("  /cli_model <name> — Set CLI tool model");
+                println!("  /cli_model reset  — Reset to tool default");
                 println!("  /set       — Show/change runtime knobs");
                 println!("  /mood      — Show current mood");
                 println!("  /jobs      — List scheduled jobs");
@@ -470,7 +477,62 @@ async fn run_chat(
                 }
                 continue;
             }
+            "/models" => {
+                match handle.llm.list_models().await {
+                    Ok(models) if models.is_empty() => println!("No models returned by API."),
+                    Ok(models) => {
+                        let current = handle.llm.current_model();
+                        println!("Available models:");
+                        for m in &models {
+                            if *m == current {
+                                println!("  {} (active)", m);
+                            } else {
+                                println!("  {}", m);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Error listing models: {}", e),
+                }
+                continue;
+            }
             _ => {}
+        }
+
+        // /model [name|reset]
+        if input == "/model" {
+            println!("Current model: {}", handle.llm.current_model());
+            continue;
+        }
+        if let Some(arg) = input.strip_prefix("/model ") {
+            let arg = arg.trim();
+            if arg == "reset" {
+                handle.llm.set_model_override(None);
+                println!("Reset to default model: {}", handle.llm.current_model());
+            } else {
+                handle.llm.set_model_override(Some(arg.to_string()));
+                println!("Model set to: {}", arg);
+            }
+            continue;
+        }
+
+        // /cli_model [name|reset]
+        if input == "/cli_model" {
+            let model = handle.knobs.read().unwrap().cli_model.clone();
+            if model.is_empty() {
+                println!("CLI tool model: default (tool decides)");
+            } else {
+                println!("CLI tool model: {}", model);
+            }
+            continue;
+        }
+        if let Some(arg) = input.strip_prefix("/cli_model ") {
+            let arg = arg.trim();
+            let mut k = handle.knobs.write().unwrap();
+            match k.set("cli_model", arg) {
+                Ok(msg) => println!("{}", msg),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+            continue;
         }
 
         // Send through core
@@ -497,6 +559,19 @@ async fn run_chat(
                     }
                     print!("{}", chunk);
                     let _ = std::io::stdout().flush();
+                }
+                CoreEvent::ToolRun { tool, result, success } => {
+                    let icon = if success { "\u{2705}" } else { "\u{274c}" };
+                    let body = result
+                        .strip_prefix("[tool result]\n")
+                        .or_else(|| result.strip_prefix("[tool error]\n"))
+                        .unwrap_or(&result);
+                    let preview = if body.len() > 200 {
+                        format!("{}... [{} chars]", &body[..body.floor_char_boundary(200)], body.len())
+                    } else {
+                        body.to_string()
+                    };
+                    eprintln!("  {} {} → {}", icon, tool, preview.replace('\n', " "));
                 }
                 CoreEvent::Response(r) => {
                     if streaming {

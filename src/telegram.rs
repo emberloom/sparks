@@ -45,6 +45,27 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
+/// Format a token count as human-readable (e.g., "128k", "1.2M").
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let m = tokens as f64 / 1_000_000.0;
+        if m == m.trunc() {
+            format!("{}M", m as u64)
+        } else {
+            format!("{:.1}M", m)
+        }
+    } else if tokens >= 1_000 {
+        let k = tokens as f64 / 1_000.0;
+        if k == k.trunc() {
+            format!("{}k", k as u64)
+        } else {
+            format!("{:.1}k", k)
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// Build a visual energy bar like [████████░░].
 fn energy_bar(energy: f32) -> String {
     let filled = (energy * 10.0).round() as usize;
@@ -319,6 +340,9 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         let help = "<b>Athena</b>\n\n\
             <b>Commands:</b>\n\
             /status — System status &amp; uptime\n\
+            /model — Show/switch LLM model\n\
+            /models — List available models from API\n\
+            /cli_model — Show/switch model for CLI tools\n\
             /knobs — Runtime knob values\n\
             /mood — Current mood state\n\
             /jobs — Scheduled cron jobs\n\
@@ -381,25 +405,44 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         let mood_desc = state.handle.mood.describe();
         let idle = state.handle.activity.idle_secs();
         let last_active = if idle < 5 { "just now".to_string() } else { format!("{} ago", format_duration(idle)) };
+        let current_model = state.handle.llm.current_model();
+        let context_window = state.handle.llm.context_window();
+        let ctx_label = if context_window >= 1_000_000 {
+            format!("{}M", context_window / 1_000_000)
+        } else {
+            format!("{}k", context_window / 1_000)
+        };
+
+        // Try fetching credits (non-blocking, graceful failure)
+        let credits_line = match state.handle.llm.credits().await {
+            Ok(Some((total, used))) => {
+                let remaining = total - used;
+                format!("\n<b>Credits:</b> <code>${:.2} remaining</code> (${:.2} used of ${:.2})", remaining, used, total)
+            }
+            _ => String::new(),
+        };
 
         let html = format!(
             "<b>System Status</b>\n\n\
              <b>Provider:</b> <code>{}</code>\n\
              <b>Model:</b> <code>{}</code>\n\
+             <b>Context:</b> <code>{} tokens</code>\n\
              <b>Temperature:</b> <code>{}</code>\n\
              <b>Max tokens:</b> <code>{}</code>\n\
              <b>Uptime:</b> <code>{}</code>\n\
              <b>Last active:</b> <code>{}</code>\n\
              <b>Ghosts:</b> <code>{}</code>\n\
-             <b>Mood:</b> {}",
+             <b>Mood:</b> {}{credits}",
             escape_html(&info.provider),
-            escape_html(&info.model),
+            escape_html(&current_model),
+            ctx_label,
             info.temperature,
             info.max_tokens,
             format_duration(uptime_secs),
             escape_html(&last_active),
             ghost_count,
             escape_html(&mood_desc),
+            credits = credits_line,
         );
         send_html(&bot, chat_id, &html).await?;
         return Ok(());
@@ -481,10 +524,20 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         let turns = state
             .handle
             .memory
-            .recent_turns(&session_key, 20)
+            .recent_turns(&session_key, 100)
             .unwrap_or_default();
 
         let turn_count = turns.len();
+        let total_chars: usize = turns.iter().map(|(_, c)| c.len()).sum();
+        let est_tokens = total_chars / 4; // rough estimate: ~4 chars per token
+        let context_window = state.handle.llm.context_window();
+        let utilization = if context_window > 0 {
+            (est_tokens as f64 / context_window as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+        let current_model = state.handle.llm.current_model();
+
         let last_preview = turns
             .last()
             .map(|(role, content)| {
@@ -500,10 +553,17 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         let html = format!(
             "<b>Session</b>\n\n\
              <b>Key:</b> <code>{}</code>\n\
-             <b>Recent turns:</b> <code>{}</code>\n\
+             <b>Model:</b> <code>{}</code>\n\
+             <b>Turns:</b> <code>{}</code>\n\
+             <b>Est. tokens:</b> <code>~{}</code>\n\
+             <b>Context:</b> <code>{:.0}%</code> of <code>{}</code>\n\
              <b>Last message:</b>\n<i>{}</i>",
             escape_html(&session_key),
+            escape_html(&current_model),
             turn_count,
+            format_tokens(est_tokens as u64),
+            utilization,
+            format_tokens(context_window),
             escape_html(&last_preview),
         );
         send_html(&bot, chat_id, &html).await?;
@@ -600,6 +660,80 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         return Ok(());
     }
 
+    // /model [name|reset]
+    if text == "/model" {
+        let current = state.handle.llm.current_model();
+        let html = format!("<b>Current model:</b> <code>{}</code>", escape_html(&current));
+        send_html(&bot, chat_id, &html).await?;
+        return Ok(());
+    }
+    if let Some(arg) = text.strip_prefix("/model ") {
+        let arg = arg.trim();
+        if arg == "reset" {
+            state.handle.llm.set_model_override(None);
+            let current = state.handle.llm.current_model();
+            let html = format!("<b>Reset to default:</b> <code>{}</code>", escape_html(&current));
+            send_html(&bot, chat_id, &html).await?;
+        } else {
+            state.handle.llm.set_model_override(Some(arg.to_string()));
+            let html = format!("<b>Model set to:</b> <code>{}</code>", escape_html(arg));
+            send_html(&bot, chat_id, &html).await?;
+        }
+        return Ok(());
+    }
+
+    if text == "/models" {
+        match state.handle.llm.list_models().await {
+            Ok(models) if models.is_empty() => {
+                send_html(&bot, chat_id, "<i>No models returned by API.</i>").await?;
+            }
+            Ok(models) => {
+                let current = state.handle.llm.current_model();
+                let mut out = String::from("<b>Available models:</b>\n\n");
+                for m in &models {
+                    if *m == current {
+                        out.push_str(&format!("• <b>{}</b> (active)\n", escape_html(m)));
+                    } else {
+                        out.push_str(&format!("• <code>{}</code>\n", escape_html(m)));
+                    }
+                }
+                send_html(&bot, chat_id, &out).await?;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to list models");
+                send_html(&bot, chat_id, "<i>Failed to list models.</i>").await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // /cli_model [name|reset]
+    if text == "/cli_model" {
+        let model = state.handle.knobs.read().unwrap().cli_model.clone();
+        let label = if model.is_empty() { "default (tool decides)".to_string() } else { model };
+        let html = format!("<b>CLI tool model:</b> <code>{}</code>", escape_html(&label));
+        send_html(&bot, chat_id, &html).await?;
+        return Ok(());
+    }
+    if let Some(arg) = text.strip_prefix("/cli_model ") {
+        let arg = arg.trim();
+        let result = {
+            let mut k = state.handle.knobs.write().unwrap();
+            k.set("cli_model", arg)
+        };
+        match result {
+            Ok(msg) => {
+                let html = format!("<b>Set:</b> {}", escape_html(&msg));
+                send_html(&bot, chat_id, &html).await?;
+            }
+            Err(e) => {
+                let html = format!("<i>Error: {}</i>", escape_html(&e));
+                send_html(&bot, chat_id, &html).await?;
+            }
+        }
+        return Ok(());
+    }
+
     // ── Rate-limited LLM messages ────────────────────────────────────
 
     // M7: Per-chat rate limiting (5-second cooldown before LLM-invoking messages)
@@ -691,6 +825,31 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                         last_edit = now;
                     }
                 }
+                CoreEvent::ToolRun { tool, result, success } => {
+                    let icon = if success { "\u{2705}" } else { "\u{274c}" }; // ✅ / ❌
+                    // Strip the [tool result]/[tool error] prefix for display
+                    let body = result
+                        .strip_prefix("[tool result]\n")
+                        .or_else(|| result.strip_prefix("[tool error]\n"))
+                        .unwrap_or(&result);
+                    // Truncate long outputs for Telegram
+                    let display = if body.len() > 1500 {
+                        format!(
+                            "{}...\n<i>[{} chars total]</i>",
+                            escape_html(&body[..body.floor_char_boundary(1500)]),
+                            body.len()
+                        )
+                    } else {
+                        escape_html(body)
+                    };
+                    let html = format!(
+                        "{} <b>{}</b>\n<blockquote><pre>{}</pre></blockquote>",
+                        icon,
+                        escape_html(&tool),
+                        display,
+                    );
+                    let _ = send_html(&bot, chat_id, &html).await;
+                }
                 CoreEvent::Response(r) => {
                     // Delete the status message
                     let _ = bot.delete_message(chat_id, status_msg.id).await;
@@ -701,6 +860,11 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
                     } else {
                         r
                     };
+
+                    // Skip empty responses (e.g. direct path already showed ToolRun)
+                    if response_text.trim().is_empty() {
+                        break;
+                    }
 
                     // Send response, escaped and chunked
                     let escaped = escape_html(&response_text);
@@ -901,6 +1065,9 @@ pub async fn run_telegram(
     let commands = vec![
         BotCommand::new("help", "Show available commands"),
         BotCommand::new("status", "System status & uptime"),
+        BotCommand::new("model", "Show/switch LLM model"),
+        BotCommand::new("models", "List available models"),
+        BotCommand::new("cli_model", "Show/switch CLI tool model"),
         BotCommand::new("knobs", "Runtime knob values"),
         BotCommand::new("mood", "Current mood state"),
         BotCommand::new("jobs", "Scheduled cron jobs"),

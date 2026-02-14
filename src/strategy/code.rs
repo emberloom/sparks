@@ -12,9 +12,9 @@ use crate::tools::ToolRegistry;
 use super::{LoopStrategy, StatusSender, TaskContract};
 
 /// Read-only tools allowed in the EXPLORE phase
-const EXPLORE_TOOLS: &[&str] = &["file_read", "grep", "glob", "codebase_map", "shell", "diff"];
+const EXPLORE_TOOLS: &[&str] = &["file_read", "grep", "glob", "codebase_map", "shell", "diff", "git", "gh"];
 /// Tools allowed in the VERIFY phase (read-only + lint)
-const VERIFY_TOOLS: &[&str] = &["file_read", "grep", "glob", "shell", "lint", "diff"];
+const VERIFY_TOOLS: &[&str] = &["file_read", "grep", "glob", "shell", "lint", "diff", "git", "gh"];
 /// Coding CLI tools for the EXECUTE phase
 const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
@@ -174,7 +174,7 @@ impl CodeStrategy {
                         "params": tc.arguments,
                     });
                     let result = executor
-                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                        .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx)
                         .await;
                     (*tc, result)
                 }).collect();
@@ -285,7 +285,7 @@ impl CodeStrategy {
             send_status(status_tx, &format!("Exploring: {} ...", tool_name)).await;
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, status_tx)
                 .await?;
 
             tracing::debug!(step, tool = tool_name, path = "text", "EXPLORE tool executed");
@@ -495,7 +495,7 @@ impl CodeStrategy {
                         "params": tc.arguments,
                     });
                     let result = executor
-                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                        .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx)
                         .await;
                     (*tc, result)
                 }).collect();
@@ -577,7 +577,7 @@ impl CodeStrategy {
             send_status(status_tx, &format!("Verifying: {} ...", tool_name)).await;
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, status_tx)
                 .await?;
 
             tracing::debug!(step, tool = tool_name, path = "text", "VERIFY tool executed");

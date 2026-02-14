@@ -34,6 +34,7 @@ pub struct RuntimeKnobs {
     pub quiet_hours: Option<(u32, u32)>,
     pub timezone_offset: i32,
     pub cli_tool: String,
+    pub cli_model: String,
 }
 
 impl RuntimeKnobs {
@@ -69,6 +70,36 @@ impl RuntimeKnobs {
             quiet_hours,
             timezone_offset: config.mood.timezone_offset,
             cli_tool: "claude_code".to_string(),
+            cli_model: String::new(),
+        }
+    }
+
+    /// Create a minimal instance for tests (no Config needed).
+    #[cfg(test)]
+    pub fn default_for_test() -> Self {
+        Self {
+            all_proactive: false,
+            heartbeat_enabled: false,
+            cron_enabled: false,
+            mood_enabled: false,
+            memory_scan_enabled: false,
+            idle_musings_enabled: false,
+            conversation_reentry_enabled: false,
+            reentry_delay_secs: 300,
+            reentry_jitter: 0.2,
+            relationship_tracking_enabled: false,
+            mood_injection_enabled: false,
+            spontaneity: 0.5,
+            heartbeat_interval_secs: 600,
+            heartbeat_jitter: 0.2,
+            memory_scan_interval_secs: 300,
+            idle_threshold_secs: 300,
+            mood_drift_interval_secs: 600,
+            pulse_tolerance: 0.5,
+            quiet_hours: None,
+            timezone_offset: 0,
+            cli_tool: "claude_code".to_string(),
+            cli_model: String::new(),
         }
     }
 
@@ -199,6 +230,15 @@ impl RuntimeKnobs {
                     Err(format!("Invalid CLI tool: {}. Valid: {}", value, VALID.join(", ")))
                 }
             }
+            "cli_model" => {
+                if value == "reset" || value == "default" || value.is_empty() {
+                    self.cli_model = String::new();
+                    Ok("CLI model: default (tool decides)".to_string())
+                } else {
+                    self.cli_model = value.to_string();
+                    Ok(format!("CLI model: {}", self.cli_model))
+                }
+            }
             _ => Err(format!("Unknown knob: {}", key)),
         }
     }
@@ -235,6 +275,7 @@ impl RuntimeKnobs {
         );
         let _ = writeln!(s, "  timezone_offset        {}h", self.timezone_offset);
         let _ = writeln!(s, "  cli_tool               {}", self.cli_tool);
+        let _ = writeln!(s, "  cli_model              {}", if self.cli_model.is_empty() { "default" } else { &self.cli_model });
         s
     }
 }

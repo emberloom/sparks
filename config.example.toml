@@ -5,6 +5,7 @@ provider = "ollama"
 [ollama]
 url = "http://localhost:11434"
 model = "qwen2.5:7b"
+classifier_model = "qwen2.5:3b"    # lighter model for routing decisions
 temperature = 0.3
 max_tokens = 4096
 
@@ -29,7 +30,7 @@ max_tokens = 4096
 [docker]
 # Pin images by digest for reproducibility, e.g.:
 # image = "ubuntu@sha256:<digest>"
-image = "ubuntu:24.04"
+image = "athena-sandbox"
 socket_path = "/var/run/docker.sock"
 runtime = "runc"
 memory_limit = 268435456
@@ -53,9 +54,9 @@ max_steps = 15
 # Each ghost can have its own soul file for personality/identity.
 [[ghosts]]
 name = "coder"
-description = "Reads, writes, and modifies code files. Can run build/test commands."
-tools = ["file_read", "file_write", "shell"]
-strategy = "react"
+description = "Complex multi-file coding tasks: refactoring, new features, bug fixes across files."
+tools = ["file_read", "file_write", "shell", "git", "gh"]
+strategy = "code"
 # soul_file = "~/.athena/souls/coder.md"
 
 [[ghosts.mounts]]
@@ -90,3 +91,6 @@ enabled = true
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300
+
+[github]
+# token = "ghp_..."  # or set GH_TOKEN env var

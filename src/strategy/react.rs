@@ -122,7 +122,7 @@ impl ReactStrategy {
                             "params": tc.arguments,
                         });
                         let result = executor
-                            .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                            .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx)
                             .await;
                         (tc, result)
                     }).collect();
@@ -175,7 +175,7 @@ impl ReactStrategy {
                                 "params": tc.arguments,
                             });
                             let result = executor
-                                .execute_tool(&tc.name, &json, tools, docker, confirmer)
+                                .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx)
                                 .await;
                             (tc, result)
                         }).collect();
@@ -237,7 +237,7 @@ impl ReactStrategy {
             let tool_name = json["tool"].as_str().unwrap_or("");
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, None)
                 .await?;
 
             tracing::debug!(step, tool = tool_name, path = "text", "Tool executed");

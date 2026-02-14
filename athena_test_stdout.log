@@ -1,0 +1,15 @@
+
+Files in /workspace:
+Cargo.lock
+Cargo.toml
+athena_stderr.log
+athena_test.log
+athena_test_stderr.log
+athena_test_stdout.log
+awesome_project/
+config.example.toml
+config.toml
+scripts/
+src/
+target/
+

@@ -72,6 +72,17 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     INSERT OR IGNORE INTO mood_state (id) VALUES (1);",
+    // v9: tool usage tracking — one row per tool, aggregated stats
+    "CREATE TABLE IF NOT EXISTS tool_usage (
+        tool_name TEXT PRIMARY KEY,
+        invocation_count INTEGER NOT NULL DEFAULT 0,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_used TEXT,
+        avg_duration_ms REAL NOT NULL DEFAULT 0.0,
+        last_error TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

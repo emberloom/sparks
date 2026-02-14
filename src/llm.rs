@@ -249,6 +249,24 @@ pub trait LlmProvider: Send + Sync {
         Ok((ChatResponse::Text(text), None))
     }
 
+    /// Return the currently active model name.
+    fn current_model(&self) -> String {
+        String::new()
+    }
+
+    /// Override the model at runtime (None = reset to config default).
+    fn set_model_override(&self, _model: Option<String>) {}
+
+    /// List models available from this provider's API.
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// Query account credits (total, used). Returns None if not supported.
+    async fn credits(&self) -> Result<Option<(f64, f64)>> {
+        Ok(None)
+    }
+
     /// Whether this provider supports streaming.
     fn supports_streaming(&self) -> bool {
         false
@@ -440,6 +458,10 @@ impl LlmProvider for OllamaClient {
     fn provider_name(&self) -> &str {
         "Ollama"
     }
+
+    fn current_model(&self) -> String {
+        self.config.model.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +481,7 @@ pub struct OpenAiCompatibleClient {
     client: Client,
     config: OpenAiCompatibleConfig,
     name: String,
+    model_override: std::sync::RwLock<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -543,22 +566,33 @@ impl OpenAiCompatibleClient {
             client: Client::new(),
             config,
             name: name.into(),
+            model_override: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Return the model to use: override if set, otherwise config default.
+    fn effective_model(&self) -> String {
+        self.model_override
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone())
     }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleClient {
     async fn chat(&self, messages: &[Message]) -> Result<String> {
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             "LLM request"
         );
 
         let req = OpenAiChatRequest {
-            model: self.config.model.clone(),
+            model,
             messages: messages.to_vec(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
@@ -631,15 +665,83 @@ impl LlmProvider for OpenAiCompatibleClient {
         self.config.context_window
     }
 
+    fn current_model(&self) -> String {
+        self.effective_model()
+    }
+
+    fn set_model_override(&self, model: Option<String>) {
+        *self.model_override.write().unwrap() = model;
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let resp = self
+            .client
+            .get(format!("{}/models", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AthenaError::Llm(format!(
+                "{} /models returned {}: {}",
+                self.name, status, body
+            )));
+        }
+
+        let body: Value = resp.json().await?;
+        let mut models: Vec<String> = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.sort();
+        Ok(models)
+    }
+
+    async fn credits(&self) -> Result<Option<(f64, f64)>> {
+        // Only supported for OpenRouter (URL contains openrouter.ai)
+        if !self.config.url.contains("openrouter.ai") {
+            return Ok(None);
+        }
+
+        let resp = self
+            .client
+            .get(format!("{}/credits", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            // Non-fatal: might be a non-management key
+            tracing::debug!(
+                provider = %self.name,
+                status = %resp.status(),
+                "Credits endpoint unavailable"
+            );
+            return Ok(None);
+        }
+
+        let body: Value = resp.json().await?;
+        let total = body["data"]["total_credits"].as_f64().unwrap_or(0.0);
+        let used = body["data"]["total_usage"].as_f64().unwrap_or(0.0);
+        Ok(Some((total, used)))
+    }
+
     async fn chat_with_tools(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSchema],
     ) -> Result<(ChatResponse, Option<TokenUsage>)> {
         let has_tools = !tools.is_empty();
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             has_tools,
             "LLM request (with tools)"
@@ -671,7 +773,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         };
 
         let req = OpenAiChatRequestWithTools {
-            model: self.config.model.clone(),
+            model,
             messages: wire_messages,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
@@ -792,9 +894,10 @@ impl LlmProvider for OpenAiCompatibleClient {
         tools: &[ToolSchema],
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let has_tools = !tools.is_empty();
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             has_tools,
             stream = true,
@@ -825,7 +928,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         };
 
         let req = OpenAiChatRequestWithTools {
-            model: self.config.model.clone(),
+            model,
             messages: wire_messages,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,

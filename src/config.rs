@@ -40,6 +40,8 @@ pub struct Config {
     pub proactive: ProactiveConfig,
     #[serde(default)]
     pub initiative: InitiativeConfig,
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -50,11 +52,15 @@ pub struct LlmConfig {
 
 impl Default for LlmConfig {
     fn default() -> Self {
-        Self { provider: default_provider() }
+        Self {
+            provider: default_provider(),
+        }
     }
 }
 
-fn default_provider() -> String { "ollama".into() }
+fn default_provider() -> String {
+    "ollama".into()
+}
 
 #[derive(Deserialize, Clone)]
 pub struct OpenRouterConfig {
@@ -85,8 +91,12 @@ impl std::fmt::Debug for OpenRouterConfig {
     }
 }
 
-fn default_openrouter_url() -> String { "https://openrouter.ai/api/v1".into() }
-fn default_context_window() -> u64 { 128_000 }
+fn default_openrouter_url() -> String {
+    "https://openrouter.ai/api/v1".into()
+}
+fn default_context_window() -> u64 {
+    128_000
+}
 
 #[derive(Deserialize, Clone)]
 pub struct ZenConfig {
@@ -117,7 +127,9 @@ impl std::fmt::Debug for ZenConfig {
     }
 }
 
-fn default_zen_url() -> String { "https://opencode.ai/zen/v1".into() }
+fn default_zen_url() -> String {
+    "https://opencode.ai/zen/v1".into()
+}
 
 #[derive(Deserialize, Clone)]
 pub struct TelegramConfig {
@@ -189,8 +201,12 @@ impl Default for EmbeddingConfig {
     }
 }
 
-fn default_embedding_enabled() -> bool { true }
-fn default_model_dir() -> String { "~/.athena/models/all-MiniLM-L6-v2".into() }
+fn default_embedding_enabled() -> bool {
+    true
+}
+fn default_model_dir() -> String {
+    "~/.athena/models/all-MiniLM-L6-v2".into()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
@@ -209,8 +225,12 @@ impl Default for MemoryConfig {
     }
 }
 
-fn default_half_life() -> f32 { 30.0 }
-fn default_dedup_threshold() -> f32 { 0.95 }
+fn default_half_life() -> f32 {
+    30.0
+}
+fn default_dedup_threshold() -> f32 {
+    0.95
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HeartbeatConfig {
@@ -234,8 +254,12 @@ impl Default for HeartbeatConfig {
     }
 }
 
-fn default_heartbeat_interval() -> u64 { 1800 }
-fn default_heartbeat_jitter() -> f64 { 0.2 }
+fn default_heartbeat_interval() -> u64 {
+    1800
+}
+fn default_heartbeat_jitter() -> f64 {
+    0.2
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MoodConfig {
@@ -257,7 +281,9 @@ impl Default for MoodConfig {
     }
 }
 
-fn default_mood_drift_interval() -> u64 { 900 }
+fn default_mood_drift_interval() -> u64 {
+    900
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProactiveConfig {
@@ -288,11 +314,21 @@ impl Default for ProactiveConfig {
     }
 }
 
-fn default_memory_scan_interval() -> u64 { 3600 }
-fn default_idle_threshold() -> u64 { 1800 }
-fn default_spontaneity() -> f32 { 0.3 }
-fn default_reentry_delay() -> u64 { 7200 } // 2 hours
-fn default_reentry_jitter() -> f64 { 0.7 } // ±70% → 36min to 3h24m
+fn default_memory_scan_interval() -> u64 {
+    3600
+}
+fn default_idle_threshold() -> u64 {
+    1800
+}
+fn default_spontaneity() -> f32 {
+    0.3
+}
+fn default_reentry_delay() -> u64 {
+    7200
+} // 2 hours
+fn default_reentry_jitter() -> f64 {
+    0.7
+} // ±70% → 36min to 3h24m
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct InitiativeConfig {
@@ -312,7 +348,28 @@ impl Default for InitiativeConfig {
     }
 }
 
-fn default_tolerance() -> f32 { 0.5 }
+fn default_tolerance() -> f32 {
+    0.5
+}
+
+#[derive(Deserialize, Clone)]
+pub struct GithubConfig {
+    pub token: Option<String>,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self { token: None }
+    }
+}
+
+impl std::fmt::Debug for GithubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubConfig")
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
@@ -406,19 +463,45 @@ pub struct MountConfig {
 }
 
 // Defaults
-fn default_ollama_url() -> String { "http://localhost:11434".into() }
-fn default_model() -> String { "llama3.2".into() }
-fn default_temperature() -> f32 { 0.3 }
-fn default_max_tokens() -> u32 { 4096 }
-fn default_image() -> String { "ubuntu:24.04".into() }
-fn default_socket_path() -> String { "/var/run/docker.sock".into() }
-fn default_runtime() -> String { "runc".into() }
-fn default_memory_limit() -> i64 { 268_435_456 } // 256MB
-fn default_cpu_quota() -> i64 { 50_000 }
-fn default_timeout_secs() -> u64 { 120 }
-fn default_db_path() -> String { "~/.athena/athena.db".into() }
-fn default_max_steps() -> usize { 15 }
-fn default_strategy() -> String { "react".into() }
+fn default_ollama_url() -> String {
+    "http://localhost:11434".into()
+}
+fn default_model() -> String {
+    "llama3.2".into()
+}
+fn default_temperature() -> f32 {
+    0.3
+}
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_image() -> String {
+    "ubuntu:24.04".into()
+}
+fn default_socket_path() -> String {
+    "/var/run/docker.sock".into()
+}
+fn default_runtime() -> String {
+    "runc".into()
+}
+fn default_memory_limit() -> i64 {
+    268_435_456
+} // 256MB
+fn default_cpu_quota() -> i64 {
+    50_000
+}
+fn default_timeout_secs() -> u64 {
+    120
+}
+fn default_db_path() -> String {
+    "~/.athena/athena.db".into()
+}
+fn default_max_steps() -> usize {
+    15
+}
+fn default_strategy() -> String {
+    "react".into()
+}
 fn default_sensitive_patterns() -> Vec<String> {
     vec![
         r"rm\s".into(),
@@ -469,7 +552,9 @@ impl Default for DockerConfig {
 
 impl Default for DbConfig {
     fn default() -> Self {
-        Self { path: default_db_path() }
+        Self {
+            path: default_db_path(),
+        }
     }
 }
 
@@ -487,7 +572,9 @@ impl ManagerConfig {
     /// Resolve the dynamic tools directory, expanding ~ to home dir.
     /// Falls back to ~/.athena/dynamic_tools/ if not configured.
     pub fn resolve_dynamic_tools_path(&self) -> Option<std::path::PathBuf> {
-        let raw = self.dynamic_tools_path.clone()
+        let raw = self
+            .dynamic_tools_path
+            .clone()
             .unwrap_or_else(|| "~/.athena/dynamic_tools".into());
 
         let path = if raw.starts_with("~/") {
@@ -519,6 +606,7 @@ impl Default for Config {
             mood: MoodConfig::default(),
             proactive: ProactiveConfig::default(),
             initiative: InitiativeConfig::default(),
+            github: GithubConfig::default(),
         }
     }
 }
@@ -527,7 +615,8 @@ fn default_ghosts() -> Vec<GhostConfig> {
     vec![
         GhostConfig {
             name: "coder".into(),
-            description: "Reads, writes, and modifies code files. Can run build/test commands.".into(),
+            description: "Reads, writes, and modifies code files. Can run build/test commands."
+                .into(),
             tools: vec!["file_read".into(), "file_write".into(), "shell".into()],
             mounts: vec![MountConfig {
                 host_path: ".".into(),
@@ -541,7 +630,8 @@ fn default_ghosts() -> Vec<GhostConfig> {
         },
         GhostConfig {
             name: "scout".into(),
-            description: "Explores files and runs read-only commands. Cannot modify anything.".into(),
+            description: "Explores files and runs read-only commands. Cannot modify anything."
+                .into(),
             tools: vec!["file_read".into(), "shell".into()],
             mounts: vec![MountConfig {
                 host_path: ".".into(),
@@ -578,8 +668,9 @@ impl Config {
             }
         };
 
-        let contents = std::fs::read_to_string(&config_path)
-            .map_err(|e| AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e)))?;
+        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+            AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e))
+        })?;
 
         let mut config: Config = toml::from_str(&contents)
             .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
@@ -625,7 +716,12 @@ impl Config {
                         tracing::info!("Loaded soul for ghost '{}' from {}", ghost.name, path);
                         ghost.soul = Some(content);
                     }
-                    Err(e) => tracing::warn!("Failed to load soul for ghost '{}' from {}: {}", ghost.name, path, e),
+                    Err(e) => tracing::warn!(
+                        "Failed to load soul for ghost '{}' from {}: {}",
+                        ghost.name,
+                        path,
+                        e
+                    ),
                 }
             }
         }
@@ -636,7 +732,10 @@ impl Config {
         // M3: Warn on non-loopback HTTP URLs
         let url = &self.ollama.url;
         if url.starts_with("http://") {
-            if let Some(host) = url.strip_prefix("http://").and_then(|s| s.split(':').next()) {
+            if let Some(host) = url
+                .strip_prefix("http://")
+                .and_then(|s| s.split(':').next())
+            {
                 if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
                     tracing::warn!(
                         url = %url,
@@ -652,15 +751,21 @@ impl Config {
         match self.llm.provider.as_str() {
             "ollama" => Ok(Arc::new(OllamaClient::new(self.ollama.clone()))),
             "openrouter" => {
-                let cfg = self.openrouter.as_ref()
-                    .ok_or_else(|| AthenaError::Config(
-                        "provider = \"openrouter\" but [openrouter] section is missing".into()
-                    ))?;
-                let api_key = cfg.api_key.clone()
+                let cfg = self.openrouter.as_ref().ok_or_else(|| {
+                    AthenaError::Config(
+                        "provider = \"openrouter\" but [openrouter] section is missing".into(),
+                    )
+                })?;
+                let api_key = cfg
+                    .api_key
+                    .clone()
                     .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                    .ok_or_else(|| AthenaError::Config(
-                        "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)".into()
-                    ))?;
+                    .ok_or_else(|| {
+                        AthenaError::Config(
+                            "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
+                                .into(),
+                        )
+                    })?;
                 Ok(Arc::new(OpenAiCompatibleClient::new(
                     OpenAiCompatibleConfig {
                         url: cfg.url.clone(),
@@ -674,15 +779,19 @@ impl Config {
                 )))
             }
             "zen" => {
-                let cfg = self.zen.as_ref()
-                    .ok_or_else(|| AthenaError::Config(
-                        "provider = \"zen\" but [zen] section is missing".into()
-                    ))?;
-                let api_key = cfg.api_key.clone()
+                let cfg = self.zen.as_ref().ok_or_else(|| {
+                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+                })?;
+                let api_key = cfg
+                    .api_key
+                    .clone()
                     .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
-                    .ok_or_else(|| AthenaError::Config(
-                        "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)".into()
-                    ))?;
+                    .ok_or_else(|| {
+                        AthenaError::Config(
+                            "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
+                                .into(),
+                        )
+                    })?;
                 Ok(Arc::new(OpenAiCompatibleClient::new(
                     OpenAiCompatibleConfig {
                         url: cfg.url.clone(),
@@ -695,28 +804,34 @@ impl Config {
                     "Opencode Zen",
                 )))
             }
-            other => Err(AthenaError::Config(format!("Unknown LLM provider: {}", other))),
+            other => Err(AthenaError::Config(format!(
+                "Unknown LLM provider: {}",
+                other
+            ))),
         }
     }
 
     /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_orchestrator_provider(&self, fallback: &Arc<dyn LlmProvider>) -> Result<Arc<dyn LlmProvider>> {
+    pub fn build_orchestrator_provider(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
         match self.llm.provider.as_str() {
-            "ollama" => {
-                match &self.ollama.classifier_model {
-                    Some(model) => {
-                        let mut cfg = self.ollama.clone();
-                        cfg.model = model.clone();
-                        Ok(Arc::new(OllamaClient::new(cfg)))
-                    }
-                    None => Ok(fallback.clone()),
+            "ollama" => match &self.ollama.classifier_model {
+                Some(model) => {
+                    let mut cfg = self.ollama.clone();
+                    cfg.model = model.clone();
+                    Ok(Arc::new(OllamaClient::new(cfg)))
                 }
-            }
+                None => Ok(fallback.clone()),
+            },
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().unwrap(); // already validated in build_llm_provider
                 match &cfg.classifier_model {
                     Some(model) => {
-                        let api_key = cfg.api_key.clone()
+                        let api_key = cfg
+                            .api_key
+                            .clone()
                             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                             .unwrap(); // already validated
                         Ok(Arc::new(OpenAiCompatibleClient::new(
@@ -738,7 +853,9 @@ impl Config {
                 let cfg = self.zen.as_ref().unwrap(); // already validated
                 match &cfg.classifier_model {
                     Some(model) => {
-                        let api_key = cfg.api_key.clone()
+                        let api_key = cfg
+                            .api_key
+                            .clone()
                             .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
                             .unwrap(); // already validated
                         Ok(Arc::new(OpenAiCompatibleClient::new(
@@ -809,6 +926,5 @@ pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
     } else {
         PathBuf::from(path)
     };
-    std::fs::read_to_string(&resolved)
-        .map_err(|e| format!("{}: {}", resolved.display(), e))
+    std::fs::read_to_string(&resolved).map_err(|e| format!("{}: {}", resolved.display(), e))
 }

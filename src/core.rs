@@ -8,6 +8,7 @@ use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
+use crate::llm::LlmProvider;
 use crate::manager::Manager;
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
@@ -17,6 +18,7 @@ use crate::profiles;
 use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
+use crate::tool_usage::ToolUsageStore;
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -39,6 +41,12 @@ pub enum CoreEvent {
     Status(String),
     /// Incremental text chunk from the LLM (streamed)
     StreamChunk(String),
+    /// A tool has finished executing
+    ToolRun {
+        tool: String,
+        result: String,
+        success: bool,
+    },
     /// Final complete response
     Response(String),
     /// Error during execution
@@ -91,6 +99,7 @@ pub struct CoreHandle {
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Arc<Vec<GhostInfo>>,
     pub memory: Arc<MemoryStore>,
+    pub llm: Arc<dyn LlmProvider>,
     pub knobs: SharedKnobs,
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
@@ -154,6 +163,7 @@ pub struct AthenaCore;
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
         let llm = config.build_llm_provider()?;
+        let llm_for_handle = llm.clone();
         let orchestrator = config.build_orchestrator_provider(&llm)?;
 
         // Health check
@@ -327,14 +337,34 @@ impl AthenaCore {
         // Autonomous task channel — created early so background tasks can receive auto_tx
         let (auto_tx, mut auto_rx) = mpsc::channel::<AutonomousTask>(32);
 
+        // Tool usage store — open a second WAL-safe connection
+        let usage_store = {
+            let db_path = config.db_path().map_err(|e| {
+                crate::error::AthenaError::Config(format!("Failed to resolve DB path for usage store: {}", e))
+            })?;
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+            Arc::new(ToolUsageStore::new(conn))
+        };
+
         let persona_soul = config.persona.soul.clone();
         let persona_soul_for_reentry = persona_soul.clone();
         let self_knowledge = config.persona.self_knowledge.clone();
         let tools_doc = config.persona.tools_doc.clone();
         let manager = Arc::new(Manager::new(
             &config, merged_ghosts, llm, orchestrator, memory.clone(), embedder, persona_soul,
-            self_knowledge, tools_doc, mood.clone(), knobs.clone(),
+            self_knowledge, tools_doc, mood.clone(), knobs.clone(), usage_store,
         ));
+        // Spawn hot-reload watcher for dynamic tools
+        if let Some(dt_path) = manager.dynamic_tools_path() {
+            crate::dynamic_tools::spawn_hot_reload(
+                dt_path.clone(),
+                manager.host_workspace().to_string(),
+                manager.direct_tools_ref(),
+                observer.clone(),
+            );
+        }
+
         let (tx, mut rx) = mpsc::channel::<CoreRequest>(32);
 
         // Spawn the core event loop
@@ -380,17 +410,24 @@ impl AthenaCore {
                     // Create a status bridge: strategy sends CoreEvent → core forwards to frontend
                     let (status_tx, mut status_rx) = mpsc::channel::<CoreEvent>(16);
                     let event_tx_for_status = req.event_tx.clone();
-                    tokio::spawn(async move {
+                    let bridge_handle = tokio::spawn(async move {
                         while let Some(event) = status_rx.recv().await {
                             let _ = event_tx_for_status.send(event).await;
                         }
                     });
 
                     tracing::debug!("Calling manager.handle()");
-                    match manager
+                    let result = manager
                         .handle(&req.input, &req.session, req.confirmer.as_ref(), Some(&status_tx))
-                        .await
-                    {
+                        .await;
+
+                    // Drop status_tx so the bridge task can drain and finish,
+                    // then wait for it — ensures all ToolRun events are forwarded
+                    // before we send the final Response/Error.
+                    drop(status_tx);
+                    let _ = bridge_handle.await;
+
+                    match result {
                         Ok(response) => {
                             tracing::debug!(len = response.len(), "Manager returned response");
                             observer.emit(
@@ -474,6 +511,7 @@ impl AthenaCore {
             tx,
             ghosts: Arc::new(ghosts),
             memory,
+            llm: llm_for_handle,
             knobs,
             observer,
             pulse_bus,
