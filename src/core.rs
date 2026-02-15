@@ -23,6 +23,9 @@ use crate::randomness;
 use crate::scheduler::CronEngine;
 use crate::tool_usage::ToolUsageStore;
 
+const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
+const STALE_STARTED_REASON: &str = "stale_started_timeout";
+
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
 pub struct SessionContext {
@@ -75,6 +78,8 @@ pub struct AutonomousTask {
     pub risk_tier: String,
     /// Repo/product label for KPI attribution.
     pub repo: String,
+    /// Optional caller-supplied task id for correlation.
+    pub task_id: Option<String>,
 }
 
 /// Request from any frontend to the core.
@@ -123,11 +128,16 @@ pub struct CoreHandle {
 impl CoreHandle {
     /// Submit an autonomous task for background execution by a ghost.
     /// Results are delivered as pulses to the specified target.
-    pub async fn dispatch_task(&self, task: AutonomousTask) -> Result<()> {
+    pub async fn dispatch_task(&self, mut task: AutonomousTask) -> Result<String> {
+        let task_id = task
+            .task_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        task.task_id = Some(task_id.clone());
         self.auto_tx.send(task).await.map_err(|_| {
             crate::error::AthenaError::Tool("Autonomous task queue full or shut down".into())
         })?;
-        Ok(())
+        Ok(task_id)
     }
 
     /// Send a chat message, returns a receiver for streaming events.
@@ -287,6 +297,7 @@ fn init_runtime_handles(
     let (auto_tx, auto_rx) = mpsc::channel::<AutonomousTask>(32);
     let usage_store = create_usage_store(config)?;
     let outcome_store = create_task_outcome_store(config)?;
+    expire_stale_started_tasks(&outcome_store, &observer);
 
     spawn_housekeeping_loops(
         config,
@@ -668,7 +679,11 @@ async fn execute_autonomous_task(
     outcome_store: Arc<TaskOutcomeStore>,
 ) {
     let confirmer = AutoConfirmer;
-    let task_id = uuid::Uuid::new_v4().to_string();
+    expire_stale_started_tasks(&outcome_store, &observer);
+    let task_id = task
+        .task_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
     let goal_summary = truncate_obs(&task.goal, 120);
     record_autonomous_task_start(&outcome_store, &task_id, &task);
@@ -693,6 +708,7 @@ async fn execute_autonomous_task(
             &outcome_store,
         ),
         Err(e) => handle_autonomous_task_failure(
+            &task,
             &task_id,
             &ghost_label,
             &goal_summary,
@@ -700,6 +716,7 @@ async fn execute_autonomous_task(
             verification_total_on_fail,
             rolled_back_on_fail,
             &observer,
+            &pulse_bus,
             &memory,
             &outcome_store,
         ),
@@ -778,6 +795,7 @@ fn handle_autonomous_task_success(
         crate::pulse::Urgency::Medium,
         result,
     )
+    .with_task_id(task_id.to_string())
     .with_target(task.target.clone())
     .with_ghost(ghost_label.to_string());
     pulse_bus.send(pulse);
@@ -785,6 +803,7 @@ fn handle_autonomous_task_success(
 
 #[allow(clippy::too_many_arguments)]
 fn handle_autonomous_task_failure(
+    task: &AutonomousTask,
     task_id: &str,
     ghost_label: &str,
     goal_summary: &str,
@@ -792,6 +811,7 @@ fn handle_autonomous_task_failure(
     verification_total: u64,
     rolled_back: bool,
     observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
     memory: &MemoryStore,
     outcome_store: &TaskOutcomeStore,
 ) {
@@ -814,6 +834,21 @@ fn handle_autonomous_task_failure(
         ghost_label, goal_summary, err,
     );
     let _ = memory.store(failure_category(goal_summary), &outcome, None);
+
+    let pulse = Pulse::new(
+        crate::pulse::PulseSource::AutonomousTask,
+        crate::pulse::Urgency::High,
+        format!("Task failed [{}]: {}", ghost_label, err),
+    )
+    .with_task_id(task_id.to_string())
+    .with_target(task.target.clone())
+    .with_ghost(ghost_label.to_string());
+    // Emit a failure pulse so synchronous waiters can complete deterministically.
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!("Failure pulse emitted for task_id={}", task_id),
+    );
+    pulse_bus.send(pulse);
 }
 
 fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) -> (u64, u64) {
@@ -1084,6 +1119,20 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(TaskOutcomeStore::new(conn)))
+}
+
+fn expire_stale_started_tasks(outcome_store: &TaskOutcomeStore, observer: &ObserverHandle) {
+    match outcome_store.fail_stale_started_tasks(STALE_STARTED_TASK_SECS, STALE_STARTED_REASON) {
+        Ok(0) => {}
+        Ok(n) => observer.log(
+            ObserverCategory::AutonomousTask,
+            format!(
+                "Marked {} stale started task(s) as failed (threshold={}s)",
+                n, STALE_STARTED_TASK_SECS
+            ),
+        ),
+        Err(e) => tracing::warn!("Failed to mark stale started tasks: {}", e),
+    }
 }
 
 fn init_embedder(config: &Config) -> Result<Embedder> {

@@ -94,6 +94,41 @@ impl TaskOutcomeStore {
         )?;
         Ok(())
     }
+
+    pub fn fail_task_if_started(&self, task_id: &str, error: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+        let updated = conn.execute(
+            "UPDATE autonomous_task_outcomes
+             SET status = 'failed',
+                 finished_at = datetime('now'),
+                 error = COALESCE(error, ?2)
+             WHERE task_id = ?1
+               AND status = 'started'",
+            params![task_id, error],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn fail_stale_started_tasks(&self, stale_after_secs: u64, error: &str) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+        let cutoff = format!("-{} seconds", stale_after_secs.max(1));
+        let updated = conn.execute(
+            "UPDATE autonomous_task_outcomes
+             SET status = 'failed',
+                 finished_at = datetime('now'),
+                 error = COALESCE(error, ?2)
+             WHERE status = 'started'
+               AND started_at <= datetime('now', ?1)",
+            params![cutoff, error],
+        )?;
+        Ok(updated)
+    }
 }
 
 fn parse_sqlite_datetime(ts: &str) -> Option<DateTime<Utc>> {
@@ -678,5 +713,97 @@ mod tests {
         assert!((snap.verification_pass_rate - (2.0 / 3.0)).abs() < 1e-6);
         assert_eq!(snap.rollbacks, 1);
         assert!((snap.rollback_rate - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fail_task_if_started_only_updates_started_rows() {
+        let conn = setup_conn();
+        let store = TaskOutcomeStore::new(conn);
+        store
+            .record_start("t1", "delivery", "athena", "low", Some("coder"), "goal")
+            .unwrap();
+        store
+            .record_start("t2", "delivery", "athena", "low", Some("coder"), "goal")
+            .unwrap();
+        store
+            .record_finish("t2", "succeeded", 0, 0, false, None)
+            .unwrap();
+
+        assert!(
+            store
+                .fail_task_if_started("t1", "dispatch wait timeout")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .fail_task_if_started("t2", "dispatch wait timeout")
+                .unwrap()
+        );
+
+        let conn = store.conn.lock().unwrap();
+        let t1: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, error FROM autonomous_task_outcomes WHERE task_id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let t2: String = conn
+            .query_row(
+                "SELECT status FROM autonomous_task_outcomes WHERE task_id='t2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(t1.0, "failed");
+        assert_eq!(t1.1.as_deref(), Some("dispatch wait timeout"));
+        assert_eq!(t2, "succeeded");
+    }
+
+    #[test]
+    fn fail_stale_started_tasks_marks_only_old_rows() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO autonomous_task_outcomes
+             (task_id, lane, repo, risk_tier, goal, status, started_at)
+             VALUES
+             ('old-started','delivery','athena','low','goal','started',datetime('now','-7200 seconds')),
+             ('fresh-started','delivery','athena','low','goal','started',datetime('now','-60 seconds')),
+             ('already-done','delivery','athena','low','goal','succeeded',datetime('now','-7200 seconds'))",
+            [],
+        )
+        .unwrap();
+        let store = TaskOutcomeStore::new(conn);
+
+        let changed = store
+            .fail_stale_started_tasks(1800, "stale_started_timeout")
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let conn = store.conn.lock().unwrap();
+        let old: String = conn
+            .query_row(
+                "SELECT status FROM autonomous_task_outcomes WHERE task_id='old-started'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let fresh: String = conn
+            .query_row(
+                "SELECT status FROM autonomous_task_outcomes WHERE task_id='fresh-started'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let done: String = conn
+            .query_row(
+                "SELECT status FROM autonomous_task_outcomes WHERE task_id='already-done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, "failed");
+        assert_eq!(fresh, "started");
+        assert_eq!(done, "succeeded");
     }
 }

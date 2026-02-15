@@ -534,17 +534,17 @@ async fn run_dispatch(
     validate_lane(&lane)?;
     validate_risk(&risk)?;
     let repo = repo.unwrap_or_else(kpi::default_repo_name);
+    let config_for_finalize = config.clone();
     let handle = AthenaCore::start(config, memory).await?;
     let context = dispatch_context(context, auto_store);
 
-    let target = crate::pulse::PulseTarget::Session(SessionContext {
-        platform: "cli".into(),
-        user_id: "local".into(),
-        chat_id: "dispatch".into(),
-    });
+    // CLI dispatch waits on the delivered broadcast receiver, so target
+    // broadcast to guarantee result pulses are observable by this command.
+    let target = crate::pulse::PulseTarget::Broadcast;
 
+    let mut pulse_rx = handle.pulse_bus.subscribe();
     let ghost_label = ghost.clone().unwrap_or_else(|| "auto".to_string());
-    handle
+    let task_id = handle
         .dispatch_task(core::AutonomousTask {
             goal: goal.clone(),
             context,
@@ -553,14 +553,33 @@ async fn run_dispatch(
             lane,
             risk_tier: risk,
             repo,
+            task_id: None,
         })
         .await?;
 
     eprintln!(
-        "Dispatched autonomous task to {}. Waiting up to {}s...",
-        ghost_label, wait_secs
+        "Dispatched autonomous task to {} (task_id={}). Waiting up to {}s...",
+        ghost_label, task_id, wait_secs
     );
-    wait_for_autonomous_pulse(&handle, &ghost_label, wait_secs).await
+    match wait_for_autonomous_pulse(&mut pulse_rx, &task_id, wait_secs).await {
+        WaitForAutonomousOutcome::Received => Ok(()),
+        WaitForAutonomousOutcome::TimedOut => {
+            mark_dispatch_task_failed_if_started(
+                &config_for_finalize,
+                &task_id,
+                &format!("dispatch_wait_timeout_after={}s", wait_secs),
+            );
+            Ok(())
+        }
+        WaitForAutonomousOutcome::ChannelClosed => {
+            mark_dispatch_task_failed_if_started(
+                &config_for_finalize,
+                &task_id,
+                "dispatch_wait_channel_closed",
+            );
+            Ok(())
+        }
+    }
 }
 
 fn dispatch_context(context: Option<String>, auto_store: Option<String>) -> String {
@@ -575,41 +594,84 @@ fn dispatch_context(context: Option<String>, auto_store: Option<String>) -> Stri
 }
 
 async fn wait_for_autonomous_pulse(
-    handle: &core::CoreHandle,
-    ghost_label: &str,
+    rx: &mut tokio::sync::broadcast::Receiver<crate::pulse::Pulse>,
+    task_id: &str,
     wait_secs: u64,
-) -> anyhow::Result<()> {
+) -> WaitForAutonomousOutcome {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(wait_secs);
-    let mut rx = handle.delivered_rx.lock().await;
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            eprintln!("Timed out waiting for autonomous task result pulse.");
-            return Ok(());
+            eprintln!(
+                "Timed out waiting for autonomous task result pulse (task_id={}).",
+                task_id
+            );
+            return WaitForAutonomousOutcome::TimedOut;
         }
         let remaining = deadline.duration_since(now);
-        let received = tokio::time::timeout(remaining, rx.recv()).await;
-        let Some(pulse) = (match received {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!("Timed out waiting for autonomous task result pulse.");
-                return Ok(());
+        let pulse = match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(pulse)) => pulse,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                eprintln!(
+                    "Pulse stream lagged by {} events while waiting for task_id={}; continuing...",
+                    n, task_id
+                );
+                continue;
             }
-        }) else {
-            eprintln!("Pulse channel closed before a result was delivered.");
-            return Ok(());
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                eprintln!("Pulse channel closed before a result was delivered.");
+                return WaitForAutonomousOutcome::ChannelClosed;
+            }
+            Err(_) => {
+                eprintln!(
+                    "Timed out waiting for autonomous task result pulse (task_id={}).",
+                    task_id
+                );
+                return WaitForAutonomousOutcome::TimedOut;
+            }
         };
-        if matches!(pulse.source, crate::pulse::PulseSource::AutonomousTask)
-            && pulse
-                .ghost
-                .as_deref()
-                .map(|g| g == ghost_label)
-                .unwrap_or(true)
-        {
+        if pulse_matches_task_id(&pulse, task_id) {
             println!("[{}] {}", pulse.source.label(), pulse.content);
-            return Ok(());
+            return WaitForAutonomousOutcome::Received;
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitForAutonomousOutcome {
+    Received,
+    TimedOut,
+    ChannelClosed,
+}
+
+fn mark_dispatch_task_failed_if_started(config: &Config, task_id: &str, reason: &str) {
+    let conn = match kpi::open_connection(config) {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!(
+                "Failed to open DB while finalizing timed-out task_id={}: {}",
+                task_id, e
+            );
+            return;
+        }
+    };
+    let store = kpi::TaskOutcomeStore::new(conn);
+    match store.fail_task_if_started(task_id, reason) {
+        Ok(true) => eprintln!(
+            "Marked task_id={} as failed because no terminal pulse was observed: {}",
+            task_id, reason
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "Failed to finalize timed-out task_id={} in outcomes table: {}",
+            task_id, e
+        ),
+    }
+}
+
+fn pulse_matches_task_id(pulse: &crate::pulse::Pulse, task_id: &str) -> bool {
+    matches!(pulse.source, crate::pulse::PulseSource::AutonomousTask)
+        && pulse.task_id.as_deref() == Some(task_id)
 }
 
 async fn run_observe() -> anyhow::Result<()> {
@@ -1028,7 +1090,11 @@ async fn run_chat(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_chat_command, ChatCommand};
+    use super::{
+        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand,
+        WaitForAutonomousOutcome,
+    };
+    use crate::pulse::{Pulse, PulseSource, Urgency};
 
     #[test]
     fn classify_exit_aliases() {
@@ -1056,5 +1122,47 @@ mod tests {
             classify_chat_command("please summarize this"),
             ChatCommand::Chat
         );
+    }
+
+    #[test]
+    fn pulse_match_requires_task_id_and_source() {
+        let p = Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "ok".into())
+            .with_task_id("task-123");
+        assert!(pulse_matches_task_id(&p, "task-123"));
+        assert!(!pulse_matches_task_id(&p, "task-999"));
+
+        let non_auto = Pulse::new(PulseSource::Heartbeat, Urgency::Medium, "noop".into())
+            .with_task_id("task-123");
+        assert!(!pulse_matches_task_id(&non_auto, "task-123"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_autonomous_pulse_correlates_by_task_id() {
+        let (tx, _) = tokio::sync::broadcast::channel(8);
+        let mut rx = tx.subscribe();
+
+        let _ = tx.send(
+            Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "other".into())
+                .with_task_id("task-other"),
+        );
+        let _ = tx.send(
+            Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "match".into())
+                .with_task_id("task-match"),
+        );
+
+        let res = wait_for_autonomous_pulse(&mut rx, "task-match", 1).await;
+        assert_eq!(res, WaitForAutonomousOutcome::Received);
+    }
+
+    #[tokio::test]
+    async fn wait_for_autonomous_pulse_times_out_without_matching_pulse() {
+        let (tx, _) = tokio::sync::broadcast::channel(8);
+        let mut rx = tx.subscribe();
+        let _ = tx.send(
+            Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "other".into())
+                .with_task_id("task-other"),
+        );
+        let res = wait_for_autonomous_pulse(&mut rx, "task-match", 0).await;
+        assert_eq!(res, WaitForAutonomousOutcome::TimedOut);
     }
 }

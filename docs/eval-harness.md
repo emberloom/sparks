@@ -24,6 +24,10 @@ Current lanes covered:
 - `delivery`
 - `self_improvement`
 
+CI smoke suite:
+
+- `eval/benchmark-mini-ci.json` (uses `scripts/mock_athena_dispatch.py`)
+
 ## Run
 
 ```bash
@@ -93,3 +97,9 @@ Output:
 
 - `eval/results/dashboard.md`
 - includes KPI snapshot with: task success rate, verification pass rate, rollback rate, and mean time to fix (MTTF)
+
+## CI
+
+GitHub Actions workflow:
+
+- `.github/workflows/eval-harness.yml`

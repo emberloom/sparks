@@ -103,14 +103,31 @@ def run_shell(
 
 def parse_db_path(config_path: Path) -> Path:
     default = Path("~/.athena/athena.db").expanduser()
-    if not config_path.exists() or tomllib is None:
+    if not config_path.exists():
         return default
-    data = tomllib.loads(config_path.read_text())
-    db = data.get("db", {})
-    raw = db.get("path")
-    if not raw:
-        return default
-    return Path(raw).expanduser()
+    text = config_path.read_text()
+    if tomllib is not None:
+        data = tomllib.loads(text)
+        db = data.get("db", {})
+        raw = db.get("path")
+        if raw:
+            return Path(raw).expanduser()
+
+    # Fallback parser for Python < 3.11 (no tomllib).
+    in_db = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_db = line == "[db]"
+            continue
+        if in_db and line.startswith("path"):
+            _, rhs = line.split("=", 1)
+            value = rhs.strip().strip('"').strip("'")
+            if value:
+                return Path(value).expanduser()
+    return default
 
 
 def git_status_paths(repo: Path) -> set[str]:
