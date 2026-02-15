@@ -12,6 +12,7 @@ mod error;
 mod executor;
 mod heartbeat;
 mod introspect;
+mod kpi;
 mod knobs;
 mod langfuse;
 mod llm;
@@ -97,6 +98,15 @@ enum Commands {
         /// How long to wait for an autonomous pulse result
         #[arg(long, default_value_t = 120)]
         wait_secs: u64,
+        /// Mission lane for KPI attribution
+        #[arg(long, default_value = "delivery")]
+        lane: String,
+        /// Risk tier for KPI attribution
+        #[arg(long, default_value = "medium")]
+        risk: String,
+        /// Repo/product label for KPI attribution
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// Run end-to-end diagnostics for all self-improvement funnels
     Doctor {
@@ -109,6 +119,11 @@ enum Commands {
         /// Exit non-zero on WARN as well (implies stricter CI gate)
         #[arg(long)]
         fail_on_warn: bool,
+    },
+    /// Mission KPI tracking (status, snapshot, history)
+    Kpi {
+        #[command(subcommand)]
+        action: KpiAction,
     },
 }
 
@@ -153,6 +168,49 @@ enum JobsAction {
     Delete {
         /// Job ID (prefix match)
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum KpiAction {
+    /// Compute and print KPI status for current state
+    Status {
+        /// Mission lane: delivery | self_improvement
+        #[arg(long, default_value = "self_improvement")]
+        lane: String,
+        /// Product/repo label
+        #[arg(long)]
+        repo: Option<String>,
+        /// Risk tier: low | medium | high
+        #[arg(long, default_value = "medium")]
+        risk: String,
+    },
+    /// Compute, persist, and optionally export a KPI snapshot
+    Snapshot {
+        /// Mission lane: delivery | self_improvement
+        #[arg(long, default_value = "self_improvement")]
+        lane: String,
+        /// Product/repo label
+        #[arg(long)]
+        repo: Option<String>,
+        /// Risk tier: low | medium | high
+        #[arg(long, default_value = "medium")]
+        risk: String,
+        /// Export snapshot to Langfuse as trace event
+        #[arg(long)]
+        langfuse: bool,
+    },
+    /// Show stored KPI snapshot history
+    History {
+        /// Optional lane filter
+        #[arg(long)]
+        lane: Option<String>,
+        /// Optional repo filter
+        #[arg(long)]
+        repo: Option<String>,
+        /// Max rows
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -274,7 +332,15 @@ async fn main() -> anyhow::Result<()> {
             ghost,
             auto_store,
             wait_secs,
-        }) => run_dispatch(config, memory, goal, context, ghost, auto_store, wait_secs).await?,
+            lane,
+            risk,
+            repo,
+        }) => {
+            run_dispatch(
+                config, memory, goal, context, ghost, auto_store, wait_secs, lane, risk, repo,
+            )
+            .await?
+        }
         Some(Commands::Doctor {
             skip_llm,
             ci,
@@ -289,9 +355,62 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
+    Ok(())
+}
+
+fn validate_lane(lane: &str) -> anyhow::Result<()> {
+    match lane {
+        "delivery" | "self_improvement" => Ok(()),
+        _ => anyhow::bail!("Invalid lane '{}'. Use: delivery | self_improvement", lane),
+    }
+}
+
+fn validate_risk(risk: &str) -> anyhow::Result<()> {
+    match risk {
+        "low" | "medium" | "high" => Ok(()),
+        _ => anyhow::bail!("Invalid risk '{}'. Use: low | medium | high", risk),
+    }
+}
+
+async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {
+    let conn = kpi::open_connection(config)?;
+    match action {
+        KpiAction::Status { lane, repo, risk } => {
+            validate_lane(&lane)?;
+            validate_risk(&risk)?;
+            let repo = repo.unwrap_or_else(kpi::default_repo_name);
+            let snapshot = kpi::compute_snapshot(&conn, &lane, &repo, &risk)?;
+            kpi::print_snapshot(&snapshot);
+        }
+        KpiAction::Snapshot {
+            lane,
+            repo,
+            risk,
+            langfuse,
+        } => {
+            validate_lane(&lane)?;
+            validate_risk(&risk)?;
+            let repo = repo.unwrap_or_else(kpi::default_repo_name);
+            let snapshot = kpi::compute_snapshot(&conn, &lane, &repo, &risk)?;
+            kpi::store_snapshot(&conn, &snapshot)?;
+            kpi::print_snapshot(&snapshot);
+            println!("snapshot_saved=true");
+            if langfuse {
+                match kpi::emit_snapshot_to_langfuse(config, &snapshot).await {
+                    Ok(_) => println!("langfuse_export=ok"),
+                    Err(e) => println!("langfuse_export=failed ({})", e),
+                }
+            }
+        }
+        KpiAction::History { lane, repo, limit } => {
+            let rows = kpi::list_history(&conn, lane.as_deref(), repo.as_deref(), limit)?;
+            kpi::print_history(&rows);
+        }
+    }
     Ok(())
 }
 
@@ -408,16 +527,15 @@ async fn run_dispatch(
     ghost: Option<String>,
     auto_store: Option<String>,
     wait_secs: u64,
+    lane: String,
+    risk: String,
+    repo: Option<String>,
 ) -> anyhow::Result<()> {
+    validate_lane(&lane)?;
+    validate_risk(&risk)?;
+    let repo = repo.unwrap_or_else(kpi::default_repo_name);
     let handle = AthenaCore::start(config, memory).await?;
-
-    let mut context = context.unwrap_or_default();
-    if let Some(category) = auto_store {
-        if !context.is_empty() {
-            context.push('\n');
-        }
-        context.push_str(&format!("[auto_store:{}]", category));
-    }
+    let context = dispatch_context(context, auto_store);
 
     let target = crate::pulse::PulseTarget::Session(SessionContext {
         platform: "cli".into(),
@@ -432,6 +550,9 @@ async fn run_dispatch(
             context,
             ghost,
             target,
+            lane,
+            risk_tier: risk,
+            repo,
         })
         .await?;
 
@@ -439,10 +560,27 @@ async fn run_dispatch(
         "Dispatched autonomous task to {}. Waiting up to {}s...",
         ghost_label, wait_secs
     );
+    wait_for_autonomous_pulse(&handle, &ghost_label, wait_secs).await
+}
 
+fn dispatch_context(context: Option<String>, auto_store: Option<String>) -> String {
+    let mut context = context.unwrap_or_default();
+    if let Some(category) = auto_store {
+        if !context.is_empty() {
+            context.push('\n');
+        }
+        context.push_str(&format!("[auto_store:{}]", category));
+    }
+    context
+}
+
+async fn wait_for_autonomous_pulse(
+    handle: &core::CoreHandle,
+    ghost_label: &str,
+    wait_secs: u64,
+) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(wait_secs);
     let mut rx = handle.delivered_rx.lock().await;
-
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -451,7 +589,6 @@ async fn run_dispatch(
         }
         let remaining = deadline.duration_since(now);
         let received = tokio::time::timeout(remaining, rx.recv()).await;
-
         let Some(pulse) = (match received {
             Ok(v) => v,
             Err(_) => {
@@ -462,17 +599,15 @@ async fn run_dispatch(
             eprintln!("Pulse channel closed before a result was delivered.");
             return Ok(());
         };
-
-        if matches!(pulse.source, crate::pulse::PulseSource::AutonomousTask) {
-            if pulse
+        if matches!(pulse.source, crate::pulse::PulseSource::AutonomousTask)
+            && pulse
                 .ghost
                 .as_deref()
                 .map(|g| g == ghost_label)
                 .unwrap_or(true)
-            {
-                println!("[{}] {}", pulse.source.label(), pulse.content);
-                return Ok(());
-            }
+        {
+            println!("[{}] {}", pulse.source.label(), pulse.content);
+            return Ok(());
         }
     }
 }

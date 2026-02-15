@@ -8,6 +8,7 @@ use crate::embeddings::Embedder;
 use crate::error::Result;
 use crate::heartbeat;
 use crate::introspect::{self, SharedMetrics, SystemMetrics};
+use crate::kpi::TaskOutcomeStore;
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
 use crate::langfuse::SharedLangfuse;
 use crate::llm::LlmProvider;
@@ -68,6 +69,12 @@ pub struct AutonomousTask {
     pub ghost: Option<String>,
     /// Where to deliver the result (Broadcast if not specified)
     pub target: crate::pulse::PulseTarget,
+    /// Mission lane for KPI attribution.
+    pub lane: String,
+    /// Risk tier for KPI attribution.
+    pub risk_tier: String,
+    /// Repo/product label for KPI attribution.
+    pub repo: String,
 }
 
 /// Request from any frontend to the core.
@@ -175,6 +182,7 @@ struct CoreRuntimeHandles {
     auto_tx: mpsc::Sender<AutonomousTask>,
     auto_rx: mpsc::Receiver<AutonomousTask>,
     usage_store: Arc<ToolUsageStore>,
+    outcome_store: Arc<TaskOutcomeStore>,
     cron_engine: Arc<CronEngine>,
     metrics: SharedMetrics,
 }
@@ -200,6 +208,7 @@ impl AthenaCore {
             auto_tx,
             auto_rx,
             usage_store,
+            outcome_store,
             cron_engine,
             metrics,
         } = init_runtime_handles(&config, memory.clone(), llm.clone())?;
@@ -240,6 +249,7 @@ impl AthenaCore {
             observer.clone(),
             pulse_bus.clone(),
             memory.clone(),
+            outcome_store,
         );
 
         Ok(CoreHandle {
@@ -276,6 +286,7 @@ fn init_runtime_handles(
     let activity = Arc::new(ActivityTracker::new());
     let (auto_tx, auto_rx) = mpsc::channel::<AutonomousTask>(32);
     let usage_store = create_usage_store(config)?;
+    let outcome_store = create_task_outcome_store(config)?;
 
     spawn_housekeeping_loops(
         config,
@@ -318,6 +329,7 @@ fn init_runtime_handles(
         auto_tx,
         auto_rx,
         usage_store,
+        outcome_store,
         cron_engine,
         metrics,
     })
@@ -630,6 +642,7 @@ fn spawn_autonomous_task_consumer(
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
+    outcome_store: Arc<TaskOutcomeStore>,
 ) {
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
@@ -637,8 +650,10 @@ fn spawn_autonomous_task_consumer(
             let observer = observer.clone();
             let pulse_bus = pulse_bus.clone();
             let memory = memory.clone();
+            let outcome_store = outcome_store.clone();
             tokio::spawn(async move {
-                execute_autonomous_task(task, manager, observer, pulse_bus, memory).await;
+                execute_autonomous_task(task, manager, observer, pulse_bus, memory, outcome_store)
+                    .await;
             });
         }
     });
@@ -650,63 +665,184 @@ async fn execute_autonomous_task(
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
+    outcome_store: Arc<TaskOutcomeStore>,
 ) {
     let confirmer = AutoConfirmer;
+    let task_id = uuid::Uuid::new_v4().to_string();
     let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
     let goal_summary = truncate_obs(&task.goal, 120);
-    observer.log(
-        ObserverCategory::AutonomousTask,
-        format!(
-            "Dispatching: {} → {}",
-            ghost_label,
-            truncate_obs(&task.goal, 80)
-        ),
-    );
+    record_autonomous_task_start(&outcome_store, &task_id, &task);
+    log_autonomous_dispatch(&observer, &task, &ghost_label);
     introspect::inc_active_tasks();
 
+    let (verification_total_on_fail, _) = infer_verification_counters(&task.goal, None, false);
+    let rolled_back_on_fail = infer_rollback_flag(&task.goal, None);
     match manager
         .execute_task(&task.goal, &task.context, task.ghost.as_deref(), &confirmer)
         .await
     {
-        Ok(result) => {
-            observer.log(
-                ObserverCategory::AutonomousTask,
-                format!("Completed: {} ({} chars)", ghost_label, result.len()),
-            );
-            auto_store_task_result(&task, &result, &observer, &memory);
-
-            let outcome = format!(
-                "Autonomous task succeeded [{}]: {}\nResult summary: {}",
-                ghost_label,
-                goal_summary,
-                truncate_obs(&result, 200),
-            );
-            let _ = memory.store("code_change", &outcome, None);
-
-            let pulse = Pulse::new(
-                crate::pulse::PulseSource::AutonomousTask,
-                crate::pulse::Urgency::Medium,
-                result,
-            )
-            .with_target(task.target)
-            .with_ghost(ghost_label);
-            pulse_bus.send(pulse);
-        }
-        Err(e) => {
-            observer.log(
-                ObserverCategory::AutonomousTask,
-                format!("Failed: {} — {}", ghost_label, e),
-            );
-            tracing::error!(ghost = %ghost_label, error = %e, "Autonomous task failed");
-
-            let outcome = format!(
-                "Autonomous task FAILED [{}]: {}\nError: {}",
-                ghost_label, goal_summary, e,
-            );
-            let _ = memory.store(failure_category(&goal_summary), &outcome, None);
-        }
+        Ok(result) => handle_autonomous_task_success(
+            &task,
+            &task_id,
+            &ghost_label,
+            &goal_summary,
+            result,
+            &observer,
+            &pulse_bus,
+            &memory,
+            &outcome_store,
+        ),
+        Err(e) => handle_autonomous_task_failure(
+            &task_id,
+            &ghost_label,
+            &goal_summary,
+            &e,
+            verification_total_on_fail,
+            rolled_back_on_fail,
+            &observer,
+            &memory,
+            &outcome_store,
+        ),
     }
     introspect::dec_active_tasks();
+}
+
+fn record_autonomous_task_start(
+    outcome_store: &TaskOutcomeStore,
+    task_id: &str,
+    task: &AutonomousTask,
+) {
+    let _ = outcome_store.record_start(
+        task_id,
+        &task.lane,
+        &task.repo,
+        &task.risk_tier,
+        task.ghost.as_deref(),
+        &task.goal,
+    );
+}
+
+fn log_autonomous_dispatch(observer: &ObserverHandle, task: &AutonomousTask, ghost_label: &str) {
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!(
+            "Dispatching [{}:{}:{}]: {} → {}",
+            task.lane,
+            task.repo,
+            task.risk_tier,
+            ghost_label,
+            truncate_obs(&task.goal, 80)
+        ),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_autonomous_task_success(
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    result: String,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    let (verification_total, verification_passed) =
+        infer_verification_counters(&task.goal, Some(&result), true);
+    let rolled_back = infer_rollback_flag(&task.goal, Some(&result));
+    let _ = outcome_store.record_finish(
+        task_id,
+        "succeeded",
+        verification_total,
+        verification_passed,
+        rolled_back,
+        None,
+    );
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!("Completed: {} ({} chars)", ghost_label, result.len()),
+    );
+    auto_store_task_result(task, &result, observer, memory);
+
+    let outcome = format!(
+        "Autonomous task succeeded [{}]: {}\nResult summary: {}",
+        ghost_label,
+        goal_summary,
+        truncate_obs(&result, 200),
+    );
+    let _ = memory.store("code_change", &outcome, None);
+
+    let pulse = Pulse::new(
+        crate::pulse::PulseSource::AutonomousTask,
+        crate::pulse::Urgency::Medium,
+        result,
+    )
+    .with_target(task.target.clone())
+    .with_ghost(ghost_label.to_string());
+    pulse_bus.send(pulse);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_autonomous_task_failure(
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    err: &crate::error::AthenaError,
+    verification_total: u64,
+    rolled_back: bool,
+    observer: &ObserverHandle,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    let _ = outcome_store.record_finish(
+        task_id,
+        "failed",
+        verification_total,
+        0,
+        rolled_back,
+        Some(&err.to_string()),
+    );
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!("Failed: {} — {}", ghost_label, err),
+    );
+    tracing::error!(ghost = %ghost_label, error = %err, "Autonomous task failed");
+
+    let outcome = format!(
+        "Autonomous task FAILED [{}]: {}\nError: {}",
+        ghost_label, goal_summary, err,
+    );
+    let _ = memory.store(failure_category(goal_summary), &outcome, None);
+}
+
+fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) -> (u64, u64) {
+    let goal_lower = goal.to_lowercase();
+    let result_lower = result.unwrap_or_default().to_lowercase();
+    let has_verify = [
+        "test",
+        "lint",
+        "verify",
+        "cargo check",
+        "cargo test",
+        "pytest",
+        "npm test",
+        "go test",
+    ]
+    .iter()
+    .any(|k| goal_lower.contains(k) || result_lower.contains(k));
+    if !has_verify {
+        return (0, 0);
+    }
+    if success { (1, 1) } else { (1, 0) }
+}
+
+fn infer_rollback_flag(goal: &str, result: Option<&str>) -> bool {
+    let goal_lower = goal.to_lowercase();
+    let result_lower = result.unwrap_or_default().to_lowercase();
+    ["rollback", "roll back", "revert"]
+        .iter()
+        .any(|k| goal_lower.contains(k) || result_lower.contains(k))
 }
 
 fn auto_store_task_result(
@@ -936,6 +1072,18 @@ fn create_usage_store(config: &Config) -> Result<Arc<ToolUsageStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(ToolUsageStore::new(conn)))
+}
+
+fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
+    let db_path = config.db_path().map_err(|e| {
+        crate::error::AthenaError::Config(format!(
+            "Failed to resolve DB path for task outcome store: {}",
+            e
+        ))
+    })?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    Ok(Arc::new(TaskOutcomeStore::new(conn)))
 }
 
 fn init_embedder(config: &Config) -> Result<Embedder> {

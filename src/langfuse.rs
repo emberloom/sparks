@@ -56,6 +56,53 @@ impl LangfuseClient {
             }
         });
     }
+
+    /// Ingest events synchronously. Useful for short-lived CLI commands.
+    pub async fn ingest_sync(&self, events: Vec<serde_json::Value>) -> std::result::Result<(), String> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let url = format!("{}/api/public/ingestion", self.base_url);
+        let body = serde_json::json!({ "batch": events });
+        let resp = self
+            .client
+            .post(&url)
+            .basic_auth(&self.public_key, Some(&self.secret_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Langfuse ingestion error: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Langfuse ingestion failed: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// Emit a mission KPI snapshot as a trace event.
+    pub async fn emit_kpi_snapshot(
+        &self,
+        lane: &str,
+        repo: &str,
+        risk_tier: &str,
+        payload: serde_json::Value,
+    ) -> std::result::Result<(), String> {
+        let trace_id = new_id();
+        let body = serde_json::json!({
+            "id": trace_id,
+            "name": "mission:kpi_snapshot",
+            "timestamp": now_iso(),
+            "sessionId": repo,
+            "userId": "athena",
+            "tags": ["mission", "kpi", lane, risk_tier],
+            "input": {
+                "lane": lane,
+                "repo": repo,
+                "risk_tier": risk_tier,
+            },
+            "output": payload,
+        });
+        self.ingest_sync(vec![ingestion_event("trace-create", body)]).await
+    }
 }
 
 // ---------------------------------------------------------------------------

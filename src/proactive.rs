@@ -200,6 +200,9 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
                                             .to_string(),
                                         ghost: Some("scout".to_string()),
                                         target: crate::pulse::PulseTarget::Broadcast,
+                                        lane: "self_improvement".to_string(),
+                                        risk_tier: "medium".to_string(),
+                                        repo: crate::kpi::default_repo_name(),
                                     };
                                     if let Err(e) = auto_tx.send(task).await {
                                         tracing::warn!("Memory scanner: failed to dispatch improvement task: {}", e);
@@ -403,6 +406,9 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
                                             .to_string(),
                                         ghost: Some("scout".to_string()),
                                         target: crate::pulse::PulseTarget::Broadcast,
+                                        lane: "self_improvement".to_string(),
+                                        risk_tier: "medium".to_string(),
+                                        repo: crate::kpi::default_repo_name(),
                                     };
                                     if let Err(e) = auto_tx.send(task).await {
                                         tracing::warn!(
@@ -811,6 +817,9 @@ pub fn spawn_code_indexer(
                     .to_string(),
                 ghost: Some("scout".to_string()),
                 target: crate::pulse::PulseTarget::Broadcast,
+                lane: "self_improvement".to_string(),
+                risk_tier: "medium".to_string(),
+                repo: crate::kpi::default_repo_name(),
             };
 
             if let Err(e) = auto_tx.send(task).await {
@@ -999,6 +1008,9 @@ If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING
                                 .to_string(),
                             ghost: Some("coder".to_string()),
                             target: crate::pulse::PulseTarget::Broadcast,
+                            lane: "self_improvement".to_string(),
+                            risk_tier: "high".to_string(),
+                            repo: crate::kpi::default_repo_name(),
                         };
                         if let Err(e) = auto_tx.send(task).await {
                             tracing::warn!("Refactoring scanner: failed to dispatch: {}", e);

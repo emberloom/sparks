@@ -325,6 +325,9 @@ pub fn spawn_metrics_collector(
                         context: format!("Current metrics: {}", metrics_summary),
                         ghost: Some("scout".to_string()),
                         target: crate::pulse::PulseTarget::Broadcast,
+                        lane: "self_improvement".to_string(),
+                        risk_tier: "high".to_string(),
+                        repo: crate::kpi::default_repo_name(),
                     };
                     let _ = auto_tx.send(task).await;
 

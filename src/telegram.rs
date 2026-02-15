@@ -607,6 +607,9 @@ async fn command_dispatch(
         context: String::new(),
         ghost: ghost_name.clone(),
         target,
+        lane: "delivery".to_string(),
+        risk_tier: "medium".to_string(),
+        repo: crate::kpi::default_repo_name(),
     };
 
     if let Err(e) = state.handle.dispatch_task(task).await {
