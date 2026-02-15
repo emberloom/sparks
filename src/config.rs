@@ -44,6 +44,8 @@ pub struct Config {
     pub github: GithubConfig,
     #[serde(default)]
     pub self_dev: SelfDevConfig,
+    #[serde(default)]
+    pub langfuse: LangfuseConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -383,6 +385,29 @@ impl Default for SelfDevConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct LangfuseConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for LangfuseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("LANGFUSE_PUBLIC_KEY").is_ok(),
+            public_key: std::env::var("LANGFUSE_PUBLIC_KEY").ok(),
+            secret_key: std::env::var("LANGFUSE_SECRET_KEY").ok(),
+            base_url: std::env::var("LANGFUSE_BASE_URL").ok(),
+        }
+    }
+}
+
 fn default_metrics_interval() -> u64 {
     30
 }
@@ -517,7 +542,7 @@ fn default_max_tokens() -> u32 {
     4096
 }
 fn default_image() -> String {
-    "ubuntu:24.04".into()
+    "rust:1.84-slim".into()
 }
 fn default_socket_path() -> String {
     "/var/run/docker.sock".into()
@@ -649,6 +674,7 @@ impl Default for Config {
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
             self_dev: SelfDevConfig::default(),
+            langfuse: LangfuseConfig::default(),
         }
     }
 }
@@ -786,11 +812,56 @@ impl Config {
                 }
             }
         }
+
+        let mut inline_secrets = Vec::new();
+        if self.github.token.is_some() {
+            inline_secrets.push("github.token");
+        }
+        if self.telegram.token.is_some() {
+            inline_secrets.push("telegram.token");
+        }
+        if self.telegram.stt_api_key.is_some() {
+            inline_secrets.push("telegram.stt_api_key");
+        }
+        if self
+            .openrouter
+            .as_ref()
+            .and_then(|c| c.api_key.as_ref())
+            .is_some()
+        {
+            inline_secrets.push("openrouter.api_key");
+        }
+        if self.zen.as_ref().and_then(|c| c.api_key.as_ref()).is_some() {
+            inline_secrets.push("zen.api_key");
+        }
+        if self.langfuse.public_key.is_some() {
+            inline_secrets.push("langfuse.public_key");
+        }
+        if self.langfuse.secret_key.is_some() {
+            inline_secrets.push("langfuse.secret_key");
+        }
+        if !inline_secrets.is_empty() {
+            tracing::warn!(
+                fields = %inline_secrets.join(", "),
+                "Inline secrets found in config; prefer environment variables or a local secret manager"
+            );
+        }
     }
 
-    /// Build the configured LLM provider
-    pub fn build_llm_provider(&self) -> Result<Arc<dyn LlmProvider>> {
-        match self.llm.provider.as_str() {
+    /// Ordered provider candidates: configured provider first, then common fallbacks.
+    pub fn provider_candidates(&self) -> Vec<String> {
+        let mut out = vec![self.llm.provider.clone()];
+        for p in ["openrouter", "zen", "ollama"] {
+            if !out.iter().any(|x| x == p) {
+                out.push(p.to_string());
+            }
+        }
+        out
+    }
+
+    /// Build an LLM provider by explicit name.
+    pub fn build_llm_provider_for(&self, provider: &str) -> Result<Arc<dyn LlmProvider>> {
+        match provider {
             "ollama" => Ok(Arc::new(OllamaClient::new(self.ollama.clone()))),
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
@@ -853,12 +924,18 @@ impl Config {
         }
     }
 
-    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_orchestrator_provider(
+    /// Build the configured LLM provider
+    pub fn build_llm_provider(&self) -> Result<Arc<dyn LlmProvider>> {
+        self.build_llm_provider_for(self.llm.provider.as_str())
+    }
+
+    /// Build the orchestrator provider for an explicit provider name.
+    pub fn build_orchestrator_provider_for(
         &self,
+        provider: &str,
         fallback: &Arc<dyn LlmProvider>,
     ) -> Result<Arc<dyn LlmProvider>> {
-        match self.llm.provider.as_str() {
+        match provider {
             "ollama" => match &self.ollama.classifier_model {
                 Some(model) => {
                     let mut cfg = self.ollama.clone();
@@ -868,14 +945,23 @@ impl Config {
                 None => Ok(fallback.clone()),
             },
             "openrouter" => {
-                let cfg = self.openrouter.as_ref().unwrap(); // already validated in build_llm_provider
+                let cfg = self.openrouter.as_ref().ok_or_else(|| {
+                    AthenaError::Config(
+                        "provider = \"openrouter\" but [openrouter] section is missing".into(),
+                    )
+                })?;
                 match &cfg.classifier_model {
                     Some(model) => {
                         let api_key = cfg
                             .api_key
                             .clone()
                             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-                            .unwrap(); // already validated
+                            .ok_or_else(|| {
+                                AthenaError::Config(
+                                    "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
+                                        .into(),
+                                )
+                            })?;
                         Ok(Arc::new(OpenAiCompatibleClient::new(
                             OpenAiCompatibleConfig {
                                 url: cfg.url.clone(),
@@ -892,14 +978,21 @@ impl Config {
                 }
             }
             "zen" => {
-                let cfg = self.zen.as_ref().unwrap(); // already validated
+                let cfg = self.zen.as_ref().ok_or_else(|| {
+                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+                })?;
                 match &cfg.classifier_model {
                     Some(model) => {
                         let api_key = cfg
                             .api_key
                             .clone()
                             .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
-                            .unwrap(); // already validated
+                            .ok_or_else(|| {
+                                AthenaError::Config(
+                                    "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
+                                        .into(),
+                                )
+                            })?;
                         Ok(Arc::new(OpenAiCompatibleClient::new(
                             OpenAiCompatibleConfig {
                                 url: cfg.url.clone(),
@@ -917,6 +1010,14 @@ impl Config {
             }
             _ => Ok(fallback.clone()),
         }
+    }
+
+    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
+    pub fn build_orchestrator_provider(
+        &self,
+        fallback: &Arc<dyn LlmProvider>,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        self.build_orchestrator_provider_for(self.llm.provider.as_str(), fallback)
     }
 
     /// Resolve the db path, expanding ~ to home dir

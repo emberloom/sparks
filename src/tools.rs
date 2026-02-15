@@ -156,9 +156,15 @@ struct ShellTool;
 
 #[async_trait]
 impl Tool for ShellTool {
-    fn name(&self) -> &str { "shell" }
-    fn description(&self) -> String { "Run a shell command: {\"tool\": \"shell\", \"params\": {\"command\": \"...\"}}".into() }
-    fn needs_confirmation(&self) -> bool { false } // Handled by sensitive pattern check in strategy
+    fn name(&self) -> &str {
+        "shell"
+    }
+    fn description(&self) -> String {
+        "Run a shell command: {\"tool\": \"shell\", \"params\": {\"command\": \"...\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool {
+        false
+    } // Handled by sensitive pattern check in strategy
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -171,7 +177,8 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let cmd = params.get("command")
+        let cmd = params
+            .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("shell: missing 'command' param".into()))?;
 
@@ -189,9 +196,15 @@ struct FileReadTool;
 
 #[async_trait]
 impl Tool for FileReadTool {
-    fn name(&self) -> &str { "file_read" }
-    fn description(&self) -> String { "Read a file: {\"tool\": \"file_read\", \"params\": {\"path\": \"...\"}}".into() }
-    fn needs_confirmation(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "file_read"
+    }
+    fn description(&self) -> String {
+        "Read a file: {\"tool\": \"file_read\", \"params\": {\"path\": \"...\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -204,7 +217,8 @@ impl Tool for FileReadTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let path = params.get("path")
+        let path = params
+            .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_read: missing 'path' param".into()))?;
 
@@ -230,9 +244,15 @@ struct FileWriteTool;
 
 #[async_trait]
 impl Tool for FileWriteTool {
-    fn name(&self) -> &str { "file_write" }
-    fn description(&self) -> String { "Write a file: {\"tool\": \"file_write\", \"params\": {\"path\": \"...\", \"content\": \"...\"}}".into() }
-    fn needs_confirmation(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "file_write"
+    }
+    fn description(&self) -> String {
+        "Write a file: {\"tool\": \"file_write\", \"params\": {\"path\": \"...\", \"content\": \"...\"}}".into()
+    }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -246,10 +266,12 @@ impl Tool for FileWriteTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let path = params.get("path")
+        let path = params
+            .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_write: missing 'path' param".into()))?;
-        let content = params.get("content")
+        let content = params
+            .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_write: missing 'content' param".into()))?;
 
@@ -276,11 +298,15 @@ struct FileEditTool;
 
 #[async_trait]
 impl Tool for FileEditTool {
-    fn name(&self) -> &str { "file_edit" }
+    fn name(&self) -> &str {
+        "file_edit"
+    }
     fn description(&self) -> String {
         "Edit a file by replacing a string: {\"tool\": \"file_edit\", \"params\": {\"path\": \"...\", \"old_string\": \"...\", \"new_string\": \"...\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -295,13 +321,16 @@ impl Tool for FileEditTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let path = params.get("path")
+        let path = params
+            .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_edit: missing 'path' param".into()))?;
-        let old_string = params.get("old_string")
+        let old_string = params
+            .get("old_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_edit: missing 'old_string' param".into()))?;
-        let new_string = params.get("new_string")
+        let new_string = params
+            .get("new_string")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("file_edit: missing 'new_string' param".into()))?;
 
@@ -357,11 +386,15 @@ struct GrepTool;
 
 #[async_trait]
 impl Tool for GrepTool {
-    fn name(&self) -> &str { "grep" }
+    fn name(&self) -> &str {
+        "grep"
+    }
     fn description(&self) -> String {
         "Search file contents: {\"tool\": \"grep\", \"params\": {\"pattern\": \"...\", \"path\": \".\", \"include\": \"*.rs\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -376,14 +409,12 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let pattern = params.get("pattern")
+        let pattern = params
+            .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("grep: missing 'pattern' param".into()))?;
-        let path = params.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
-        let include = params.get("include")
-            .and_then(|v| v.as_str());
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let include = params.get("include").and_then(|v| v.as_str());
 
         // Validate search path
         if path != "." {
@@ -404,7 +435,10 @@ impl Tool for GrepTool {
 
         if let Some(inc) = include {
             let escaped_inc = inc.replace('\'', "'\\''");
-            cmd = format!("grep -rn --include='{}' -- '{}' '{}'", escaped_inc, escaped_pattern, escaped_path);
+            cmd = format!(
+                "grep -rn --include='{}' -- '{}' '{}'",
+                escaped_inc, escaped_pattern, escaped_path
+            );
         }
 
         // Limit output lines
@@ -431,11 +465,15 @@ struct GlobTool;
 
 #[async_trait]
 impl Tool for GlobTool {
-    fn name(&self) -> &str { "glob" }
+    fn name(&self) -> &str {
+        "glob"
+    }
     fn description(&self) -> String {
         "Find files by pattern: {\"tool\": \"glob\", \"params\": {\"pattern\": \"*.rs\", \"path\": \".\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -449,12 +487,11 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let pattern = params.get("pattern")
+        let pattern = params
+            .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("glob: missing 'pattern' param".into()))?;
-        let path = params.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         // Validate search path
         if path != "." {
@@ -561,11 +598,15 @@ impl WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &str { "web_fetch" }
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
     fn description(&self) -> String {
         "Fetch a URL: {\"tool\": \"web_fetch\", \"params\": {\"url\": \"https://...\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -578,7 +619,8 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let url = params.get("url")
+        let url = params
+            .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("web_fetch: missing 'url' param".into()))?;
 
@@ -589,7 +631,8 @@ impl Tool for WebFetchTool {
             });
         }
 
-        let response = self.client
+        let response = self
+            .client
             .get(url)
             .send()
             .await
@@ -645,11 +688,15 @@ impl WebSearchTool {
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &str { "web_search" }
+    fn name(&self) -> &str {
+        "web_search"
+    }
     fn description(&self) -> String {
         "Search the web: {\"tool\": \"web_search\", \"params\": {\"query\": \"...\", \"num_results\": 5}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -663,15 +710,18 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let query = params.get("query")
+        let query = params
+            .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("web_search: missing 'query' param".into()))?;
-        let num_results = params.get("num_results")
+        let num_results = params
+            .get("num_results")
             .and_then(|v| v.as_u64())
             .unwrap_or(5)
             .min(10) as usize;
 
-        let response = self.client
+        let response = self
+            .client
             .get("https://html.duckduckgo.com/html/")
             .query(&[("q", query)])
             .send()
@@ -691,17 +741,17 @@ impl Tool for WebSearchTool {
             .map_err(|e| AthenaError::Tool(format!("web_search: read failed: {}", e)))?;
 
         // Parse results from DuckDuckGo HTML
-        let re_result = regex::Regex::new(
-            r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#
-        ).unwrap();
-        let re_snippet = regex::Regex::new(
-            r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#
-        ).unwrap();
+        let re_result =
+            regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#).unwrap();
+        let re_snippet =
+            regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#).unwrap();
 
-        let titles: Vec<(&str, &str)> = re_result.captures_iter(&body)
+        let titles: Vec<(&str, &str)> = re_result
+            .captures_iter(&body)
             .map(|c| (c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str()))
             .collect();
-        let snippets: Vec<&str> = re_snippet.captures_iter(&body)
+        let snippets: Vec<&str> = re_snippet
+            .captures_iter(&body)
             .map(|c| c.get(1).unwrap().as_str())
             .collect();
 
@@ -729,11 +779,15 @@ impl Tool for WebSearchTool {
             };
 
             let clean_title = strip_html(title);
-            let snippet = snippets.get(i)
-                .map(|s| strip_html(s))
-                .unwrap_or_default();
+            let snippet = snippets.get(i).map(|s| strip_html(s)).unwrap_or_default();
 
-            output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, clean_title, url, snippet));
+            output.push_str(&format!(
+                "{}. {}\n   {}\n   {}\n\n",
+                i + 1,
+                clean_title,
+                url,
+                snippet
+            ));
         }
 
         Ok(ToolResult {
@@ -749,11 +803,15 @@ struct CodebaseMapTool;
 
 #[async_trait]
 impl Tool for CodebaseMapTool {
-    fn name(&self) -> &str { "codebase_map" }
+    fn name(&self) -> &str {
+        "codebase_map"
+    }
     fn description(&self) -> String {
         "Show project structure and key symbols: {\"tool\": \"codebase_map\", \"params\": {\"path\": \".\", \"depth\": 3}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -766,10 +824,9 @@ impl Tool for CodebaseMapTool {
     }
 
     async fn execute(&self, session: &DockerSession, params: &Value) -> Result<ToolResult> {
-        let path = params.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
-        let depth = params.get("depth")
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let depth = params
+            .get("depth")
             .and_then(|v| v.as_u64())
             .unwrap_or(3)
             .max(1)
@@ -898,11 +955,15 @@ fn detect_lint_command(path: &str) -> String {
 
 #[async_trait]
 impl Tool for LintTool {
-    fn name(&self) -> &str { "lint" }
+    fn name(&self) -> &str {
+        "lint"
+    }
     fn description(&self) -> String {
         "Check code for errors: {\"tool\": \"lint\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"lint\", \"params\": {\"command\": \"cargo check\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -963,9 +1024,13 @@ fn detect_test_command(path: &str) -> String {
 
     match ext {
         "rs" => "test -f Cargo.toml && cargo test 2>&1 || echo 'No Cargo.toml found'".to_string(),
-        "py" => format!("python3 -m pytest '{}' -v 2>&1 || python3 -m unittest '{}' -v 2>&1", escaped, escaped),
+        "py" => format!(
+            "python3 -m pytest '{}' -v 2>&1 || python3 -m unittest '{}' -v 2>&1",
+            escaped, escaped
+        ),
         "js" | "ts" | "jsx" | "tsx" => {
-            "if test -f package.json; then npm test 2>&1; else echo 'No package.json found'; fi".to_string()
+            "if test -f package.json; then npm test 2>&1; else echo 'No package.json found'; fi"
+                .to_string()
         }
         "go" => "go test ./... -v 2>&1".to_string(),
         // No extension — treat as project root, auto-detect
@@ -984,11 +1049,15 @@ fn detect_test_command(path: &str) -> String {
 
 #[async_trait]
 impl Tool for TestRunnerTool {
-    fn name(&self) -> &str { "test_runner" }
+    fn name(&self) -> &str {
+        "test_runner"
+    }
     fn description(&self) -> String {
         "Run tests: {\"tool\": \"test_runner\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"test_runner\", \"params\": {\"command\": \"cargo test\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -1038,11 +1107,15 @@ struct DiffTool;
 
 #[async_trait]
 impl Tool for DiffTool {
-    fn name(&self) -> &str { "diff" }
+    fn name(&self) -> &str {
+        "diff"
+    }
     fn description(&self) -> String {
         "Show git changes: {\"tool\": \"diff\", \"params\": {\"path\": \"src/main.rs\"}} or {\"tool\": \"diff\", \"params\": {}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -1057,7 +1130,9 @@ impl Tool for DiffTool {
         let path = params.get("path").and_then(|v| v.as_str());
 
         // Check if inside a git repo
-        let check = session.exec("git rev-parse --is-inside-work-tree 2>&1").await?;
+        let check = session
+            .exec("git rev-parse --is-inside-work-tree 2>&1")
+            .await?;
         if !check.trim().eq_ignore_ascii_case("true") {
             return Ok(ToolResult {
                 success: false,
@@ -1144,15 +1219,16 @@ async fn run_cli_tool(
             // Command failed to start (not installed, permission denied, etc.)
             Ok(ToolResult {
                 success: false,
-                output: format!("{}: command failed — {}. Is it installed and in PATH?", tool_name, e),
+                output: format!(
+                    "{}: command failed — {}. Is it installed and in PATH?",
+                    tool_name, e
+                ),
             })
         }
-        Err(_) => {
-            Ok(ToolResult {
-                success: false,
-                output: format!("{}: timed out after {}s", tool_name, CLI_TIMEOUT_SECS),
-            })
-        }
+        Err(_) => Ok(ToolResult {
+            success: false,
+            output: format!("{}: timed out after {}s", tool_name, CLI_TIMEOUT_SECS),
+        }),
     }
 }
 
@@ -1160,7 +1236,8 @@ async fn run_cli_tool(
 /// Prepends optional context the ghost provides (files it read, constraints, etc.)
 /// so the coding agent starts with full awareness.
 fn build_cli_prompt(params: &Value) -> std::result::Result<String, AthenaError> {
-    let prompt = params.get("prompt")
+    let prompt = params
+        .get("prompt")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AthenaError::Tool("missing 'prompt' param".into()))?;
 
@@ -1183,26 +1260,60 @@ fn build_cli_prompt(params: &Value) -> std::result::Result<String, AthenaError> 
     Ok(full)
 }
 
-struct ClaudeCodeTool { workspace: String, knobs: SharedKnobs }
+struct ClaudeCodeTool {
+    workspace: String,
+    knobs: SharedKnobs,
+}
 
 impl ClaudeCodeTool {
     fn new(workspace: &str, knobs: SharedKnobs) -> Self {
-        Self { workspace: workspace.to_string(), knobs }
+        Self {
+            workspace: workspace.to_string(),
+            knobs,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for ClaudeCodeTool {
-    fn name(&self) -> &str { "claude_code" }
+    fn name(&self) -> &str {
+        "claude_code"
+    }
     fn description(&self) -> String {
         "Run Claude Code to implement a coding task (full agent with file editing, compilation, tests): {\"tool\": \"claude_code\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The coding task to execute" },
+                "context": { "type": "string", "description": "Optional background context from previous steps" },
+                "files": { "type": "string", "description": "Optional relevant file snippets or paths" }
+            },
+            "required": ["prompt"]
+        })
+    }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        if std::env::var_os("CLAUDECODE").is_some() {
+            return Ok(ToolResult {
+                success: false,
+                output: "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.".into(),
+            });
+        }
         let prompt = build_cli_prompt(params)?;
         let model = self.knobs.read().unwrap().cli_model.clone();
-        let mut args = vec!["-p", &prompt, "--output-format", "text", "--dangerously-skip-permissions"];
+        let mut args = vec![
+            "-p",
+            &prompt,
+            "--output-format",
+            "text",
+            "--dangerously-skip-permissions",
+        ];
         if !model.is_empty() {
             args.push("--model");
             args.push(&model);
@@ -1211,21 +1322,43 @@ impl Tool for ClaudeCodeTool {
     }
 }
 
-struct CodexTool { workspace: String, knobs: SharedKnobs }
+struct CodexTool {
+    workspace: String,
+    knobs: SharedKnobs,
+}
 
 impl CodexTool {
     fn new(workspace: &str, knobs: SharedKnobs) -> Self {
-        Self { workspace: workspace.to_string(), knobs }
+        Self {
+            workspace: workspace.to_string(),
+            knobs,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for CodexTool {
-    fn name(&self) -> &str { "codex" }
+    fn name(&self) -> &str {
+        "codex"
+    }
     fn description(&self) -> String {
         "Run OpenAI Codex CLI to implement a coding task (full agent with file editing): {\"tool\": \"codex\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The coding task to execute" },
+                "context": { "type": "string", "description": "Optional background context from previous steps" },
+                "files": { "type": "string", "description": "Optional relevant file snippets or paths" }
+            },
+            "required": ["prompt"]
+        })
+    }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
@@ -1240,21 +1373,43 @@ impl Tool for CodexTool {
     }
 }
 
-struct OpenCodeTool { workspace: String, knobs: SharedKnobs }
+struct OpenCodeTool {
+    workspace: String,
+    knobs: SharedKnobs,
+}
 
 impl OpenCodeTool {
     fn new(workspace: &str, knobs: SharedKnobs) -> Self {
-        Self { workspace: workspace.to_string(), knobs }
+        Self {
+            workspace: workspace.to_string(),
+            knobs,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for OpenCodeTool {
-    fn name(&self) -> &str { "opencode" }
+    fn name(&self) -> &str {
+        "opencode"
+    }
     fn description(&self) -> String {
         "Run OpenCode CLI to implement a coding task (full agent with file editing): {\"tool\": \"opencode\", \"params\": {\"prompt\": \"...\", \"context\": \"(optional background)\", \"files\": \"(optional file contents)\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { false }
+    fn needs_confirmation(&self) -> bool {
+        false
+    }
+
+    fn parameter_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The coding task to execute" },
+                "context": { "type": "string", "description": "Optional background context from previous steps" },
+                "files": { "type": "string", "description": "Optional relevant file snippets or paths" }
+            },
+            "required": ["prompt"]
+        })
+    }
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
@@ -1278,28 +1433,37 @@ struct GhTool {
 
 impl GhTool {
     fn new(workspace: &str, token: Option<String>) -> Self {
-        Self { workspace: workspace.to_string(), token }
+        Self {
+            workspace: workspace.to_string(),
+            token,
+        }
     }
 
     fn resolve_token(&self) -> Option<String> {
-        self.token.clone().or_else(|| std::env::var("GH_TOKEN").ok())
+        self.token
+            .clone()
+            .or_else(|| std::env::var("GH_TOKEN").ok())
     }
 }
 
 const GH_ALLOWED_SUBCOMMANDS: &[&str] = &[
-    "issue", "pr", "repo", "release", "run", "workflow",
-    "api", "search", "label", "project", "status",
+    "issue", "pr", "repo", "release", "run", "workflow", "api", "search", "label", "project",
+    "status",
 ];
 
 const GH_TIMEOUT_SECS: u64 = 120;
 
 #[async_trait]
 impl Tool for GhTool {
-    fn name(&self) -> &str { "gh" }
+    fn name(&self) -> &str {
+        "gh"
+    }
     fn description(&self) -> String {
         "Execute GitHub CLI commands: {\"tool\": \"gh\", \"params\": {\"subcommand\": \"pr list --state open\"}}".into()
     }
-    fn needs_confirmation(&self) -> bool { true }
+    fn needs_confirmation(&self) -> bool {
+        true
+    }
 
     fn parameter_schema(&self) -> Value {
         serde_json::json!({
@@ -1314,19 +1478,27 @@ impl Tool for GhTool {
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         use tokio::process::Command;
 
-        let subcommand = params.get("subcommand")
+        let subcommand = params
+            .get("subcommand")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AthenaError::Tool("gh: missing 'subcommand' param".into()))?;
 
         let parts: Vec<&str> = subcommand.split_whitespace().collect();
         if parts.is_empty() {
-            return Ok(ToolResult { success: false, output: "gh: empty subcommand".into() });
+            return Ok(ToolResult {
+                success: false,
+                output: "gh: empty subcommand".into(),
+            });
         }
 
         if !GH_ALLOWED_SUBCOMMANDS.contains(&parts[0]) {
             return Ok(ToolResult {
                 success: false,
-                output: format!("gh: subcommand '{}' is not allowed. Allowed: {}", parts[0], GH_ALLOWED_SUBCOMMANDS.join(", ")),
+                output: format!(
+                    "gh: subcommand '{}' is not allowed. Allowed: {}",
+                    parts[0],
+                    GH_ALLOWED_SUBCOMMANDS.join(", ")
+                ),
             });
         }
 
@@ -1364,18 +1536,14 @@ impl Tool for GhTool {
                     output: truncate(&combined, CLI_OUTPUT_LEN),
                 })
             }
-            Ok(Err(e)) => {
-                Ok(ToolResult {
-                    success: false,
-                    output: format!("gh: command failed — {}. Is gh installed and in PATH?", e),
-                })
-            }
-            Err(_) => {
-                Ok(ToolResult {
-                    success: false,
-                    output: format!("gh: timed out after {}s", GH_TIMEOUT_SECS),
-                })
-            }
+            Ok(Err(e)) => Ok(ToolResult {
+                success: false,
+                output: format!("gh: command failed — {}. Is gh installed and in PATH?", e),
+            }),
+            Err(_) => Ok(ToolResult {
+                success: false,
+                output: format!("gh: timed out after {}s", GH_TIMEOUT_SECS),
+            }),
         }
     }
 }
@@ -1399,8 +1567,14 @@ impl ManageToolsTool {
         if name.len() > 64 {
             return Err("Tool name too long (max 64 chars)".into());
         }
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
-            return Err("Tool name must contain only alphanumeric characters, underscores, and hyphens".into());
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(
+                "Tool name must contain only alphanumeric characters, underscores, and hyphens"
+                    .into(),
+            );
         }
         if name.contains("..") || name.contains('/') || name.contains('\\') {
             return Err("Tool name contains path traversal characters".into());
@@ -1620,27 +1794,35 @@ Usage: {"tool": "manage_tools", "params": {"action": "list|create|edit|delete", 
         match action {
             "list" => self.handle_list(),
             "create" => {
-                let name = params.get("name").and_then(|v| v.as_str())
-                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'create' requires 'name' param".into()))?;
-                let yaml = params.get("yaml").and_then(|v| v.as_str())
-                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'create' requires 'yaml' param".into()))?;
+                let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AthenaError::Tool("manage_tools: 'create' requires 'name' param".into())
+                })?;
+                let yaml = params.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AthenaError::Tool("manage_tools: 'create' requires 'yaml' param".into())
+                })?;
                 self.handle_create(name, yaml)
             }
             "edit" => {
-                let name = params.get("name").and_then(|v| v.as_str())
-                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'edit' requires 'name' param".into()))?;
-                let yaml = params.get("yaml").and_then(|v| v.as_str())
-                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'edit' requires 'yaml' param".into()))?;
+                let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AthenaError::Tool("manage_tools: 'edit' requires 'name' param".into())
+                })?;
+                let yaml = params.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AthenaError::Tool("manage_tools: 'edit' requires 'yaml' param".into())
+                })?;
                 self.handle_edit(name, yaml)
             }
             "delete" => {
-                let name = params.get("name").and_then(|v| v.as_str())
-                    .ok_or_else(|| AthenaError::Tool("manage_tools: 'delete' requires 'name' param".into()))?;
+                let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AthenaError::Tool("manage_tools: 'delete' requires 'name' param".into())
+                })?;
                 self.handle_delete(name)
             }
             _ => Ok(ToolResult {
                 success: false,
-                output: format!("manage_tools: unknown action '{}'. Use list/create/edit/delete.", action),
+                output: format!(
+                    "manage_tools: unknown action '{}'. Use list/create/edit/delete.",
+                    action
+                ),
             }),
         }
     }
@@ -1662,7 +1844,9 @@ impl ToolRegistry {
         usage_store: Option<Arc<crate::tool_usage::ToolUsageStore>>,
     ) -> Self {
         // Resolve host workspace for CLI tools (first writable mount, or ".")
-        let host_workspace = ghost.mounts.iter()
+        let host_workspace = ghost
+            .mounts
+            .iter()
             .find(|m| !m.read_only)
             .map(|m| m.host_path.clone())
             .unwrap_or_else(|| ".".to_string());
@@ -1690,7 +1874,11 @@ impl ToolRegistry {
         if let Some(path) = dynamic_tools_path {
             match dynamic_tools::discover(path, &host_workspace) {
                 Ok(dynamic) => {
-                    tracing::info!("Discovered {} dynamic tool(s) from {}", dynamic.len(), path.display());
+                    tracing::info!(
+                        "Discovered {} dynamic tool(s) from {}",
+                        dynamic.len(),
+                        path.display()
+                    );
                     all_tools.extend(dynamic);
                 }
                 Err(e) => {
@@ -1718,7 +1906,8 @@ impl ToolRegistry {
     /// Format tool descriptions for the LLM system prompt.
     /// Enriches descriptions with usage stats when available.
     pub fn descriptions(&self) -> String {
-        self.tools.values()
+        self.tools
+            .values()
             .map(|t| {
                 let base = t.description();
                 if let Some(ref store) = self.usage_store {
@@ -1763,7 +1952,10 @@ mod tests {
     #[test]
     fn test_strip_html_decodes_entities() {
         assert_eq!(strip_html("a &amp; b &lt; c &gt; d"), "a & b < c > d");
-        assert_eq!(strip_html("&quot;hello&quot; &#39;world&#39;"), "\"hello\" 'world'");
+        assert_eq!(
+            strip_html("&quot;hello&quot; &#39;world&#39;"),
+            "\"hello\" 'world'"
+        );
         assert_eq!(strip_html("non&nbsp;breaking"), "non breaking");
     }
 
@@ -1866,29 +2058,62 @@ mod tests {
 
     #[test]
     fn test_validate_path_traversal() {
-        assert_eq!(validate_path("../etc/passwd"), Err("Path traversal (..) not allowed"));
-        assert_eq!(validate_path("src/../../secret"), Err("Path traversal (..) not allowed"));
+        assert_eq!(
+            validate_path("../etc/passwd"),
+            Err("Path traversal (..) not allowed")
+        );
+        assert_eq!(
+            validate_path("src/../../secret"),
+            Err("Path traversal (..) not allowed")
+        );
     }
 
     #[test]
     fn test_validate_path_absolute_outside_workspace() {
-        assert_eq!(validate_path("/etc/passwd"), Err("Absolute paths must be under /workspace"));
-        assert_eq!(validate_path("/tmp/file"), Err("Absolute paths must be under /workspace"));
+        assert_eq!(
+            validate_path("/etc/passwd"),
+            Err("Absolute paths must be under /workspace")
+        );
+        assert_eq!(
+            validate_path("/tmp/file"),
+            Err("Absolute paths must be under /workspace")
+        );
     }
 
     #[test]
     fn test_validate_path_sensitive_files() {
-        assert_eq!(validate_path(".env"), Err("Access to sensitive file denied"));
-        assert_eq!(validate_path("src/.env.local"), Err("Access to sensitive file denied"));
-        assert_eq!(validate_path("config.toml"), Err("Access to sensitive file denied"));
-        assert_eq!(validate_path("credentials.json"), Err("Access to sensitive file denied"));
-        assert_eq!(validate_path("secrets.toml"), Err("Access to sensitive file denied"));
+        assert_eq!(
+            validate_path(".env"),
+            Err("Access to sensitive file denied")
+        );
+        assert_eq!(
+            validate_path("src/.env.local"),
+            Err("Access to sensitive file denied")
+        );
+        assert_eq!(
+            validate_path("config.toml"),
+            Err("Access to sensitive file denied")
+        );
+        assert_eq!(
+            validate_path("credentials.json"),
+            Err("Access to sensitive file denied")
+        );
+        assert_eq!(
+            validate_path("secrets.toml"),
+            Err("Access to sensitive file denied")
+        );
     }
 
     #[test]
     fn test_validate_path_sensitive_extensions() {
-        assert_eq!(validate_path("server.pem"), Err("Access to sensitive file type denied"));
-        assert_eq!(validate_path("private.key"), Err("Access to sensitive file type denied"));
+        assert_eq!(
+            validate_path("server.pem"),
+            Err("Access to sensitive file type denied")
+        );
+        assert_eq!(
+            validate_path("private.key"),
+            Err("Access to sensitive file type denied")
+        );
     }
 
     // ── validate_url ────────────────────────────────────────────────
@@ -2042,9 +2267,17 @@ mod tests {
     #[test]
     fn test_registry_coder_tools() {
         let ghost = make_ghost(vec![
-            "file_read", "file_write", "file_edit", "shell",
-            "grep", "glob", "web_fetch", "codebase_map",
-            "web_search", "lint", "diff",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "shell",
+            "grep",
+            "glob",
+            "web_fetch",
+            "codebase_map",
+            "web_search",
+            "lint",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let names = reg.tool_names();
@@ -2058,8 +2291,12 @@ mod tests {
     #[test]
     fn test_registry_scout_tools() {
         let ghost = make_ghost(vec![
-            "file_read", "shell", "grep", "glob",
-            "codebase_map", "diff",
+            "file_read",
+            "shell",
+            "grep",
+            "glob",
+            "codebase_map",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let names = reg.tool_names();
@@ -2093,9 +2330,17 @@ mod tests {
     #[test]
     fn test_registry_all_11_tools_available() {
         let ghost = make_ghost(vec![
-            "shell", "file_read", "file_write", "file_edit",
-            "grep", "glob", "web_fetch", "web_search",
-            "codebase_map", "lint", "diff",
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "codebase_map",
+            "lint",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 11);
@@ -2106,9 +2351,17 @@ mod tests {
     #[test]
     fn test_tool_names_match() {
         let ghost = make_ghost(vec![
-            "shell", "file_read", "file_write", "file_edit",
-            "grep", "glob", "web_fetch", "web_search",
-            "codebase_map", "lint", "diff",
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "codebase_map",
+            "lint",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         // Every registered tool name must match what the tool reports
@@ -2121,9 +2374,17 @@ mod tests {
     #[test]
     fn test_tool_descriptions_non_empty() {
         let ghost = make_ghost(vec![
-            "shell", "file_read", "file_write", "file_edit",
-            "grep", "glob", "web_fetch", "web_search",
-            "codebase_map", "lint", "diff",
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "codebase_map",
+            "lint",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
         let desc = reg.descriptions();
@@ -2131,17 +2392,33 @@ mod tests {
         // Each tool should have a description line
         for name in reg.tool_names() {
             let tool = reg.get(name).unwrap();
-            assert!(!tool.description().is_empty(), "Tool {} has empty description", name);
-            assert!(tool.description().contains("tool"), "Tool {} description missing 'tool' keyword", name);
+            assert!(
+                !tool.description().is_empty(),
+                "Tool {} has empty description",
+                name
+            );
+            assert!(
+                tool.description().contains("tool"),
+                "Tool {} description missing 'tool' keyword",
+                name
+            );
         }
     }
 
     #[test]
     fn test_confirmation_gates() {
         let ghost = make_ghost(vec![
-            "shell", "file_read", "file_write", "file_edit",
-            "grep", "glob", "web_fetch", "web_search",
-            "codebase_map", "lint", "diff",
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "codebase_map",
+            "lint",
+            "diff",
         ]);
         let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
 
@@ -2161,6 +2438,31 @@ mod tests {
         assert!(!reg.get("grep").unwrap().needs_confirmation());
         assert!(!reg.get("glob").unwrap().needs_confirmation());
         assert!(!reg.get("web_fetch").unwrap().needs_confirmation());
+    }
+
+    #[test]
+    fn test_coding_cli_schemas_require_prompt() {
+        let ghost = make_ghost(vec!["claude_code", "codex", "opencode"]);
+        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let schemas = reg.tool_schemas();
+
+        for name in ["claude_code", "codex", "opencode"] {
+            let schema = schemas
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("missing schema for {}", name));
+            let required = schema
+                .parameters
+                .get("required")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                required.iter().any(|v| v == "prompt"),
+                "{} schema must require prompt",
+                name
+            );
+        }
     }
 
     // ── ManageToolsTool ──────────────────────────────────────────────
@@ -2280,6 +2582,9 @@ command: "echo hi"
     fn test_manage_tools_needs_confirmation() {
         let dir = std::env::temp_dir().join("athena_test_manage_tools_confirm");
         let tool = ManageToolsTool::new(dir);
-        assert!(tool.needs_confirmation(), "manage_tools must always require confirmation");
+        assert!(
+            tool.needs_confirmation(),
+            "manage_tools must always require confirmation"
+        );
     }
 }

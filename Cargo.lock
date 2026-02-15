@@ -128,6 +128,7 @@ dependencies = [
  "cron",
  "dirs",
  "futures",
+ "hex",
  "ndarray",
  "notify",
  "ort",

@@ -1,0 +1,40 @@
+name: maintenance-pack
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cargo check
+        run: cargo check -q
+
+      - name: Cargo test
+        run: cargo test -q
+
+      - name: Cargo test (telegram feature)
+        run: cargo test -q --features telegram
+
+      - name: Doctor guard
+        run: cargo run --quiet -- doctor --skip-llm --ci
+
+      - name: Maintainability regression check
+        run: |
+          ./scripts/maintainability_check.py

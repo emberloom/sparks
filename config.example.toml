@@ -28,9 +28,10 @@ max_tokens = 4096
 # max_tokens = 4096
 
 [docker]
+# For Rust repos, use a Rust image so cargo/rustc exist inside ghost execution env.
 # Pin images by digest for reproducibility, e.g.:
-# image = "ubuntu@sha256:<digest>"
-image = "athena-sandbox"
+# image = "rust@sha256:<digest>"
+image = "rust:1.84-slim"
 socket_path = "/var/run/docker.sock"
 runtime = "runc"
 memory_limit = 268435456
@@ -93,4 +94,12 @@ allow_all = false              # must be true to allow all chats (bot refuses to
 confirm_timeout_secs = 300
 
 [github]
-# token = "ghp_..."  # or set GH_TOKEN env var
+# token = "ghp_..."  # prefer GH_TOKEN env var or a local secret manager
+
+# Langfuse observability - traces all LLM calls and agent activities
+# Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
+[langfuse]
+enabled = true  # set to false to disable
+# public_key = "pk-..."    # prefer LANGFUSE_PUBLIC_KEY env var or a secret manager
+# secret_key = "sk-..."    # prefer LANGFUSE_SECRET_KEY env var or a secret manager
+# base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud

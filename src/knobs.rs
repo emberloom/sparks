@@ -45,6 +45,9 @@ pub struct RuntimeKnobs {
     pub code_indexer_interval_secs: u64,
     pub refactoring_scan_enabled: bool,
     pub refactoring_scan_interval_secs: u64,
+
+    // Langfuse observability
+    pub langfuse_enabled: bool,
 }
 
 impl RuntimeKnobs {
@@ -79,7 +82,11 @@ impl RuntimeKnobs {
             pulse_tolerance: config.initiative.tolerance,
             quiet_hours,
             timezone_offset: config.mood.timezone_offset,
-            cli_tool: "claude_code".to_string(),
+            cli_tool: if std::env::var_os("CLAUDECODE").is_some() {
+                "codex".to_string()
+            } else {
+                "claude_code".to_string()
+            },
             cli_model: String::new(),
             self_dev_enabled: config.self_dev.enabled,
             metrics_interval_secs: config.self_dev.metrics_interval_secs,
@@ -87,6 +94,8 @@ impl RuntimeKnobs {
             code_indexer_interval_secs: config.self_dev.code_indexer_interval_secs,
             refactoring_scan_enabled: config.self_dev.refactoring_scan_enabled,
             refactoring_scan_interval_secs: config.self_dev.refactoring_scan_interval_secs,
+            langfuse_enabled: config.langfuse.enabled
+                || std::env::var("LANGFUSE_PUBLIC_KEY").is_ok(),
         }
     }
 
@@ -122,6 +131,7 @@ impl RuntimeKnobs {
             code_indexer_interval_secs: 14400,
             refactoring_scan_enabled: false,
             refactoring_scan_interval_secs: 21600,
+            langfuse_enabled: false,
         }
     }
 
@@ -139,7 +149,10 @@ impl RuntimeKnobs {
                 self.conversation_reentry_enabled = on;
                 self.relationship_tracking_enabled = on;
                 self.mood_injection_enabled = on;
-                Ok(format!("All proactive features: {}", if on { "on" } else { "off" }))
+                Ok(format!(
+                    "All proactive features: {}",
+                    if on { "on" } else { "off" }
+                ))
             }
             "heartbeat" => {
                 self.heartbeat_enabled = parse_bool(value)?;
@@ -161,62 +174,101 @@ impl RuntimeKnobs {
             }
             "idle_musings" => {
                 self.idle_musings_enabled = parse_bool(value)?;
-                Ok(format!("Idle musings: {}", on_off(self.idle_musings_enabled)))
+                Ok(format!(
+                    "Idle musings: {}",
+                    on_off(self.idle_musings_enabled)
+                ))
             }
             "conversation_reentry" => {
                 self.conversation_reentry_enabled = parse_bool(value)?;
-                Ok(format!("Conversation re-entry: {}", on_off(self.conversation_reentry_enabled)))
+                Ok(format!(
+                    "Conversation re-entry: {}",
+                    on_off(self.conversation_reentry_enabled)
+                ))
             }
             "reentry.delay" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.reentry_delay_secs = v.max(60);
                 Ok(format!("Re-entry delay: {}s", self.reentry_delay_secs))
             }
             "reentry.jitter" => {
-                let v: f64 = value.parse().map_err(|_| "Expected float 0.0-1.0".to_string())?;
+                let v: f64 = value
+                    .parse()
+                    .map_err(|_| "Expected float 0.0-1.0".to_string())?;
                 self.reentry_jitter = v.clamp(0.0, 1.0);
                 Ok(format!("Re-entry jitter: {:.2}", self.reentry_jitter))
             }
             "relationship_tracking" => {
                 self.relationship_tracking_enabled = parse_bool(value)?;
-                Ok(format!("Relationship tracking: {}", on_off(self.relationship_tracking_enabled)))
+                Ok(format!(
+                    "Relationship tracking: {}",
+                    on_off(self.relationship_tracking_enabled)
+                ))
             }
             "mood_injection" => {
                 self.mood_injection_enabled = parse_bool(value)?;
-                Ok(format!("Mood injection: {}", on_off(self.mood_injection_enabled)))
+                Ok(format!(
+                    "Mood injection: {}",
+                    on_off(self.mood_injection_enabled)
+                ))
             }
             "spontaneity" => {
-                let v: f32 = value.parse().map_err(|_| "Expected float 0.0-1.0".to_string())?;
+                let v: f32 = value
+                    .parse()
+                    .map_err(|_| "Expected float 0.0-1.0".to_string())?;
                 self.spontaneity = v.clamp(0.0, 1.0);
                 Ok(format!("Spontaneity: {:.2}", self.spontaneity))
             }
             "heartbeat.interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.heartbeat_interval_secs = v.max(10);
-                Ok(format!("Heartbeat interval: {}s", self.heartbeat_interval_secs))
+                Ok(format!(
+                    "Heartbeat interval: {}s",
+                    self.heartbeat_interval_secs
+                ))
             }
             "heartbeat.jitter" => {
-                let v: f64 = value.parse().map_err(|_| "Expected float 0.0-1.0".to_string())?;
+                let v: f64 = value
+                    .parse()
+                    .map_err(|_| "Expected float 0.0-1.0".to_string())?;
                 self.heartbeat_jitter = v.clamp(0.0, 1.0);
                 Ok(format!("Heartbeat jitter: {:.2}", self.heartbeat_jitter))
             }
             "memory_scan.interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.memory_scan_interval_secs = v.max(60);
-                Ok(format!("Memory scan interval: {}s", self.memory_scan_interval_secs))
+                Ok(format!(
+                    "Memory scan interval: {}s",
+                    self.memory_scan_interval_secs
+                ))
             }
             "idle_threshold" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.idle_threshold_secs = v.max(60);
                 Ok(format!("Idle threshold: {}s", self.idle_threshold_secs))
             }
             "mood.drift_interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.mood_drift_interval_secs = v.max(60);
-                Ok(format!("Mood drift interval: {}s", self.mood_drift_interval_secs))
+                Ok(format!(
+                    "Mood drift interval: {}s",
+                    self.mood_drift_interval_secs
+                ))
             }
             "tolerance" => {
-                let v: f32 = value.parse().map_err(|_| "Expected float 0.0-1.0".to_string())?;
+                let v: f32 = value
+                    .parse()
+                    .map_err(|_| "Expected float 0.0-1.0".to_string())?;
                 self.pulse_tolerance = v.clamp(0.0, 1.0);
                 Ok(format!("Pulse tolerance: {:.2}", self.pulse_tolerance))
             }
@@ -229,8 +281,12 @@ impl RuntimeKnobs {
                     if parts.len() != 2 {
                         return Err("Expected format: start-end (e.g., 22-8)".to_string());
                     }
-                    let start: u32 = parts[0].parse().map_err(|_| "Invalid start hour".to_string())?;
-                    let end: u32 = parts[1].parse().map_err(|_| "Invalid end hour".to_string())?;
+                    let start: u32 = parts[0]
+                        .parse()
+                        .map_err(|_| "Invalid start hour".to_string())?;
+                    let end: u32 = parts[1]
+                        .parse()
+                        .map_err(|_| "Invalid end hour".to_string())?;
                     if start > 23 || end > 23 {
                         return Err("Hours must be 0-23".to_string());
                     }
@@ -239,7 +295,9 @@ impl RuntimeKnobs {
                 }
             }
             "timezone_offset" => {
-                let v: i32 = value.parse().map_err(|_| "Expected integer hours".to_string())?;
+                let v: i32 = value
+                    .parse()
+                    .map_err(|_| "Expected integer hours".to_string())?;
                 self.timezone_offset = v.clamp(-12, 14);
                 Ok(format!("Timezone offset: {}h", self.timezone_offset))
             }
@@ -249,7 +307,11 @@ impl RuntimeKnobs {
                     self.cli_tool = value.to_string();
                     Ok(format!("CLI tool: {}", self.cli_tool))
                 } else {
-                    Err(format!("Invalid CLI tool: {}. Valid: {}", value, VALID.join(", ")))
+                    Err(format!(
+                        "Invalid CLI tool: {}. Valid: {}",
+                        value,
+                        VALID.join(", ")
+                    ))
                 }
             }
             "cli_model" => {
@@ -266,27 +328,50 @@ impl RuntimeKnobs {
                 Ok(format!("Self-dev: {}", on_off(self.self_dev_enabled)))
             }
             "metrics.interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.metrics_interval_secs = v.max(10);
                 Ok(format!("Metrics interval: {}s", self.metrics_interval_secs))
             }
             "code_indexer" => {
                 self.code_indexer_enabled = parse_bool(value)?;
-                Ok(format!("Code indexer: {}", on_off(self.code_indexer_enabled)))
+                Ok(format!(
+                    "Code indexer: {}",
+                    on_off(self.code_indexer_enabled)
+                ))
             }
             "code_indexer.interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.code_indexer_interval_secs = v.max(600);
-                Ok(format!("Code indexer interval: {}s", self.code_indexer_interval_secs))
+                Ok(format!(
+                    "Code indexer interval: {}s",
+                    self.code_indexer_interval_secs
+                ))
             }
             "refactoring_scan" => {
                 self.refactoring_scan_enabled = parse_bool(value)?;
-                Ok(format!("Refactoring scan: {}", on_off(self.refactoring_scan_enabled)))
+                Ok(format!(
+                    "Refactoring scan: {}",
+                    on_off(self.refactoring_scan_enabled)
+                ))
             }
             "refactoring_scan.interval" => {
-                let v: u64 = value.parse().map_err(|_| "Expected integer seconds".to_string())?;
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
                 self.refactoring_scan_interval_secs = v.max(600);
-                Ok(format!("Refactoring scan interval: {}s", self.refactoring_scan_interval_secs))
+                Ok(format!(
+                    "Refactoring scan interval: {}s",
+                    self.refactoring_scan_interval_secs
+                ))
+            }
+            "langfuse" => {
+                let on = parse_bool(value)?;
+                self.langfuse_enabled = on;
+                Ok(format!("Langfuse: {}", on_off(self.langfuse_enabled)))
             }
             _ => Err(format!("Unknown knob: {}", key)),
         }
@@ -297,22 +382,58 @@ impl RuntimeKnobs {
         let mut s = String::new();
         let _ = writeln!(s, "Runtime Knobs:");
         let _ = writeln!(s, "  all_proactive          {}", on_off(self.all_proactive));
-        let _ = writeln!(s, "  heartbeat              {}", on_off(self.heartbeat_enabled));
+        let _ = writeln!(
+            s,
+            "  heartbeat              {}",
+            on_off(self.heartbeat_enabled)
+        );
         let _ = writeln!(s, "  cron                   {}", on_off(self.cron_enabled));
         let _ = writeln!(s, "  mood                   {}", on_off(self.mood_enabled));
-        let _ = writeln!(s, "  memory_scan            {}", on_off(self.memory_scan_enabled));
-        let _ = writeln!(s, "  idle_musings           {}", on_off(self.idle_musings_enabled));
-        let _ = writeln!(s, "  conversation_reentry   {}", on_off(self.conversation_reentry_enabled));
+        let _ = writeln!(
+            s,
+            "  memory_scan            {}",
+            on_off(self.memory_scan_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  idle_musings           {}",
+            on_off(self.idle_musings_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  conversation_reentry   {}",
+            on_off(self.conversation_reentry_enabled)
+        );
         let _ = writeln!(s, "  reentry.delay          {}s", self.reentry_delay_secs);
         let _ = writeln!(s, "  reentry.jitter         {:.2}", self.reentry_jitter);
-        let _ = writeln!(s, "  relationship_tracking  {}", on_off(self.relationship_tracking_enabled));
-        let _ = writeln!(s, "  mood_injection         {}", on_off(self.mood_injection_enabled));
+        let _ = writeln!(
+            s,
+            "  relationship_tracking  {}",
+            on_off(self.relationship_tracking_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  mood_injection         {}",
+            on_off(self.mood_injection_enabled)
+        );
         let _ = writeln!(s, "  spontaneity            {:.2}", self.spontaneity);
-        let _ = writeln!(s, "  heartbeat.interval     {}s", self.heartbeat_interval_secs);
+        let _ = writeln!(
+            s,
+            "  heartbeat.interval     {}s",
+            self.heartbeat_interval_secs
+        );
         let _ = writeln!(s, "  heartbeat.jitter       {:.2}", self.heartbeat_jitter);
-        let _ = writeln!(s, "  memory_scan.interval   {}s", self.memory_scan_interval_secs);
+        let _ = writeln!(
+            s,
+            "  memory_scan.interval   {}s",
+            self.memory_scan_interval_secs
+        );
         let _ = writeln!(s, "  idle_threshold         {}s", self.idle_threshold_secs);
-        let _ = writeln!(s, "  mood.drift_interval    {}s", self.mood_drift_interval_secs);
+        let _ = writeln!(
+            s,
+            "  mood.drift_interval    {}s",
+            self.mood_drift_interval_secs
+        );
         let _ = writeln!(s, "  tolerance              {:.2}", self.pulse_tolerance);
         let _ = writeln!(
             s,
@@ -324,13 +445,50 @@ impl RuntimeKnobs {
         );
         let _ = writeln!(s, "  timezone_offset        {}h", self.timezone_offset);
         let _ = writeln!(s, "  cli_tool               {}", self.cli_tool);
-        let _ = writeln!(s, "  cli_model              {}", if self.cli_model.is_empty() { "default" } else { &self.cli_model });
-        let _ = writeln!(s, "  self_dev               {}", on_off(self.self_dev_enabled));
-        let _ = writeln!(s, "  metrics.interval       {}s", self.metrics_interval_secs);
-        let _ = writeln!(s, "  code_indexer           {}", on_off(self.code_indexer_enabled));
-        let _ = writeln!(s, "  code_indexer.interval  {}s", self.code_indexer_interval_secs);
-        let _ = writeln!(s, "  refactoring_scan       {}", on_off(self.refactoring_scan_enabled));
-        let _ = writeln!(s, "  refactoring_scan.interval {}s", self.refactoring_scan_interval_secs);
+        let _ = writeln!(
+            s,
+            "  cli_model              {}",
+            if self.cli_model.is_empty() {
+                "default"
+            } else {
+                &self.cli_model
+            }
+        );
+        let _ = writeln!(
+            s,
+            "  self_dev               {}",
+            on_off(self.self_dev_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  metrics.interval       {}s",
+            self.metrics_interval_secs
+        );
+        let _ = writeln!(
+            s,
+            "  code_indexer           {}",
+            on_off(self.code_indexer_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  code_indexer.interval  {}s",
+            self.code_indexer_interval_secs
+        );
+        let _ = writeln!(
+            s,
+            "  refactoring_scan       {}",
+            on_off(self.refactoring_scan_enabled)
+        );
+        let _ = writeln!(
+            s,
+            "  refactoring_scan.interval {}s",
+            self.refactoring_scan_interval_secs
+        );
+        let _ = writeln!(
+            s,
+            "  langfuse               {}",
+            on_off(self.langfuse_enabled)
+        );
         s
     }
 }
@@ -346,5 +504,9 @@ fn parse_bool(s: &str) -> Result<bool, String> {
 }
 
 fn on_off(b: bool) -> &'static str {
-    if b { "on" } else { "off" }
+    if b {
+        "on"
+    } else {
+        "off"
+    }
 }

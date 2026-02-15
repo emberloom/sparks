@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::config::{DockerConfig, GhostConfig};
 use crate::confirm::{Confirmer, SensitivePatterns};
-use crate::config::{GhostConfig, DockerConfig};
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::knobs::SharedKnobs;
+use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
 use crate::self_heal;
 use crate::strategy::{self, StatusSender, TaskContract};
@@ -23,6 +24,8 @@ pub struct Executor {
     knobs: SharedKnobs,
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
+    #[allow(dead_code)]
+    langfuse: SharedLangfuse,
 }
 
 impl Executor {
@@ -34,13 +37,23 @@ impl Executor {
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Arc<ToolUsageStore>,
+        langfuse: SharedLangfuse,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
-        Self { docker_config, max_steps, sensitive_patterns: compiled, dynamic_tools_path, knobs, github_token, usage_store }
+        Self {
+            docker_config,
+            max_steps,
+            sensitive_patterns: compiled,
+            dynamic_tools_path,
+            knobs,
+            github_token,
+            usage_store,
+            langfuse,
+        }
     }
 
     /// Run a task contract using the specified ghost
-    #[tracing::instrument(skip(self, contract, llm, confirmer, status_tx), fields(ghost = %ghost.name))]
+    #[tracing::instrument(skip(self, contract, llm, confirmer, status_tx, trace), fields(ghost = %ghost.name))]
     pub async fn run(
         &self,
         contract: &TaskContract,
@@ -48,36 +61,58 @@ impl Executor {
         llm: &dyn LlmProvider,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         tracing::info!(ghost = %ghost.name, goal = %contract.goal, "Starting executor");
 
+        let run_span = trace.map(|t| t.span("ghost_run", Some(&contract.goal)));
+
         // Create session-scoped container
         let session = DockerSession::new(ghost, &self.docker_config).await?;
-        let tools = ToolRegistry::for_ghost(ghost, self.dynamic_tools_path.as_deref(), self.knobs.clone(), self.github_token.clone(), Some(self.usage_store.clone()));
+        let tools = ToolRegistry::for_ghost(
+            ghost,
+            self.dynamic_tools_path.as_deref(),
+            self.knobs.clone(),
+            self.github_token.clone(),
+            Some(self.usage_store.clone()),
+        );
         let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
         // Try direct tool completion first (precheck)
         if let Some(result) = strategy::try_direct_completion(
-            contract, &tools, &session, llm, self, confirmer, status_tx,
-        ).await? {
+            contract, &tools, &session, llm, self, confirmer, status_tx, trace,
+        )
+        .await?
+        {
             tracing::info!(ghost = %ghost.name, "Task completed via direct tool use (precheck)");
             if let Err(e) = session.close().await {
                 tracing::warn!("Failed to close container: {}", e);
+            }
+            if let Some(s) = run_span {
+                let preview = if result.len() > 500 {
+                    &result[..result.floor_char_boundary(500)]
+                } else {
+                    &result
+                };
+                s.end(Some(preview));
             }
             return Ok(result);
         }
 
         // Run the strategy loop
-        let result = strategy.run(
-            contract,
-            &tools,
-            &session,
-            llm,
-            self.max_steps,
-            self,
-            confirmer,
-            status_tx,
-        ).await;
+        let result = strategy
+            .run(
+                contract,
+                &tools,
+                &session,
+                llm,
+                self.max_steps,
+                self,
+                confirmer,
+                status_tx,
+                trace,
+            )
+            .await;
 
         // Always clean up the container
         if let Err(e) = session.close().await {
@@ -87,10 +122,21 @@ impl Executor {
         match result {
             Ok(output) => {
                 tracing::info!(ghost = %ghost.name, "Task completed");
+                if let Some(s) = run_span {
+                    let preview = if output.len() > 500 {
+                        &output[..output.floor_char_boundary(500)]
+                    } else {
+                        &output
+                    };
+                    s.end(Some(preview));
+                }
                 Ok(output)
             }
             Err(e) => {
                 tracing::error!(ghost = %ghost.name, error = %e, "Task failed");
+                if let Some(s) = run_span {
+                    s.end(Some(&format!("error: {}", e)));
+                }
                 Err(e)
             }
         }
@@ -98,7 +144,7 @@ impl Executor {
 
     /// Execute a tool with confirmation handling and self-heal hints.
     /// Centralizes tool execution logic so strategies don't call `tool.execute()` directly.
-    #[tracing::instrument(skip(self, json, tools, docker, confirmer, status_tx), fields(tool = tool_name))]
+    #[tracing::instrument(skip(self, json, tools, docker, confirmer, status_tx, trace), fields(tool = tool_name))]
     pub async fn execute_tool(
         &self,
         tool_name: &str,
@@ -107,8 +153,19 @@ impl Executor {
         docker: &DockerSession,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let params = json.get("params").cloned().unwrap_or_default();
+
+        let tool_span = trace.map(|t| {
+            let input_preview = serde_json::to_string(&params).unwrap_or_default();
+            let input_str = if input_preview.len() > 300 {
+                &input_preview[..input_preview.floor_char_boundary(300)]
+            } else {
+                &input_preview
+            };
+            t.span(&format!("tool:{}", tool_name), Some(input_str))
+        });
 
         let tool = tools
             .get(tool_name)
@@ -141,9 +198,7 @@ impl Executor {
             match confirmer.confirm(&action_desc).await {
                 Ok(true) => {} // approved
                 _ => {
-                    return Ok(
-                        "The user denied this action. Try a different approach.".to_string()
-                    );
+                    return Ok("The user denied this action. Try a different approach.".to_string());
                 }
             }
         }
@@ -160,12 +215,10 @@ impl Executor {
                 Err(e) => Some(e.to_string()),
                 _ => None,
             };
-            if let Err(e) = self.usage_store.record(
-                tool_name,
-                success,
-                duration_ms,
-                error_msg.as_deref(),
-            ) {
+            if let Err(e) =
+                self.usage_store
+                    .record(tool_name, success, duration_ms, error_msg.as_deref())
+            {
                 tracing::warn!("Failed to record tool usage: {}", e);
             }
         }
@@ -210,14 +263,31 @@ impl Executor {
             }
         };
 
+        // End Langfuse tool span
+        if let Some(s) = tool_span {
+            let preview = match &output {
+                Ok(o) => {
+                    if o.len() > 500 {
+                        format!("{}...", &o[..o.floor_char_boundary(500)])
+                    } else {
+                        o.clone()
+                    }
+                }
+                Err(e) => format!("error: {}", e),
+            };
+            s.end(Some(&preview));
+        }
+
         // Emit ToolRun event to frontend
         if let (Some(tx), Ok(ref out)) = (status_tx, &output) {
             let success = !out.starts_with("[tool error]");
-            let _ = tx.send(CoreEvent::ToolRun {
-                tool: tool_name.to_string(),
-                result: out.clone(),
-                success,
-            }).await;
+            let _ = tx
+                .send(CoreEvent::ToolRun {
+                    tool: tool_name.to_string(),
+                    result: out.clone(),
+                    success,
+                })
+                .await;
         }
 
         output

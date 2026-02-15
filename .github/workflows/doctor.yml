@@ -1,0 +1,24 @@
+name: Athena Doctor
+
+on:
+  workflow_dispatch:
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build athena
+        run: cargo build --quiet --bin athena
+
+      - name: Run doctor guard
+        run: cargo run --quiet -- doctor --skip-llm --ci

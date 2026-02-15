@@ -1,0 +1,241 @@
+{
+  "summary": {
+    "files": 32,
+    "total_loc": 18198,
+    "functions": 608,
+    "fn_over_80": 37,
+    "fn_over_120": 25,
+    "files_over_1000_loc": 5,
+    "max_file_loc": 2352,
+    "max_file_path": "src/tools.rs",
+    "max_fn_len": 626,
+    "max_fn_name": "run_funnel_health",
+    "max_fn_file": "src/doctor.rs"
+  },
+  "by_file": {
+    "src/config.rs": {
+      "loc": 1073,
+      "fn_count": 69,
+      "max_fn_len": 81,
+      "fn_over_80": 1,
+      "fn_over_120": 0
+    },
+    "src/confirm.rs": {
+      "loc": 90,
+      "fn_count": 5,
+      "max_fn_len": 26,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/core.rs": {
+      "loc": 768,
+      "fn_count": 17,
+      "max_fn_len": 356,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/db.rs": {
+      "loc": 164,
+      "fn_count": 3,
+      "max_fn_len": 50,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/docker.rs": {
+      "loc": 184,
+      "fn_count": 5,
+      "max_fn_len": 103,
+      "fn_over_80": 1,
+      "fn_over_120": 0
+    },
+    "src/doctor.rs": {
+      "loc": 727,
+      "fn_count": 8,
+      "max_fn_len": 626,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/dynamic_tools.rs": {
+      "loc": 880,
+      "fn_count": 44,
+      "max_fn_len": 95,
+      "fn_over_80": 1,
+      "fn_over_120": 0
+    },
+    "src/embeddings.rs": {
+      "loc": 783,
+      "fn_count": 11,
+      "max_fn_len": 520,
+      "fn_over_80": 2,
+      "fn_over_120": 1
+    },
+    "src/error.rs": {
+      "loc": 45,
+      "fn_count": 2,
+      "max_fn_len": 3,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/executor.rs": {
+      "loc": 265,
+      "fn_count": 3,
+      "max_fn_len": 146,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/heartbeat.rs": {
+      "loc": 192,
+      "fn_count": 3,
+      "max_fn_len": 138,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/introspect.rs": {
+      "loc": 364,
+      "fn_count": 10,
+      "max_fn_len": 182,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/knobs.rs": {
+      "loc": 512,
+      "fn_count": 6,
+      "max_fn_len": 240,
+      "fn_over_80": 2,
+      "fn_over_120": 1
+    },
+    "src/langfuse.rs": {
+      "loc": 248,
+      "fn_count": 12,
+      "max_fn_len": 28,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/llm.rs": {
+      "loc": 1559,
+      "fn_count": 40,
+      "max_fn_len": 371,
+      "fn_over_80": 3,
+      "fn_over_120": 3
+    },
+    "src/main.rs": {
+      "loc": 749,
+      "fn_count": 6,
+      "max_fn_len": 282,
+      "fn_over_80": 2,
+      "fn_over_120": 1
+    },
+    "src/manager.rs": {
+      "loc": 896,
+      "fn_count": 13,
+      "max_fn_len": 237,
+      "fn_over_80": 4,
+      "fn_over_120": 2
+    },
+    "src/memory.rs": {
+      "loc": 1109,
+      "fn_count": 56,
+      "max_fn_len": 58,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/mood.rs": {
+      "loc": 179,
+      "fn_count": 9,
+      "max_fn_len": 39,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/observer.rs": {
+      "loc": 212,
+      "fn_count": 11,
+      "max_fn_len": 52,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/proactive.rs": {
+      "loc": 917,
+      "fn_count": 12,
+      "max_fn_len": 192,
+      "fn_over_80": 4,
+      "fn_over_120": 4
+    },
+    "src/profiles.rs": {
+      "loc": 107,
+      "fn_count": 3,
+      "max_fn_len": 69,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/pulse.rs": {
+      "loc": 244,
+      "fn_count": 11,
+      "max_fn_len": 76,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/randomness.rs": {
+      "loc": 119,
+      "fn_count": 11,
+      "max_fn_len": 18,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/scheduler.rs": {
+      "loc": 233,
+      "fn_count": 10,
+      "max_fn_len": 55,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/self_heal.rs": {
+      "loc": 137,
+      "fn_count": 2,
+      "max_fn_len": 83,
+      "fn_over_80": 1,
+      "fn_over_120": 0
+    },
+    "src/strategy/code.rs": {
+      "loc": 998,
+      "fn_count": 15,
+      "max_fn_len": 174,
+      "fn_over_80": 4,
+      "fn_over_120": 3
+    },
+    "src/strategy/mod.rs": {
+      "loc": 221,
+      "fn_count": 3,
+      "max_fn_len": 127,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/strategy/react.rs": {
+      "loc": 445,
+      "fn_count": 7,
+      "max_fn_len": 197,
+      "fn_over_80": 1,
+      "fn_over_120": 1
+    },
+    "src/telegram.rs": {
+      "loc": 1169,
+      "fn_count": 15,
+      "max_fn_len": 409,
+      "fn_over_80": 4,
+      "fn_over_120": 3
+    },
+    "src/tool_usage.rs": {
+      "loc": 257,
+      "fn_count": 14,
+      "max_fn_len": 30,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/tools.rs": {
+      "loc": 2352,
+      "fn_count": 172,
+      "max_fn_len": 104,
+      "fn_over_80": 1,
+      "fn_over_120": 0
+    }
+  }
+}

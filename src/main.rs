@@ -5,6 +5,7 @@ mod confirm;
 mod core;
 mod db;
 mod docker;
+mod doctor;
 mod dynamic_tools;
 mod embeddings;
 mod error;
@@ -12,6 +13,7 @@ mod executor;
 mod heartbeat;
 mod introspect;
 mod knobs;
+mod langfuse;
 mod llm;
 mod manager;
 mod memory;
@@ -34,8 +36,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use confirm::CliConfirmer;
 use config::Config;
+use confirm::CliConfirmer;
 use core::{AthenaCore, CoreEvent, SessionContext};
 use embeddings::Embedder;
 use memory::MemoryStore;
@@ -77,6 +79,36 @@ enum Commands {
     Jobs {
         #[command(subcommand)]
         action: JobsAction,
+    },
+    /// Dispatch one autonomous task from CLI and wait for its pulse result
+    Dispatch {
+        /// Goal to execute
+        #[arg(long)]
+        goal: String,
+        /// Optional context for the ghost
+        #[arg(long)]
+        context: Option<String>,
+        /// Optional ghost name (e.g., coder, scout). If omitted, orchestrator classifies.
+        #[arg(long)]
+        ghost: Option<String>,
+        /// Optional memory auto-store category (adds [auto_store:<category>] context tag)
+        #[arg(long)]
+        auto_store: Option<String>,
+        /// How long to wait for an autonomous pulse result
+        #[arg(long, default_value_t = 120)]
+        wait_secs: u64,
+    },
+    /// Run end-to-end diagnostics for all self-improvement funnels
+    Doctor {
+        /// Skip live LLM connectivity checks (useful for CI/offline checks)
+        #[arg(long)]
+        skip_llm: bool,
+        /// Exit non-zero when overall status is FAIL
+        #[arg(long)]
+        ci: bool,
+        /// Exit non-zero on WARN as well (implies stricter CI gate)
+        #[arg(long)]
+        fail_on_warn: bool,
     },
 }
 
@@ -157,8 +189,10 @@ async fn main() -> anyhow::Result<()> {
         config.memory.dedup_threshold,
     ));
 
-    // Initialize embedder for CLI memory commands (lightweight, no LLM needed)
-    let embedder = if config.embedding.enabled {
+    let needs_cli_embedder = matches!(cli.command, Some(Commands::Memory { .. }));
+
+    // Initialize embedder for CLI paths that need it.
+    let embedder = if needs_cli_embedder && config.embedding.enabled {
         config.resolve_model_dir().ok().and_then(|dir| {
             Embedder::ensure_model(&dir).ok()?;
             match Embedder::new(&dir) {
@@ -173,9 +207,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Backfill any memories missing embeddings (runs on every CLI invocation, fast no-op if none)
-    if let Some(ref e) = embedder {
-        core::backfill_embeddings(&memory, e);
+    // Backfill any memories missing embeddings (fast no-op when none exist).
+    if needs_cli_embedder {
+        if let Some(ref e) = embedder {
+            core::backfill_embeddings(&memory, e);
+        }
     }
 
     match cli.command {
@@ -192,17 +228,33 @@ async fn main() -> anyhow::Result<()> {
             let system_info = telegram::SystemInfo {
                 provider: config.llm.provider.clone(),
                 model: match config.llm.provider.as_str() {
-                    "openrouter" => config.openrouter.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
-                    "zen" => config.zen.as_ref().map(|c| c.model.clone()).unwrap_or_default(),
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.model.clone())
+                        .unwrap_or_default(),
+                    "zen" => config
+                        .zen
+                        .as_ref()
+                        .map(|c| c.model.clone())
+                        .unwrap_or_default(),
                     _ => config.ollama.model.clone(),
                 },
                 temperature: match config.llm.provider.as_str() {
-                    "openrouter" => config.openrouter.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.temperature)
+                        .unwrap_or(0.3),
                     "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
                     _ => config.ollama.temperature,
                 },
                 max_tokens: match config.llm.provider.as_str() {
-                    "openrouter" => config.openrouter.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.max_tokens)
+                        .unwrap_or(4096),
                     "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
                     _ => config.ollama.max_tokens,
                 },
@@ -216,13 +268,38 @@ async fn main() -> anyhow::Result<()> {
             let handle = AthenaCore::start(config, memory).await?;
             handle_jobs(action, &handle)?;
         }
+        Some(Commands::Dispatch {
+            goal,
+            context,
+            ghost,
+            auto_store,
+            wait_secs,
+        }) => run_dispatch(config, memory, goal, context, ghost, auto_store, wait_secs).await?,
+        Some(Commands::Doctor {
+            skip_llm,
+            ci,
+            fail_on_warn,
+        }) => {
+            let overall = doctor::run_funnel_health(&config, skip_llm).await?;
+            if ci {
+                if overall == doctor::CheckStatus::Fail
+                    || (fail_on_warn && overall == doctor::CheckStatus::Warn)
+                {
+                    anyhow::bail!("doctor status: {}", overall.label());
+                }
+            }
+        }
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
     Ok(())
 }
 
-fn handle_memory(action: MemoryAction, memory: &MemoryStore, embedder: Option<&Embedder>) -> anyhow::Result<()> {
+fn handle_memory(
+    action: MemoryAction,
+    memory: &MemoryStore,
+    embedder: Option<&Embedder>,
+) -> anyhow::Result<()> {
     match action {
         MemoryAction::List => {
             let memories = memory.list()?;
@@ -259,7 +336,10 @@ fn handle_memory(action: MemoryAction, memory: &MemoryStore, embedder: Option<&E
 }
 
 fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<()> {
-    let engine = handle.cron_engine.as_ref().expect("Cron engine not initialized");
+    let engine = handle
+        .cron_engine
+        .as_ref()
+        .expect("Cron engine not initialized");
     match action {
         JobsAction::List => {
             let jobs = engine.list_jobs()?;
@@ -268,14 +348,32 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             } else {
                 for j in &jobs {
                     let status = if j.enabled { "on" } else { "off" };
-                    let next = j.next_run.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "-".to_string());
-                    println!("  [{}] {} ({}) — next: {} — {}", &j.id[..8], j.name, status, next, j.prompt);
+                    let next = j
+                        .next_run
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "  [{}] {} ({}) — next: {} — {}",
+                        &j.id[..8],
+                        j.name,
+                        status,
+                        next,
+                        j.prompt
+                    );
                 }
             }
         }
-        JobsAction::Add { name, every, cron, prompt } => {
+        JobsAction::Add {
+            name,
+            every,
+            cron,
+            prompt,
+        } => {
             let schedule = if let Some(secs) = every {
-                Schedule::Interval { every_secs: secs, jitter: 0.1 }
+                Schedule::Interval {
+                    every_secs: secs,
+                    jitter: 0.1,
+                }
             } else if let Some(expr) = cron {
                 Schedule::Cron { expression: expr }
             } else {
@@ -287,7 +385,10 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
         }
         JobsAction::Delete { id } => {
             let jobs = engine.list_jobs()?;
-            let full_id = jobs.iter().find(|j| j.id.starts_with(&id)).map(|j| j.id.clone());
+            let full_id = jobs
+                .iter()
+                .find(|j| j.id.starts_with(&id))
+                .map(|j| j.id.clone());
             if let Some(full_id) = full_id {
                 engine.delete_job(&full_id)?;
                 println!("Deleted job: {}", &full_id[..8]);
@@ -297,6 +398,83 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
         }
     }
     Ok(())
+}
+
+async fn run_dispatch(
+    config: Config,
+    memory: Arc<MemoryStore>,
+    goal: String,
+    context: Option<String>,
+    ghost: Option<String>,
+    auto_store: Option<String>,
+    wait_secs: u64,
+) -> anyhow::Result<()> {
+    let handle = AthenaCore::start(config, memory).await?;
+
+    let mut context = context.unwrap_or_default();
+    if let Some(category) = auto_store {
+        if !context.is_empty() {
+            context.push('\n');
+        }
+        context.push_str(&format!("[auto_store:{}]", category));
+    }
+
+    let target = crate::pulse::PulseTarget::Session(SessionContext {
+        platform: "cli".into(),
+        user_id: "local".into(),
+        chat_id: "dispatch".into(),
+    });
+
+    let ghost_label = ghost.clone().unwrap_or_else(|| "auto".to_string());
+    handle
+        .dispatch_task(core::AutonomousTask {
+            goal: goal.clone(),
+            context,
+            ghost,
+            target,
+        })
+        .await?;
+
+    eprintln!(
+        "Dispatched autonomous task to {}. Waiting up to {}s...",
+        ghost_label, wait_secs
+    );
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(wait_secs);
+    let mut rx = handle.delivered_rx.lock().await;
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            eprintln!("Timed out waiting for autonomous task result pulse.");
+            return Ok(());
+        }
+        let remaining = deadline.duration_since(now);
+        let received = tokio::time::timeout(remaining, rx.recv()).await;
+
+        let Some(pulse) = (match received {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("Timed out waiting for autonomous task result pulse.");
+                return Ok(());
+            }
+        }) else {
+            eprintln!("Pulse channel closed before a result was delivered.");
+            return Ok(());
+        };
+
+        if matches!(pulse.source, crate::pulse::PulseSource::AutonomousTask) {
+            if pulse
+                .ghost
+                .as_deref()
+                .map(|g| g == ghost_label)
+                .unwrap_or(true)
+            {
+                println!("[{}] {}", pulse.source.label(), pulse.content);
+                return Ok(());
+            }
+        }
+    }
 }
 
 async fn run_observe() -> anyhow::Result<()> {
@@ -333,6 +511,320 @@ async fn run_observe() -> anyhow::Result<()> {
     }
 }
 
+enum ChatCommandOutcome {
+    Continue,
+    Exit,
+    SendToCore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatCommand {
+    Set,
+    Exit,
+    Help,
+    Ghosts,
+    Memories,
+    Mood,
+    Jobs,
+    Models,
+    Model,
+    ModelSet,
+    CliModel,
+    CliModelSet,
+    Chat,
+}
+
+fn classify_chat_command(input: &str) -> ChatCommand {
+    if input.starts_with("/set") {
+        return ChatCommand::Set;
+    }
+    match input {
+        "/quit" | "/exit" | "/q" => ChatCommand::Exit,
+        "/help" | "/h" => ChatCommand::Help,
+        "/ghosts" => ChatCommand::Ghosts,
+        "/memories" => ChatCommand::Memories,
+        "/mood" => ChatCommand::Mood,
+        "/jobs" => ChatCommand::Jobs,
+        "/models" => ChatCommand::Models,
+        "/model" => ChatCommand::Model,
+        "/cli_model" => ChatCommand::CliModel,
+        _ if input.starts_with("/model ") => ChatCommand::ModelSet,
+        _ if input.starts_with("/cli_model ") => ChatCommand::CliModelSet,
+        _ => ChatCommand::Chat,
+    }
+}
+
+fn print_cli_help() {
+    println!("Commands:");
+    println!("  /ghosts    — List active ghosts");
+    println!("  /memories  — List saved memories");
+    println!("  /model     — Show/switch LLM model");
+    println!("  /model <name>  — Switch LLM model");
+    println!("  /models    — List available models from API");
+    println!("  /cli_model — Show/switch model for CLI tools (Claude Code, Codex, OpenCode)");
+    println!("  /cli_model <name> — Set CLI tool model");
+    println!("  /cli_model reset  — Reset to tool default");
+    println!("  /set       — Show/change runtime knobs");
+    println!("  /mood      — Show current mood");
+    println!("  /jobs      — List scheduled jobs");
+    println!("  /help      — This help");
+    println!("  /quit      — Exit");
+}
+
+fn handle_set_command(input: &str, handle: &core::CoreHandle) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    match parts.len() {
+        1 => {
+            let k = handle.knobs.read().unwrap();
+            println!("{}", k.display());
+        }
+        3 => {
+            let mut k = handle.knobs.write().unwrap();
+            match k.set(parts[1], parts[2]) {
+                Ok(msg) => {
+                    println!("{}", msg);
+                    handle.observer.emit(observer::ObserverEvent::new(
+                        ObserverCategory::KnobChange,
+                        format!("{} = {}", parts[1], parts[2]),
+                    ));
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        _ => eprintln!("Usage: /set OR /set <key> <value>"),
+    }
+}
+
+fn print_ghosts(handle: &core::CoreHandle) {
+    for g in handle.list_ghosts() {
+        println!("  {} — {} [{}]", g.name, g.description, g.tools.join(", "));
+    }
+}
+
+fn print_memories(handle: &core::CoreHandle) {
+    match handle.list_memories() {
+        Ok(memories) if memories.is_empty() => println!("No memories."),
+        Ok(memories) => {
+            for m in &memories {
+                println!("  [{}] {} — {}", &m.id[..8], m.category, m.content);
+            }
+        }
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+
+fn print_jobs(handle: &core::CoreHandle) {
+    if let Some(engine) = &handle.cron_engine {
+        match engine.list_jobs() {
+            Ok(jobs) if jobs.is_empty() => println!("No scheduled jobs."),
+            Ok(jobs) => {
+                for j in &jobs {
+                    let status = if j.enabled { "on" } else { "off" };
+                    let next = j
+                        .next_run
+                        .map(|t| t.format("%H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    println!("  [{}] {} ({}) next: {}", &j.id[..8], j.name, status, next);
+                }
+            }
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    }
+}
+
+async fn print_models(handle: &core::CoreHandle) {
+    match handle.llm.list_models().await {
+        Ok(models) if models.is_empty() => println!("No models returned by API."),
+        Ok(models) => {
+            let current = handle.llm.current_model();
+            println!("Available models:");
+            for m in &models {
+                if *m == current {
+                    println!("  {} (active)", m);
+                } else {
+                    println!("  {}", m);
+                }
+            }
+        }
+        Err(e) => eprintln!("Error listing models: {}", e),
+    }
+}
+
+fn handle_model_command(input: &str, handle: &core::CoreHandle) -> bool {
+    if input == "/model" {
+        println!("Current model: {}", handle.llm.current_model());
+        return true;
+    }
+    if let Some(arg) = input.strip_prefix("/model ") {
+        let arg = arg.trim();
+        if arg == "reset" {
+            handle.llm.set_model_override(None);
+            println!("Reset to default model: {}", handle.llm.current_model());
+        } else {
+            handle.llm.set_model_override(Some(arg.to_string()));
+            println!("Model set to: {}", arg);
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_cli_model_command(input: &str, handle: &core::CoreHandle) -> bool {
+    if input == "/cli_model" {
+        let model = handle.knobs.read().unwrap().cli_model.clone();
+        if model.is_empty() {
+            println!("CLI tool model: default (tool decides)");
+        } else {
+            println!("CLI tool model: {}", model);
+        }
+        return true;
+    }
+    if let Some(arg) = input.strip_prefix("/cli_model ") {
+        let arg = arg.trim();
+        let mut k = handle.knobs.write().unwrap();
+        match k.set("cli_model", arg) {
+            Ok(msg) => println!("{}", msg),
+            Err(e) => eprintln!("Error: {}", e),
+        }
+        return true;
+    }
+    false
+}
+
+async fn handle_chat_command(input: &str, handle: &core::CoreHandle) -> ChatCommandOutcome {
+    match classify_chat_command(input) {
+        ChatCommand::Set => {
+            handle_set_command(input, handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Exit => ChatCommandOutcome::Exit,
+        ChatCommand::Help => {
+            print_cli_help();
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Ghosts => {
+            print_ghosts(handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Memories => {
+            print_memories(handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Mood => {
+            println!("{}", handle.mood.describe());
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Jobs => {
+            print_jobs(handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Models => {
+            print_models(handle).await;
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Model | ChatCommand::ModelSet => {
+            let _ = handle_model_command(input, handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::CliModel | ChatCommand::CliModelSet => {
+            let _ = handle_cli_model_command(input, handle);
+            ChatCommandOutcome::Continue
+        }
+        ChatCommand::Chat => ChatCommandOutcome::SendToCore,
+    }
+}
+
+fn spawn_delivered_pulse_logger(handle: &core::CoreHandle) {
+    let delivered_rx = handle.delivered_rx.clone();
+    tokio::spawn(async move {
+        let mut rx = delivered_rx.lock().await;
+        while let Some(pulse) = rx.recv().await {
+            eprintln!(
+                "\n\x1b[2;36m[{}] {}\x1b[0m",
+                pulse.source.label(),
+                pulse.content
+            );
+            eprint!("you> ");
+        }
+    });
+}
+
+fn chat_history_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".athena").join("history.txt"))
+        .unwrap_or_else(|| PathBuf::from(".athena_history"))
+}
+
+fn save_cli_history(rl: &mut rustyline::DefaultEditor, history_path: &std::path::Path) {
+    let _ = rl.save_history(history_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if history_path.exists() {
+            let _ = std::fs::set_permissions(history_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+fn print_tool_run(tool: &str, result: &str, success: bool) {
+    let icon = if success { "\u{2705}" } else { "\u{274c}" };
+    let body = result
+        .strip_prefix("[tool result]\n")
+        .or_else(|| result.strip_prefix("[tool error]\n"))
+        .unwrap_or(result);
+    let preview = if body.len() > 200 {
+        format!(
+            "{}... [{} chars]",
+            &body[..body.floor_char_boundary(200)],
+            body.len()
+        )
+    } else {
+        body.to_string()
+    };
+    eprintln!("  {} {} → {}", icon, tool, preview.replace('\n', " "));
+}
+
+async fn stream_cli_events(mut events: tokio::sync::mpsc::Receiver<CoreEvent>) {
+    let mut streaming = false;
+    while let Some(event) = events.recv().await {
+        match event {
+            CoreEvent::Status(s) => eprintln!("  {}", s),
+            CoreEvent::StreamChunk(chunk) => {
+                use std::io::Write;
+                if !streaming {
+                    streaming = true;
+                    print!("\n");
+                }
+                print!("{}", chunk);
+                let _ = std::io::stdout().flush();
+            }
+            CoreEvent::ToolRun {
+                tool,
+                result,
+                success,
+            } => print_tool_run(&tool, &result, success),
+            CoreEvent::Response(r) => {
+                if streaming {
+                    println!("\n");
+                } else {
+                    println!("\n{}\n", r);
+                }
+            }
+            CoreEvent::Error(e) => {
+                if streaming {
+                    println!();
+                }
+                if e.contains("cancelled") {
+                    println!("Action cancelled.");
+                } else {
+                    eprintln!("Error: {}", e);
+                }
+            }
+            CoreEvent::Pulse(p) => println!("\n[pulse] {}\n", p),
+        }
+    }
+}
+
 async fn run_chat(
     config: Config,
     memory: Arc<MemoryStore>,
@@ -349,29 +841,18 @@ async fn run_chat(
 
     eprintln!("Athena ready. Type /help for commands.\n");
 
-    let history_path = dirs::home_dir()
-        .map(|h| h.join(".athena").join("history.txt"))
-        .unwrap_or_else(|| PathBuf::from(".athena_history"));
+    let history_path = chat_history_path();
 
     let mut rl = rustyline::DefaultEditor::new()?;
     let _ = rl.load_history(&history_path);
 
-    // Spawn background task to print delivered pulses
-    let delivered_rx = handle.delivered_rx.clone();
-    tokio::spawn(async move {
-        let mut rx = delivered_rx.lock().await;
-        while let Some(pulse) = rx.recv().await {
-            eprintln!("\n\x1b[2;36m[{}] {}\x1b[0m", pulse.source.label(), pulse.content);
-            eprint!("you> "); // re-show prompt
-        }
-    });
+    spawn_delivered_pulse_logger(&handle);
 
     loop {
         let line = match rl.readline("you> ") {
             Ok(line) => line,
             Err(
-                rustyline::error::ReadlineError::Interrupted
-                | rustyline::error::ReadlineError::Eof,
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
             ) => {
                 break;
             }
@@ -388,230 +869,57 @@ async fn run_chat(
 
         rl.add_history_entry(input)?;
 
-        // Slash commands
-        if input.starts_with("/set") {
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            match parts.len() {
-                1 => {
-                    // /set — show all knobs
-                    let k = handle.knobs.read().unwrap();
-                    println!("{}", k.display());
-                }
-                3 => {
-                    // /set key value
-                    let mut k = handle.knobs.write().unwrap();
-                    match k.set(parts[1], parts[2]) {
-                        Ok(msg) => {
-                            println!("{}", msg);
-                            handle.observer.emit(observer::ObserverEvent::new(
-                                ObserverCategory::KnobChange,
-                                format!("{} = {}", parts[1], parts[2]),
-                            ));
-                        }
-                        Err(e) => eprintln!("Error: {}", e),
-                    }
-                }
-                _ => eprintln!("Usage: /set OR /set <key> <value>"),
-            }
-            continue;
+        match handle_chat_command(input, &handle).await {
+            ChatCommandOutcome::Continue => continue,
+            ChatCommandOutcome::Exit => break,
+            ChatCommandOutcome::SendToCore => {}
         }
 
-        match input {
-            "/quit" | "/exit" | "/q" => break,
-            "/help" | "/h" => {
-                println!("Commands:");
-                println!("  /ghosts    — List active ghosts");
-                println!("  /memories  — List saved memories");
-                println!("  /model     — Show/switch LLM model");
-                println!("  /model <name>  — Switch LLM model");
-                println!("  /models    — List available models from API");
-                println!("  /cli_model — Show/switch model for CLI tools (Claude Code, Codex, OpenCode)");
-                println!("  /cli_model <name> — Set CLI tool model");
-                println!("  /cli_model reset  — Reset to tool default");
-                println!("  /set       — Show/change runtime knobs");
-                println!("  /mood      — Show current mood");
-                println!("  /jobs      — List scheduled jobs");
-                println!("  /help      — This help");
-                println!("  /quit      — Exit");
-                continue;
-            }
-            "/ghosts" => {
-                for g in handle.list_ghosts() {
-                    println!(
-                        "  {} — {} [{}]",
-                        g.name,
-                        g.description,
-                        g.tools.join(", ")
-                    );
-                }
-                continue;
-            }
-            "/memories" => {
-                match handle.list_memories() {
-                    Ok(memories) if memories.is_empty() => println!("No memories."),
-                    Ok(memories) => {
-                        for m in &memories {
-                            println!("  [{}] {} — {}", &m.id[..8], m.category, m.content);
-                        }
-                    }
-                    Err(e) => eprintln!("Error: {}", e),
-                }
-                continue;
-            }
-            "/mood" => {
-                println!("{}", handle.mood.describe());
-                continue;
-            }
-            "/jobs" => {
-                if let Some(engine) = &handle.cron_engine {
-                    match engine.list_jobs() {
-                        Ok(jobs) if jobs.is_empty() => println!("No scheduled jobs."),
-                        Ok(jobs) => {
-                            for j in &jobs {
-                                let status = if j.enabled { "on" } else { "off" };
-                                let next = j.next_run.map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| "-".to_string());
-                                println!("  [{}] {} ({}) next: {}", &j.id[..8], j.name, status, next);
-                            }
-                        }
-                        Err(e) => eprintln!("Error: {}", e),
-                    }
-                }
-                continue;
-            }
-            "/models" => {
-                match handle.llm.list_models().await {
-                    Ok(models) if models.is_empty() => println!("No models returned by API."),
-                    Ok(models) => {
-                        let current = handle.llm.current_model();
-                        println!("Available models:");
-                        for m in &models {
-                            if *m == current {
-                                println!("  {} (active)", m);
-                            } else {
-                                println!("  {}", m);
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("Error listing models: {}", e),
-                }
-                continue;
-            }
-            _ => {}
-        }
-
-        // /model [name|reset]
-        if input == "/model" {
-            println!("Current model: {}", handle.llm.current_model());
-            continue;
-        }
-        if let Some(arg) = input.strip_prefix("/model ") {
-            let arg = arg.trim();
-            if arg == "reset" {
-                handle.llm.set_model_override(None);
-                println!("Reset to default model: {}", handle.llm.current_model());
-            } else {
-                handle.llm.set_model_override(Some(arg.to_string()));
-                println!("Model set to: {}", arg);
-            }
-            continue;
-        }
-
-        // /cli_model [name|reset]
-        if input == "/cli_model" {
-            let model = handle.knobs.read().unwrap().cli_model.clone();
-            if model.is_empty() {
-                println!("CLI tool model: default (tool decides)");
-            } else {
-                println!("CLI tool model: {}", model);
-            }
-            continue;
-        }
-        if let Some(arg) = input.strip_prefix("/cli_model ") {
-            let arg = arg.trim();
-            let mut k = handle.knobs.write().unwrap();
-            match k.set("cli_model", arg) {
-                Ok(msg) => println!("{}", msg),
-                Err(e) => eprintln!("Error: {}", e),
-            }
-            continue;
-        }
-
-        // Send through core
-        let mut events = match handle
-            .chat(session.clone(), input, confirmer.clone())
-            .await
-        {
+        let events = match handle.chat(session.clone(), input, confirmer.clone()).await {
             Ok(rx) => rx,
             Err(e) => {
                 eprintln!("Error: {}", e);
                 continue;
             }
         };
-
-        let mut streaming = false;
-        while let Some(event) = events.recv().await {
-            match event {
-                CoreEvent::Status(s) => eprintln!("  {}", s),
-                CoreEvent::StreamChunk(chunk) => {
-                    use std::io::Write;
-                    if !streaming {
-                        streaming = true;
-                        print!("\n");
-                    }
-                    print!("{}", chunk);
-                    let _ = std::io::stdout().flush();
-                }
-                CoreEvent::ToolRun { tool, result, success } => {
-                    let icon = if success { "\u{2705}" } else { "\u{274c}" };
-                    let body = result
-                        .strip_prefix("[tool result]\n")
-                        .or_else(|| result.strip_prefix("[tool error]\n"))
-                        .unwrap_or(&result);
-                    let preview = if body.len() > 200 {
-                        format!("{}... [{} chars]", &body[..body.floor_char_boundary(200)], body.len())
-                    } else {
-                        body.to_string()
-                    };
-                    eprintln!("  {} {} → {}", icon, tool, preview.replace('\n', " "));
-                }
-                CoreEvent::Response(r) => {
-                    if streaming {
-                        println!("\n");
-                    } else {
-                        println!("\n{}\n", r);
-                    }
-                }
-                CoreEvent::Error(e) => {
-                    if streaming {
-                        println!();
-                    }
-                    if e.contains("cancelled") {
-                        println!("Action cancelled.");
-                    } else {
-                        eprintln!("Error: {}", e);
-                    }
-                }
-                CoreEvent::Pulse(p) => {
-                    println!("\n[pulse] {}\n", p);
-                }
-            }
-        }
+        stream_cli_events(events).await;
     }
 
-    let _ = rl.save_history(&history_path);
-
-    // L7: Restrict history file permissions to owner-only
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if history_path.exists() {
-            let _ = std::fs::set_permissions(
-                &history_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
-    }
+    save_cli_history(&mut rl, &history_path);
 
     eprintln!("Goodbye.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_chat_command, ChatCommand};
+
+    #[test]
+    fn classify_exit_aliases() {
+        assert_eq!(classify_chat_command("/quit"), ChatCommand::Exit);
+        assert_eq!(classify_chat_command("/exit"), ChatCommand::Exit);
+        assert_eq!(classify_chat_command("/q"), ChatCommand::Exit);
+    }
+
+    #[test]
+    fn classify_model_commands() {
+        assert_eq!(classify_chat_command("/model"), ChatCommand::Model);
+        assert_eq!(classify_chat_command("/model reset"), ChatCommand::ModelSet);
+        assert_eq!(classify_chat_command("/cli_model"), ChatCommand::CliModel);
+        assert_eq!(
+            classify_chat_command("/cli_model gpt-5-codex"),
+            ChatCommand::CliModelSet
+        );
+    }
+
+    #[test]
+    fn classify_set_and_default_chat() {
+        assert_eq!(classify_chat_command("/set"), ChatCommand::Set);
+        assert_eq!(classify_chat_command("/set temperature 0.2"), ChatCommand::Set);
+        assert_eq!(
+            classify_chat_command("please summarize this"),
+            ChatCommand::Chat
+        );
+    }
 }

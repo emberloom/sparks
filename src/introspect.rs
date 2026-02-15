@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use sysinfo::{Pid, System};
 
 use crate::knobs::SharedKnobs;
+use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::randomness;
@@ -165,6 +166,7 @@ pub fn spawn_metrics_collector(
     usage_store: Arc<ToolUsageStore>,
     db_path: std::path::PathBuf,
     auto_tx: tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+    langfuse: SharedLangfuse,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -225,9 +227,7 @@ pub fn spawn_metrics_collector(
             let memory_count = memory.list().map(|m| m.len() as u64).unwrap_or(0);
 
             // DB file size
-            let db_size = std::fs::metadata(&db_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
 
             // LLM latency
             let llm_latency = LLM_LATENCY_AVG_MS.load(Ordering::Relaxed);
@@ -253,10 +253,23 @@ pub fn spawn_metrics_collector(
                 db_size_bytes: db_size,
             };
 
+            let metrics_summary = new_metrics.summary();
             observer.emit(crate::observer::ObserverEvent::new(
                 ObserverCategory::SelfMetrics,
-                new_metrics.summary(),
+                metrics_summary.clone(),
             ));
+
+            // Langfuse trace per metrics cycle
+            let lf_trace = langfuse.as_ref().map(|lf| {
+                ActiveTrace::start(
+                    lf.clone(),
+                    "funnel1:health_monitor",
+                    None,
+                    None,
+                    None,
+                    vec!["funnel1", "metrics"],
+                )
+            });
 
             // Anomaly detection — dispatch health alerts when thresholds are breached
             if uptime > ANOMALY_MIN_UPTIME_SECS {
@@ -285,6 +298,18 @@ pub fn spawn_metrics_collector(
 
                 if !anomalies.is_empty() {
                     let alert_msg = anomalies.join("; ");
+
+                    // Langfuse anomaly span
+                    let anomaly_span = lf_trace
+                        .as_ref()
+                        .map(|t| t.span("anomaly_check", Some(&metrics_summary)));
+                    if let Some(s) = anomaly_span {
+                        s.end(Some(&format!("ANOMALY: {}", alert_msg)));
+                    }
+                    let dispatch_span = lf_trace
+                        .as_ref()
+                        .map(|t| t.span("dispatch_diagnostic", Some(&alert_msg)));
+
                     observer.log(
                         ObserverCategory::SelfMetrics,
                         format!("ANOMALY DETECTED: {}", alert_msg),
@@ -297,12 +322,24 @@ pub fn spawn_metrics_collector(
                              Suggest a fix or mitigation.",
                             alert_msg
                         ),
-                        context: format!("Current metrics: {}", new_metrics.summary()),
+                        context: format!("Current metrics: {}", metrics_summary),
                         ghost: Some("scout".to_string()),
                         target: crate::pulse::PulseTarget::Broadcast,
                     };
                     let _ = auto_tx.send(task).await;
+
+                    if let Some(s) = dispatch_span {
+                        s.end(Some("dispatched to scout"));
+                    }
+                } else if let Some(ref t) = lf_trace {
+                    let s = t.span("anomaly_check", Some(&metrics_summary));
+                    s.end(Some("healthy"));
                 }
+            }
+
+            // End Langfuse trace
+            if let Some(t) = lf_trace {
+                t.end(Some(&metrics_summary));
             }
 
             if let Ok(mut m) = metrics.write() {

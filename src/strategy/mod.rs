@@ -9,6 +9,7 @@ use crate::core::CoreEvent;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
+use crate::langfuse::ActiveTrace;
 use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, StreamEvent};
 use crate::tools::ToolRegistry;
 
@@ -44,6 +45,7 @@ pub trait LoopStrategy: Send + Sync {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String>;
 }
 
@@ -68,6 +70,7 @@ pub async fn try_direct_completion(
     executor: &Executor,
     confirmer: &dyn Confirmer,
     status_tx: Option<&StatusSender>,
+    trace: Option<&ActiveTrace>,
 ) -> Result<Option<String>> {
     // Only use this path when the LLM supports native tool calling
     if !llm.supports_tools() {
@@ -123,7 +126,11 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
 
         if !tool_calls.is_empty() {
             // LLM wants to use tools — execute them
-            let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+            let text = if text_accum.is_empty() {
+                None
+            } else {
+                Some(text_accum)
+            };
             history.push(ChatMessage::Assistant {
                 content: text,
                 tool_calls: Some(tool_calls.clone()),
@@ -131,9 +138,9 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
 
             for tc in &tool_calls {
                 if let Some(tx) = status_tx {
-                    let _ = tx.send(CoreEvent::Status(
-                        format!("Precheck: {} ...", tc.name),
-                    )).await;
+                    let _ = tx
+                        .send(CoreEvent::Status(format!("Precheck: {} ...", tc.name)))
+                        .await;
                 }
 
                 let json = serde_json::json!({
@@ -141,7 +148,7 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
                     "params": tc.arguments,
                 });
                 let result = executor
-                    .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx)
+                    .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx, trace)
                     .await;
                 let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
                 tracing::debug!(step, tool = %tc.name, "precheck tool executed");
@@ -153,8 +160,15 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
         } else {
             // Pure text response — check if it needs strategy fallback
             if let Some(json) = llm::extract_json(&text_accum) {
-                if json.get("needs_strategy").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let reason = json.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown");
+                if json
+                    .get("needs_strategy")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let reason = json
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     tracing::info!(reason, "precheck: task needs strategy");
                     return Ok(None);
                 }
@@ -166,11 +180,14 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
     }
 
     // Step limit hit — if tools were used, ask for a final summary instead of dropping results
-    let tools_were_used = history.iter().any(|m| matches!(m, ChatMessage::Tool { .. }));
+    let tools_were_used = history
+        .iter()
+        .any(|m| matches!(m, ChatMessage::Tool { .. }));
     if tools_were_used {
         tracing::info!("precheck: step limit reached, requesting summary");
         history.push(ChatMessage::User(
-            "Summarize what you accomplished. Include any tool output in your response.".to_string(),
+            "Summarize what you accomplished. Include any tool output in your response."
+                .to_string(),
         ));
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         let summary = match response {
@@ -191,7 +208,11 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
 async fn consume_precheck_stream(
     rx: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
     status_tx: Option<&StatusSender>,
-) -> (String, Vec<crate::llm::ToolCall>, Option<crate::llm::TokenUsage>) {
+) -> (
+    String,
+    Vec<crate::llm::ToolCall>,
+    Option<crate::llm::TokenUsage>,
+) {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut usage = None;

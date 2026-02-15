@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::config::{Config, GhostConfig};
 use crate::confirm::Confirmer;
-use crate::config::{GhostConfig, Config};
 use crate::core::SessionContext;
 use crate::dynamic_tools::{self, DynamicTool};
 use crate::embeddings::Embedder;
@@ -11,6 +11,7 @@ use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::introspect::SharedMetrics;
 use crate::knobs::SharedKnobs;
+use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{self, LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
@@ -46,6 +47,8 @@ pub struct Manager {
     usage_store: Arc<ToolUsageStore>,
     /// Runtime system metrics
     metrics: SharedMetrics,
+    /// Langfuse observability client
+    langfuse: SharedLangfuse,
 }
 
 impl Manager {
@@ -63,6 +66,7 @@ impl Manager {
         knobs: SharedKnobs,
         usage_store: Arc<ToolUsageStore>,
         metrics: SharedMetrics,
+        langfuse: SharedLangfuse,
     ) -> Self {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
         let executor = Executor::new(
@@ -73,17 +77,20 @@ impl Manager {
             knobs.clone(),
             config.github.token.clone(),
             usage_store.clone(),
+            langfuse.clone(),
         );
 
         // Discover host tools for direct execution fast path
         // Use the first ghost's writable mount as workspace, falling back to "."
-        let host_workspace = ghosts.iter()
+        let host_workspace = ghosts
+            .iter()
             .flat_map(|g| g.mounts.iter())
             .find(|m| !m.read_only)
             .map(|m| m.host_path.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let direct_tools: HashMap<String, DynamicTool> = if let Some(ref path) = dynamic_tools_path {
+        let direct_tools: HashMap<String, DynamicTool> = if let Some(ref path) = dynamic_tools_path
+        {
             match dynamic_tools::discover_host(path, &host_workspace) {
                 Ok(tools) => {
                     let count = tools.len();
@@ -92,7 +99,11 @@ impl Manager {
                         .map(|t| (t.tool_name().to_string(), t))
                         .collect();
                     if count > 0 {
-                        tracing::info!("Loaded {} host tool(s) for direct path: {:?}", count, map.keys().collect::<Vec<_>>());
+                        tracing::info!(
+                            "Loaded {} host tool(s) for direct path: {:?}",
+                            count,
+                            map.keys().collect::<Vec<_>>()
+                        );
                     }
                     map
                 }
@@ -122,6 +133,7 @@ impl Manager {
             host_workspace,
             usage_store,
             metrics,
+            langfuse,
         }
     }
 
@@ -164,7 +176,10 @@ impl Manager {
         let session_key = session.session_key();
 
         // Get recent conversation context BEFORE saving current turn
-        let recent = self.memory.recent_turns(&session_key, 20).unwrap_or_default();
+        let recent = self
+            .memory
+            .recent_turns(&session_key, 20)
+            .unwrap_or_default();
 
         // Save user turn
         if let Err(e) = self.memory.save_turn(&session_key, "user", user_input) {
@@ -176,9 +191,15 @@ impl Manager {
 
         // Record relationship stats
         {
-            let track = self.knobs.read().map(|k| k.relationship_tracking_enabled).unwrap_or(false);
+            let track = self
+                .knobs
+                .read()
+                .map(|k| k.relationship_tracking_enabled)
+                .unwrap_or(false);
             if track {
-                let _ = self.memory.record_relationship(&session.user_id, user_input.len());
+                let _ = self
+                    .memory
+                    .record_relationship(&session.user_id, user_input.len());
             }
         }
 
@@ -217,16 +238,36 @@ impl Manager {
         // Embed enriched query on blocking thread to avoid stalling tokio
         let query_embedding = embed_blocking(&self.embedder, &enriched).await;
 
+        // Start Langfuse trace for this chat request
+        let lf_trace = self.langfuse.as_ref().map(|lf| {
+            ActiveTrace::start(
+                lf.clone(),
+                "chat",
+                Some(&session.user_id),
+                Some(&session_key),
+                Some(user_input),
+                vec!["funnel3", "chat"],
+            )
+        });
+
         // Load relevant memories via hybrid search (keyword + semantic)
-        let memories = self.memory
+        let mem_span = lf_trace
+            .as_ref()
+            .map(|t| t.span("memory_retrieval", Some(user_input)));
+        let memories = self
+            .memory
             .search_hybrid(user_input, query_embedding.as_deref(), 10)
             .unwrap_or_default();
+        if let Some(s) = mem_span {
+            s.end(Some(&format!("{} memories found", memories.len())));
+        }
 
         let memory_context = if memories.is_empty() {
             tracing::debug!("No memories found for query");
             String::new()
         } else {
-            let items: Vec<String> = memories.iter()
+            let items: Vec<String> = memories
+                .iter()
                 .map(|m| format!("- [{}] {}", m.category, m.content))
                 .collect();
             tracing::info!(count = memories.len(), "Retrieved memories for context");
@@ -237,13 +278,15 @@ impl Manager {
         };
 
         // Load user profile for context
-        let user_profile = self.memory
+        let user_profile = self
+            .memory
             .get_user_profile(&session.user_id)
             .unwrap_or_default();
         let user_context_section = if user_profile.is_empty() {
             String::new()
         } else {
-            let items: Vec<String> = user_profile.iter()
+            let items: Vec<String> = user_profile
+                .iter()
                 .map(|(k, v)| format!("- {}: {}", k, v))
                 .collect();
             format!("\n\nUser profile:\n{}", items.join("\n"))
@@ -251,9 +294,15 @@ impl Manager {
 
         // Build system metrics context
         let metrics_section = {
-            let self_dev = self.knobs.read().map(|k| k.self_dev_enabled).unwrap_or(false);
+            let self_dev = self
+                .knobs
+                .read()
+                .map(|k| k.self_dev_enabled)
+                .unwrap_or(false);
             if self_dev {
-                self.metrics.read().ok()
+                self.metrics
+                    .read()
+                    .ok()
                     .map(|m| format!("\n\n{}", m.summary()))
                     .unwrap_or_default()
             } else {
@@ -263,7 +312,11 @@ impl Manager {
 
         // Build mood context
         let mood_section = {
-            let inject = self.knobs.read().map(|k| k.mood_injection_enabled).unwrap_or(false);
+            let inject = self
+                .knobs
+                .read()
+                .map(|k| k.mood_injection_enabled)
+                .unwrap_or(false);
             if inject {
                 format!("\n\n{}", self.mood.describe())
             } else {
@@ -273,7 +326,11 @@ impl Manager {
 
         // Build relationship context
         let relationship_section = {
-            let track = self.knobs.read().map(|k| k.relationship_tracking_enabled).unwrap_or(false);
+            let track = self
+                .knobs
+                .read()
+                .map(|k| k.relationship_tracking_enabled)
+                .unwrap_or(false);
             if track {
                 match self.memory.get_relationship(&session.user_id) {
                     Ok(Some(rel)) => {
@@ -297,27 +354,54 @@ impl Manager {
         };
 
         // Classify the request (pass conversation history for context)
-        let classification = self.classify(
-            user_input, &memory_context, &user_context_section,
-            &mood_section, &relationship_section, &recent_messages,
-            conversation_summary.as_deref(), &metrics_section,
-        ).await?;
+        let classify_gen = lf_trace.as_ref().map(|t| {
+            t.generation(
+                "classify",
+                self.orchestrator.provider_name(),
+                Some(user_input),
+            )
+        });
+        let classification = self
+            .classify(
+                user_input,
+                &memory_context,
+                &user_context_section,
+                &mood_section,
+                &relationship_section,
+                &recent_messages,
+                conversation_summary.as_deref(),
+                &metrics_section,
+            )
+            .await?;
+        if let Some(g) = classify_gen {
+            let label = match &classification {
+                Classification::Simple(_) => "simple",
+                Classification::Direct { .. } => "direct",
+                Classification::Complex { ghost_name, .. } => ghost_name.as_str(),
+            };
+            g.end(Some(label), 0, 0);
+        }
 
         let answer = match classification {
             Classification::Simple(answer) => answer,
             Classification::Direct { steps } => {
                 self.execute_direct(steps, confirmer, status_tx).await?
             }
-            Classification::Complex { ghost_name, goal, context } => {
-                let ghost = self.ghosts.iter()
+            Classification::Complex {
+                ghost_name,
+                goal,
+                context,
+            } => {
+                let ghost = self
+                    .ghosts
+                    .iter()
                     .find(|g| g.name == ghost_name)
                     .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
                 eprintln!("Delegating to ghost: {}", ghost.name);
 
                 let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
-                let is_self_dev = ghost_name == "coder"
-                    || goal.to_lowercase().contains("refactor");
+                let is_self_dev = ghost_name == "coder" || goal.to_lowercase().contains("refactor");
                 let contract = TaskContract {
                     context,
                     goal,
@@ -330,10 +414,36 @@ impl Manager {
 
                 // Send delegation status if we have a sender
                 if let Some(tx) = status_tx {
-                    let _ = tx.send(crate::core::CoreEvent::Status(format!("Delegating to {} ghost...", ghost.name))).await;
+                    let _ = tx
+                        .send(crate::core::CoreEvent::Status(format!(
+                            "Delegating to {} ghost...",
+                            ghost.name
+                        )))
+                        .await;
                 }
 
-                let result = self.executor.run(&contract, ghost, &*self.llm, confirmer, status_tx).await?;
+                let ghost_span = lf_trace
+                    .as_ref()
+                    .map(|t| t.span(&format!("ghost:{}", ghost.name), Some(&contract.goal)));
+                let result = self
+                    .executor
+                    .run(
+                        &contract,
+                        ghost,
+                        &*self.llm,
+                        confirmer,
+                        status_tx,
+                        lf_trace.as_ref(),
+                    )
+                    .await?;
+                if let Some(s) = ghost_span {
+                    let preview = if result.len() > 500 {
+                        &result[..result.floor_char_boundary(500)]
+                    } else {
+                        &result
+                    };
+                    s.end(Some(preview));
+                }
 
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;
@@ -345,6 +455,16 @@ impl Manager {
         // Save assistant turn
         if let Err(e) = self.memory.save_turn(&session_key, "assistant", &answer) {
             tracing::warn!("Failed to save assistant turn: {}", e);
+        }
+
+        // End Langfuse trace
+        if let Some(t) = lf_trace {
+            let preview = if answer.len() > 500 {
+                &answer[..answer.floor_char_boundary(500)]
+            } else {
+                &answer
+            };
+            t.end(Some(preview));
         }
 
         Ok(answer)
@@ -371,15 +491,54 @@ impl Manager {
         }
 
         let ghost_name = ghost_name.unwrap();
-        let ghost = self.ghosts.iter()
+        let ghost = self
+            .ghosts
+            .iter()
             .find(|g| g.name == ghost_name)
             .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
         tracing::info!(ghost = %ghost.name, goal = %goal, "Autonomous task executing");
 
+        // Enrich context with system metrics (Gap 3)
+        let metrics_ctx = if self
+            .knobs
+            .read()
+            .map(|k| k.self_dev_enabled)
+            .unwrap_or(false)
+        {
+            self.metrics
+                .read()
+                .ok()
+                .map(|m| format!("\n\nSystem health: {}", m.summary()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Enrich coder context with code_structure memories (Gap 4)
+        let structure_ctx = if ghost_name == "coder" {
+            let structure_memories = self
+                .memory
+                .search_hybrid("module dependencies imports", None, 10)
+                .unwrap_or_default();
+            if structure_memories.is_empty() {
+                String::new()
+            } else {
+                let items: Vec<String> = structure_memories
+                    .iter()
+                    .map(|m| format!("- {}", m.content))
+                    .collect();
+                format!("\n\nCODE STRUCTURE CONTEXT:\n{}", items.join("\n"))
+            }
+        } else {
+            String::new()
+        };
+
+        let enriched_context = format!("{}{}{}", context, metrics_ctx, structure_ctx);
+
         let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
         let contract = TaskContract {
-            context: context.to_string(),
+            context: enriched_context,
             goal: goal.to_string(),
             constraints: vec![],
             soul: ghost.soul.clone(),
@@ -388,7 +547,38 @@ impl Manager {
             test_generation: ghost.name == "coder",
         };
 
-        let result = self.executor.run(&contract, ghost, &*self.llm, confirmer, None).await?;
+        // Start Langfuse trace for autonomous task
+        let lf_trace = self.langfuse.as_ref().map(|lf| {
+            ActiveTrace::start(
+                lf.clone(),
+                "autonomous_task",
+                None,
+                None,
+                Some(goal),
+                vec!["funnel4", &format!("ghost:{}", ghost.name)],
+            )
+        });
+
+        let result = self
+            .executor
+            .run(
+                &contract,
+                ghost,
+                &*self.llm,
+                confirmer,
+                None,
+                lf_trace.as_ref(),
+            )
+            .await?;
+
+        if let Some(t) = lf_trace {
+            let preview = if result.len() > 500 {
+                &result[..result.floor_char_boundary(500)]
+            } else {
+                &result
+            };
+            t.end(Some(preview));
+        }
 
         // Save lesson from autonomous work too
         self.maybe_save_lesson(goal, &result).await;
@@ -396,21 +586,39 @@ impl Manager {
         Ok(result)
     }
 
-    #[tracing::instrument(skip(self, user_input, memory_context, user_context, mood_section, relationship_section, recent_turns, conversation_summary, metrics_section))]
+    #[tracing::instrument(skip(
+        self,
+        user_input,
+        memory_context,
+        user_context,
+        mood_section,
+        relationship_section,
+        recent_turns,
+        conversation_summary,
+        metrics_section
+    ))]
     async fn classify(
-        &self, user_input: &str, memory_context: &str, user_context: &str,
-        mood_section: &str, relationship_section: &str,
+        &self,
+        user_input: &str,
+        memory_context: &str,
+        user_context: &str,
+        mood_section: &str,
+        relationship_section: &str,
         recent_turns: &[(String, String)],
         conversation_summary: Option<&str>,
         metrics_section: &str,
     ) -> Result<Classification> {
-        let ghost_list: String = self.ghosts.iter()
+        let ghost_list: String = self
+            .ghosts
+            .iter()
             .map(|g| format!("- {} — {}", g.name, g.description))
             .collect::<Vec<_>>()
             .join("\n");
 
         // Collect unique tool names across all ghosts for the prompt
-        let mut all_tools: Vec<String> = self.ghosts.iter()
+        let mut all_tools: Vec<String> = self
+            .ghosts
+            .iter()
             .flat_map(|g| g.tools.iter().cloned())
             .collect();
         all_tools.sort();
@@ -432,7 +640,8 @@ impl Manager {
         let direct_tools_section = if direct_tools.is_empty() {
             String::new()
         } else {
-            let tool_lines: Vec<String> = direct_tools.values()
+            let tool_lines: Vec<String> = direct_tools
+                .values()
                 .map(|t| {
                     let base = t.classifier_description();
                     // Enrich with usage stats if available
@@ -443,12 +652,15 @@ impl Manager {
                     }
                 })
                 .collect();
-            format!("\n\nDirect-execution tools (fast path, no ghost needed):\n{}", tool_lines.join("\n"))
+            format!(
+                "\n\nDirect-execution tools (fast path, no ghost needed):\n{}",
+                tool_lines.join("\n")
+            )
         };
         drop(direct_tools);
 
         let system = format!(
-r#"{}{}You are a manager that classifies user requests and delegates tasks.
+            r#"{}{}You are a manager that classifies user requests and delegates tasks.
 When answering simple questions directly, stay in character — use the personality and tone from your soul document above. You know the user personally; use their profile to give personal, contextual answers.
 
 YOUR TOOL SYSTEM: You operate through specialized tools, NOT Unix commands. Your tools are: {}
@@ -517,7 +729,10 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 
         // Append conversation summary to system prompt if available
         let system = if let Some(summary) = conversation_summary {
-            format!("{}\n\nPrevious conversation (summarized):\n{}", system, summary)
+            format!(
+                "{}\n\nPrevious conversation (summarized):\n{}",
+                system, summary
+            )
         } else {
             system
         };
@@ -551,7 +766,8 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 return Ok(Classification::Complex {
                     ghost_name: "coder".to_string(),
                     goal: user_input.to_string(),
-                    context: "Classifier attempted direct execution but tool validation failed.".to_string(),
+                    context: "Classifier attempted direct execution but tool validation failed."
+                        .to_string(),
                 });
             }
 
@@ -563,7 +779,11 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                     .to_string();
                 let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
                 let context = json["context"].as_str().unwrap_or("").to_string();
-                return Ok(Classification::Complex { ghost_name, goal, context });
+                return Ok(Classification::Complex {
+                    ghost_name,
+                    goal,
+                    context,
+                });
             }
 
             // Catch orchestrator outputting ghost delegation without "type": "complex"
@@ -572,13 +792,19 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 let ghost_name = json["ghost"].as_str().unwrap_or("self-dev").to_string();
                 let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
                 let context = json["context"].as_str().unwrap_or("").to_string();
-                return Ok(Classification::Complex { ghost_name, goal, context });
+                return Ok(Classification::Complex {
+                    ghost_name,
+                    goal,
+                    context,
+                });
             }
             if let Some(answer) = json["answer"].as_str() {
                 // Safety net: if the "simple" answer contains tool-call JSON,
                 // the orchestrator is confused — re-classify as complex
                 if answer.contains("\"tool\"") && answer.contains("\"params\"") {
-                    tracing::warn!("Orchestrator leaked tool JSON in simple answer, re-classifying as complex");
+                    tracing::warn!(
+                        "Orchestrator leaked tool JSON in simple answer, re-classifying as complex"
+                    );
                     return Ok(Classification::Complex {
                         ghost_name: "coder".to_string(),
                         goal: user_input.to_string(),
@@ -591,11 +817,15 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 
         // Fallback: if raw response contains tool-call JSON, classify as complex
         if response.contains("\"tool\"") && response.contains("\"params\"") {
-            tracing::warn!("Orchestrator raw response contains tool JSON, re-classifying as complex");
+            tracing::warn!(
+                "Orchestrator raw response contains tool JSON, re-classifying as complex"
+            );
             return Ok(Classification::Complex {
                 ghost_name: "coder".to_string(),
                 goal: user_input.to_string(),
-                context: "The orchestrator attempted to use tools directly. Delegate this task properly.".to_string(),
+                context:
+                    "The orchestrator attempted to use tools directly. Delegate this task properly."
+                        .to_string(),
             });
         }
 
@@ -654,7 +884,8 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         let direct_tools = self.direct_tools.read().await;
 
         for (i, step) in steps.iter().enumerate() {
-            let tool = direct_tools.get(&step.tool)
+            let tool = direct_tools
+                .get(&step.tool)
                 .ok_or_else(|| AthenaError::Tool(format!("Unknown direct tool: {}", step.tool)))?;
 
             // Validate and render command
@@ -664,11 +895,13 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                     let msg = format!("Security check failed for step {}: {}", i + 1, e);
                     tracing::warn!("{}", msg);
                     if let Some(tx) = status_tx {
-                        let _ = tx.send(crate::core::CoreEvent::ToolRun {
-                            tool: step.tool.clone(),
-                            result: msg.clone(),
-                            success: false,
-                        }).await;
+                        let _ = tx
+                            .send(crate::core::CoreEvent::ToolRun {
+                                tool: step.tool.clone(),
+                                result: msg.clone(),
+                                success: false,
+                            })
+                            .await;
                     }
                     return Ok(msg);
                 }
@@ -680,11 +913,13 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 if !confirmer.confirm(&prompt).await? {
                     let msg = format!("User denied: {}", cmd);
                     if let Some(tx) = status_tx {
-                        let _ = tx.send(crate::core::CoreEvent::ToolRun {
-                            tool: step.tool.clone(),
-                            result: msg.clone(),
-                            success: false,
-                        }).await;
+                        let _ = tx
+                            .send(crate::core::CoreEvent::ToolRun {
+                                tool: step.tool.clone(),
+                                result: msg.clone(),
+                                success: false,
+                            })
+                            .await;
                     }
                     return Ok(msg);
                 }
@@ -692,9 +927,9 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 
             // Execute
             if let Some(tx) = status_tx {
-                let _ = tx.send(crate::core::CoreEvent::Status(
-                    format!("Running: {}", cmd),
-                )).await;
+                let _ = tx
+                    .send(crate::core::CoreEvent::Status(format!("Running: {}", cmd)))
+                    .await;
             }
 
             let start = std::time::Instant::now();
@@ -702,7 +937,11 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             // Record usage stats (non-blocking — fast SQLite UPSERT)
-            let error_msg = if !result.success { Some(result.output.clone()) } else { None };
+            let error_msg = if !result.success {
+                Some(result.output.clone())
+            } else {
+                None
+            };
             if let Err(e) = self.usage_store.record(
                 &step.tool,
                 result.success,
@@ -714,11 +953,13 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 
             // Emit tool run event
             if let Some(tx) = status_tx {
-                let _ = tx.send(crate::core::CoreEvent::ToolRun {
-                    tool: step.tool.clone(),
-                    result: result.output.clone(),
-                    success: result.success,
-                }).await;
+                let _ = tx
+                    .send(crate::core::CoreEvent::ToolRun {
+                        tool: step.tool.clone(),
+                        result: result.output.clone(),
+                        success: result.success,
+                    })
+                    .await;
             }
 
             if !result.success {
@@ -728,7 +969,10 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 }
                 return Ok(format!(
                     "Step {}/{} failed ({}):\n{}",
-                    i + 1, total, cmd, result.output
+                    i + 1,
+                    total,
+                    cmd,
+                    result.output
                 ));
             }
 
@@ -748,7 +992,8 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         if outputs.len() == 1 {
             Ok(outputs.into_iter().next().unwrap().1)
         } else {
-            let summary: Vec<String> = outputs.iter()
+            let summary: Vec<String> = outputs
+                .iter()
                 .enumerate()
                 .map(|(i, (cmd, out))| {
                     let truncated = if out.len() > 500 {
@@ -759,7 +1004,11 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                     format!("Step {} ({}): {}", i + 1, cmd, truncated)
                 })
                 .collect();
-            Ok(format!("All {} steps completed.\n\n{}", total, summary.join("\n\n")))
+            Ok(format!(
+                "All {} steps completed.\n\n{}",
+                total,
+                summary.join("\n\n")
+            ))
         }
     }
 
@@ -768,7 +1017,10 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         if result.len() > 100 {
             let truncated_input = truncate_utf8(input, 200);
             let truncated_result = truncate_utf8(result, 200);
-            let lesson = format!("Task: {} → Result summary: {}", truncated_input, truncated_result);
+            let lesson = format!(
+                "Task: {} → Result summary: {}",
+                truncated_input, truncated_result
+            );
             let lesson = truncate_utf8(&lesson, 500).to_string();
 
             // Embed on blocking thread to avoid stalling tokio
