@@ -540,7 +540,7 @@ mod tests {
             let retrieved_3: Vec<usize> = all_indices.iter().take(3).copied().collect();
             let retrieved_5: Vec<usize> = all_indices.clone();
 
-            let compute_metrics = |retrieved: &[usize], k: usize| -> (bool, f32) {
+            let compute_metrics = |retrieved: &[usize]| -> (bool, f32) {
                 if case.expected.is_empty() {
                     let fp = top_scores.first().copied().unwrap_or(0.0) > 0.4;
                     return (!fp, if !fp { 1.0 } else { 0.0 });
@@ -566,9 +566,9 @@ mod tests {
                 hits as f32 / k as f32
             };
 
-            let (hit_1, _) = compute_metrics(&retrieved_1, 1);
-            let (hit_3, _) = compute_metrics(&retrieved_3, 3);
-            let (hit_5, rr) = compute_metrics(&retrieved_5, 5);
+            let (hit_1, _) = compute_metrics(&retrieved_1);
+            let (hit_3, _) = compute_metrics(&retrieved_3);
+            let (hit_5, _) = compute_metrics(&retrieved_5);
 
             // RR is based on deepest retrieval
             let rr = if case.expected.is_empty() {

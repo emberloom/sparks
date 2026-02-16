@@ -8,7 +8,7 @@ use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
 
-use crate::config::{GhostConfig, Config, DockerConfig};
+use crate::config::{Config, DockerConfig, GhostConfig};
 use crate::error::{AthenaError, Result};
 
 pub struct DockerSession {
@@ -19,10 +19,7 @@ pub struct DockerSession {
 
 impl DockerSession {
     /// Create and start a hardened container for a ghost task
-    pub async fn new(
-        ghost: &GhostConfig,
-        docker_config: &DockerConfig,
-    ) -> Result<Self> {
+    pub async fn new(ghost: &GhostConfig, docker_config: &DockerConfig) -> Result<Self> {
         let docker = Docker::connect_with_socket(
             &docker_config.socket_path,
             120,
@@ -30,16 +27,20 @@ impl DockerSession {
         )?;
 
         // Build mounts
-        let mut mounts: Vec<Mount> = ghost.mounts.iter().map(|m| {
-            let host = Config::resolve_mount_path(&m.host_path);
-            Mount {
-                target: Some(m.container_path.clone()),
-                source: Some(host),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(m.read_only),
-                ..Default::default()
-            }
-        }).collect();
+        let mut mounts: Vec<Mount> = ghost
+            .mounts
+            .iter()
+            .map(|m| {
+                let host = Config::resolve_mount_path(&m.host_path);
+                Mount {
+                    target: Some(m.container_path.clone()),
+                    source: Some(host),
+                    typ: Some(MountTypeEnum::BIND),
+                    read_only: Some(m.read_only),
+                    ..Default::default()
+                }
+            })
+            .collect();
 
         // Mount host cargo registry (read-only) so `cargo check/test` works offline
         let cargo_home = std::env::var("CARGO_HOME")
@@ -49,6 +50,16 @@ impl DockerSession {
             mounts.push(Mount {
                 target: Some("/usr/local/cargo/registry".into()),
                 source: Some(cargo_registry),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+        let cargo_git = format!("{}/git", cargo_home);
+        if std::path::Path::new(&cargo_git).exists() {
+            mounts.push(Mount {
+                target: Some("/usr/local/cargo/git".into()),
+                source: Some(cargo_git),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
                 ..Default::default()
@@ -65,9 +76,10 @@ impl DockerSession {
             cpu_quota: Some(docker_config.cpu_quota),
             pids_limit: Some(256),
             // Writable /tmp for tools that need scratch space
-            tmpfs: Some(HashMap::from([
-                ("/tmp".into(), "rw,noexec,nosuid,size=64m".into()),
-            ])),
+            tmpfs: Some(HashMap::from([(
+                "/tmp".into(),
+                "rw,noexec,nosuid,size=64m".into(),
+            )])),
             ..Default::default()
         };
 
@@ -79,6 +91,11 @@ impl DockerSession {
             image: Some(image.to_string()),
             user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
+            env: Some(vec![
+                "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+                "CARGO_HOME=/usr/local/cargo".into(),
+                "HOME=/tmp".into(),
+            ]),
             working_dir: Some(
                 ghost.mounts.first()
                     .map(|m| m.container_path.clone())
@@ -90,7 +107,10 @@ impl DockerSession {
 
         let resp = docker
             .create_container(
-                Some(CreateContainerOptions { name: &container_name, platform: None }),
+                Some(CreateContainerOptions {
+                    name: &container_name,
+                    platform: None,
+                }),
                 config,
             )
             .await?;
@@ -110,21 +130,25 @@ impl DockerSession {
 
     /// Execute a command in the container, returning combined stdout+stderr
     pub async fn exec(&self, cmd: &str) -> Result<String> {
-        let exec = self.docker.create_exec(
-            &self.container_id,
-            CreateExecOptions::<String> {
-                cmd: Some(vec!["sh".into(), "-c".into(), cmd.into()]),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                ..Default::default()
-            },
-        ).await?;
+        let exec = self
+            .docker
+            .create_exec(
+                &self.container_id,
+                CreateExecOptions::<String> {
+                    cmd: Some(vec!["sh".into(), "-c".into(), cmd.into()]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await?;
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
             self.collect_exec_output(&exec.id),
-        ).await
-            .map_err(|_| AthenaError::Timeout(self.timeout_secs))??;
+        )
+        .await
+        .map_err(|_| AthenaError::Timeout(self.timeout_secs))??;
 
         Ok(output)
     }
@@ -142,7 +166,10 @@ impl DockerSession {
         let start_result = self.docker.start_exec(exec_id, None).await?;
 
         let mut output = String::new();
-        if let StartExecResults::Attached { output: mut stream, .. } = start_result {
+        if let StartExecResults::Attached {
+            output: mut stream, ..
+        } = start_result
+        {
             while let Some(Ok(msg)) = stream.next().await {
                 use std::fmt::Write;
                 let _ = write!(output, "{}", msg);
@@ -157,12 +184,20 @@ impl DockerSession {
         tracing::info!(container_id = %self.container_id, "Closing container");
 
         // Kill if running (ignore errors — may already be stopped)
-        let _ = self.docker.kill_container::<&str>(&self.container_id, None).await;
+        let _ = self
+            .docker
+            .kill_container::<&str>(&self.container_id, None)
+            .await;
 
-        self.docker.remove_container(
-            &self.container_id,
-            Some(RemoveContainerOptions { force: true, ..Default::default() }),
-        ).await?;
+        self.docker
+            .remove_container(
+                &self.container_id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
 
         Ok(())
     }

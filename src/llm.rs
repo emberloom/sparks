@@ -249,6 +249,24 @@ pub trait LlmProvider: Send + Sync {
         Ok((ChatResponse::Text(text), None))
     }
 
+    /// Return the currently active model name.
+    fn current_model(&self) -> String {
+        String::new()
+    }
+
+    /// Override the model at runtime (None = reset to config default).
+    fn set_model_override(&self, _model: Option<String>) {}
+
+    /// List models available from this provider's API.
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// Query account credits (total, used). Returns None if not supported.
+    async fn credits(&self) -> Result<Option<(f64, f64)>> {
+        Ok(None)
+    }
+
     /// Whether this provider supports streaming.
     fn supports_streaming(&self) -> bool {
         false
@@ -302,15 +320,24 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::System, content: content.into() }
+        Self {
+            role: ChatRole::System,
+            content: content.into(),
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::User, content: content.into() }
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+        }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::Assistant, content: content.into() }
+        Self {
+            role: ChatRole::Assistant,
+            content: content.into(),
+        }
     }
 }
 
@@ -381,20 +408,27 @@ impl LlmProvider for OllamaClient {
         };
 
         let start = Instant::now();
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/api/chat", self.config.url))
             .json(&req)
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "Ollama", %status, "LLM error");
-            return Err(AthenaError::Llm(format!("Ollama returned {}: {}", status, body)));
+            crate::introspect::record_error();
+            return Err(AthenaError::Llm(format!(
+                "Ollama returned {}: {}",
+                status, body
+            )));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OllamaChatResponse = resp.json().await?;
         tracing::info!(
             provider = "Ollama",
@@ -408,26 +442,29 @@ impl LlmProvider for OllamaClient {
     }
 
     async fn health_check(&self) -> Result<()> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/api/tags", self.config.url))
             .send()
             .await
-            .map_err(|e| AthenaError::Llm(format!("Cannot reach Ollama at {}: {}", self.config.url, e)))?;
+            .map_err(|e| {
+                AthenaError::Llm(format!("Cannot reach Ollama at {}: {}", self.config.url, e))
+            })?;
 
         let body: Value = resp.json().await?;
-        let models = body["models"].as_array()
+        let models = body["models"]
+            .as_array()
             .ok_or_else(|| AthenaError::Llm("Unexpected Ollama response".into()))?;
 
         let available = models.iter().any(|m| {
-            m["name"].as_str()
+            m["name"]
+                .as_str()
                 .map(|n| n.starts_with(&self.config.model))
                 .unwrap_or(false)
         });
 
         if !available {
-            let names: Vec<&str> = models.iter()
-                .filter_map(|m| m["name"].as_str())
-                .collect();
+            let names: Vec<&str> = models.iter().filter_map(|m| m["name"].as_str()).collect();
             return Err(AthenaError::Llm(format!(
                 "Model '{}' not found. Available: {:?}",
                 self.config.model, names
@@ -439,6 +476,10 @@ impl LlmProvider for OllamaClient {
 
     fn provider_name(&self) -> &str {
         "Ollama"
+    }
+
+    fn current_model(&self) -> String {
+        self.config.model.clone()
     }
 }
 
@@ -459,6 +500,7 @@ pub struct OpenAiCompatibleClient {
     client: Client,
     config: OpenAiCompatibleConfig,
     name: String,
+    model_override: std::sync::RwLock<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -543,45 +585,64 @@ impl OpenAiCompatibleClient {
             client: Client::new(),
             config,
             name: name.into(),
+            model_override: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Return the model to use: override if set, otherwise config default.
+    fn effective_model(&self) -> String {
+        self.model_override
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone())
     }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleClient {
     async fn chat(&self, messages: &[Message]) -> Result<String> {
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             "LLM request"
         );
 
         let req = OpenAiChatRequest {
-            model: self.config.model.clone(),
+            model,
             messages: messages.to_vec(),
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
         };
 
         let start = Instant::now();
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/chat/completions", self.config.url))
             .bearer_auth(&self.config.api_key)
             .json(&req)
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = %self.name, %status, "LLM error");
-            return Err(AthenaError::Llm(format!("{} returned {}: {}", self.name, status, body)));
+            crate::introspect::record_error();
+            return Err(AthenaError::Llm(format!(
+                "{} returned {}: {}",
+                self.name, status, body
+            )));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OpenAiChatResponse = resp.json().await?;
-        let (prompt_tok, completion_tok) = chat_resp.usage
+        let (prompt_tok, completion_tok) = chat_resp
+            .usage
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
@@ -595,7 +656,9 @@ impl LlmProvider for OpenAiCompatibleClient {
             "LLM response"
         );
 
-        let content = chat_resp.choices.into_iter()
+        let content = chat_resp
+            .choices
+            .into_iter()
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| AthenaError::Llm(format!("{} returned empty choices", self.name)))?;
@@ -603,17 +666,26 @@ impl LlmProvider for OpenAiCompatibleClient {
     }
 
     async fn health_check(&self) -> Result<()> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/models", self.config.url))
             .bearer_auth(&self.config.api_key)
             .send()
             .await
-            .map_err(|e| AthenaError::Llm(format!("Cannot reach {} at {}: {}", self.name, self.config.url, e)))?;
+            .map_err(|e| {
+                AthenaError::Llm(format!(
+                    "Cannot reach {} at {}: {}",
+                    self.name, self.config.url, e
+                ))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AthenaError::Llm(format!("{} health check failed ({}): {}", self.name, status, body)));
+            return Err(AthenaError::Llm(format!(
+                "{} health check failed ({}): {}",
+                self.name, status, body
+            )));
         }
 
         Ok(())
@@ -631,15 +703,83 @@ impl LlmProvider for OpenAiCompatibleClient {
         self.config.context_window
     }
 
+    fn current_model(&self) -> String {
+        self.effective_model()
+    }
+
+    fn set_model_override(&self, model: Option<String>) {
+        *self.model_override.write().unwrap() = model;
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let resp = self
+            .client
+            .get(format!("{}/models", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AthenaError::Llm(format!(
+                "{} /models returned {}: {}",
+                self.name, status, body
+            )));
+        }
+
+        let body: Value = resp.json().await?;
+        let mut models: Vec<String> = body["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        models.sort();
+        Ok(models)
+    }
+
+    async fn credits(&self) -> Result<Option<(f64, f64)>> {
+        // Only supported for OpenRouter (URL contains openrouter.ai)
+        if !self.config.url.contains("openrouter.ai") {
+            return Ok(None);
+        }
+
+        let resp = self
+            .client
+            .get(format!("{}/credits", self.config.url))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            // Non-fatal: might be a non-management key
+            tracing::debug!(
+                provider = %self.name,
+                status = %resp.status(),
+                "Credits endpoint unavailable"
+            );
+            return Ok(None);
+        }
+
+        let body: Value = resp.json().await?;
+        let total = body["data"]["total_credits"].as_f64().unwrap_or(0.0);
+        let used = body["data"]["total_usage"].as_f64().unwrap_or(0.0);
+        Ok(Some((total, used)))
+    }
+
     async fn chat_with_tools(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSchema],
     ) -> Result<(ChatResponse, Option<TokenUsage>)> {
         let has_tools = !tools.is_empty();
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             has_tools,
             "LLM request (with tools)"
@@ -671,7 +811,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         };
 
         let req = OpenAiChatRequestWithTools {
-            model: self.config.model.clone(),
+            model,
             messages: wire_messages,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
@@ -689,6 +829,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .send()
             .await?;
         let latency = start.elapsed();
+        crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -696,36 +837,32 @@ impl LlmProvider for OpenAiCompatibleClient {
 
             // Graceful fallback: if the API rejects the tools parameter,
             // retry without tools using the simple chat() path
-            if status.as_u16() == 400
-                && (body.contains("tools") || body.contains("function"))
-            {
+            if status.as_u16() == 400 && (body.contains("tools") || body.contains("function")) {
                 tracing::warn!(
                     provider = %self.name,
                     "API rejected tools parameter, falling back to chat()"
                 );
-                let simple: Vec<Message> =
-                    messages.iter().filter_map(|m| m.to_simple()).collect();
+                let simple: Vec<Message> = messages.iter().filter_map(|m| m.to_simple()).collect();
                 let text = self.chat(&simple).await?;
                 return Ok((ChatResponse::Text(text), None));
             }
 
             tracing::error!(provider = %self.name, %status, "LLM error (tools)");
+            crate::introspect::record_error();
             return Err(AthenaError::Llm(format!(
                 "{} returned {}: {}",
                 self.name, status, body
             )));
         }
 
+        crate::introspect::record_call();
         let chat_resp: OpenAiChatResponseFull = resp.json().await?;
         let (prompt_tok, completion_tok) = chat_resp
             .usage
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
-        let resolved_model = chat_resp
-            .model
-            .as_deref()
-            .unwrap_or(&self.config.model);
+        let resolved_model = chat_resp.model.as_deref().unwrap_or(&self.config.model);
 
         let choice = chat_resp
             .choices
@@ -761,8 +898,7 @@ impl LlmProvider for OpenAiCompatibleClient {
                 let tool_calls: Vec<ToolCall> = api_calls
                     .into_iter()
                     .filter_map(|tc| {
-                        let args: Value =
-                            serde_json::from_str(&tc.function.arguments).ok()?;
+                        let args: Value = serde_json::from_str(&tc.function.arguments).ok()?;
                         Some(ToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -770,16 +906,20 @@ impl LlmProvider for OpenAiCompatibleClient {
                         })
                     })
                     .collect();
-                return Ok((ChatResponse::ToolCalls {
-                    tool_calls,
-                    text: choice.message.content,
-                }, usage));
+                return Ok((
+                    ChatResponse::ToolCalls {
+                        tool_calls,
+                        text: choice.message.content,
+                    },
+                    usage,
+                ));
             }
         }
 
-        Ok((ChatResponse::Text(
-            choice.message.content.unwrap_or_default(),
-        ), usage))
+        Ok((
+            ChatResponse::Text(choice.message.content.unwrap_or_default()),
+            usage,
+        ))
     }
 
     fn supports_streaming(&self) -> bool {
@@ -792,9 +932,10 @@ impl LlmProvider for OpenAiCompatibleClient {
         tools: &[ToolSchema],
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let has_tools = !tools.is_empty();
+        let model = self.effective_model();
         tracing::info!(
             provider = %self.name,
-            model = %self.config.model,
+            model = %model,
             messages = messages.len(),
             has_tools,
             stream = true,
@@ -825,13 +966,15 @@ impl LlmProvider for OpenAiCompatibleClient {
         };
 
         let req = OpenAiChatRequestWithTools {
-            model: self.config.model.clone(),
+            model,
             messages: wire_messages,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             tools: api_tools,
             stream: Some(true),
-            stream_options: Some(StreamOptions { include_usage: true }),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
         };
 
         let resp = self
@@ -854,6 +997,7 @@ impl LlmProvider for OpenAiCompatibleClient {
 
         let (tx, rx) = mpsc::channel(64);
         let provider_name = self.name.clone();
+        let stream_start = Instant::now();
 
         // Spawn a task to read SSE lines and emit StreamEvents
         tokio::spawn(async move {
@@ -868,6 +1012,10 @@ impl LlmProvider for OpenAiCompatibleClient {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!(provider = %provider_name, error = %e, "Stream read error");
+                        crate::introspect::record_error();
+                        crate::introspect::record_llm_latency(
+                            stream_start.elapsed().as_millis() as u64
+                        );
                         break;
                     }
                 };
@@ -902,6 +1050,10 @@ impl LlmProvider for OpenAiCompatibleClient {
                                 }))
                                 .await;
                         }
+                        crate::introspect::record_call();
+                        crate::introspect::record_llm_latency(
+                            stream_start.elapsed().as_millis() as u64
+                        );
                         let _ = tx.send(StreamEvent::Done).await;
                         return;
                     }
@@ -985,6 +1137,8 @@ impl LlmProvider for OpenAiCompatibleClient {
                     }))
                     .await;
             }
+            crate::introspect::record_call();
+            crate::introspect::record_llm_latency(stream_start.elapsed().as_millis() as u64);
             let _ = tx.send(StreamEvent::Done).await;
         });
 
@@ -1003,7 +1157,10 @@ fn chat_message_to_wire(msg: &ChatMessage) -> Option<Value> {
             "role": "user",
             "content": s,
         })),
-        ChatMessage::Assistant { content, tool_calls } => {
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+        } => {
             let mut obj = serde_json::json!({ "role": "assistant" });
             if let Some(c) = content {
                 obj["content"] = Value::String(c.clone());
@@ -1026,7 +1183,10 @@ fn chat_message_to_wire(msg: &ChatMessage) -> Option<Value> {
             }
             Some(obj)
         }
-        ChatMessage::Tool { tool_call_id, content } => Some(serde_json::json!({
+        ChatMessage::Tool {
+            tool_call_id,
+            content,
+        } => Some(serde_json::json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": content,
@@ -1111,7 +1271,9 @@ pub fn extract_json(text: &str) -> Option<Value> {
     for (i, ch) in text.char_indices() {
         match ch {
             '{' => {
-                if depth == 0 { start = Some(i); }
+                if depth == 0 {
+                    start = Some(i);
+                }
                 depth += 1;
             }
             '}' => {
@@ -1153,7 +1315,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_embedded() {
-        let text = "I'll run this: {\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}} and check.";
+        let text =
+            "I'll run this: {\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}} and check.";
         let v = extract_json(text).unwrap();
         assert_eq!(v["tool"], "shell");
     }
@@ -1270,7 +1433,10 @@ mod tests {
             }]
         }"#;
         let resp: OpenAiChatResponseFull = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello world"));
+        assert_eq!(
+            resp.choices[0].message.content.as_deref(),
+            Some("Hello world")
+        );
         assert!(resp.choices[0].message.tool_calls.is_none());
     }
 
@@ -1308,7 +1474,10 @@ mod tests {
     #[test]
     fn test_token_budget_record_usage() {
         let mut budget = TokenBudget::new(100_000);
-        budget.record_usage(&TokenUsage { prompt_tokens: 50_000, completion_tokens: 1_000 });
+        budget.record_usage(&TokenUsage {
+            prompt_tokens: 50_000,
+            completion_tokens: 1_000,
+        });
         assert_eq!(budget.call_count, 1);
         assert_eq!(budget.last_prompt_tokens, 50_000);
         assert_eq!(budget.total_completion_tokens, 1_000);
@@ -1318,18 +1487,30 @@ mod tests {
     #[test]
     fn test_token_budget_needs_compression() {
         let mut budget = TokenBudget::new(100_000);
-        budget.record_usage(&TokenUsage { prompt_tokens: 70_000, completion_tokens: 500 });
+        budget.record_usage(&TokenUsage {
+            prompt_tokens: 70_000,
+            completion_tokens: 500,
+        });
         assert!(!budget.needs_compression(0.80));
 
-        budget.record_usage(&TokenUsage { prompt_tokens: 85_000, completion_tokens: 500 });
+        budget.record_usage(&TokenUsage {
+            prompt_tokens: 85_000,
+            completion_tokens: 500,
+        });
         assert!(budget.needs_compression(0.80));
     }
 
     #[test]
     fn test_token_budget_cumulative_completion() {
         let mut budget = TokenBudget::new(128_000);
-        budget.record_usage(&TokenUsage { prompt_tokens: 10_000, completion_tokens: 500 });
-        budget.record_usage(&TokenUsage { prompt_tokens: 20_000, completion_tokens: 600 });
+        budget.record_usage(&TokenUsage {
+            prompt_tokens: 10_000,
+            completion_tokens: 500,
+        });
+        budget.record_usage(&TokenUsage {
+            prompt_tokens: 20_000,
+            completion_tokens: 600,
+        });
         assert_eq!(budget.total_completion_tokens, 1_100);
         assert_eq!(budget.call_count, 2);
         // last_prompt_tokens should be the most recent
@@ -1355,7 +1536,10 @@ mod tests {
         let tc_deltas = choices[0].delta.tool_calls.as_ref().unwrap();
         assert_eq!(tc_deltas[0].index, 0);
         assert_eq!(tc_deltas[0].id.as_deref(), Some("call_1"));
-        assert_eq!(tc_deltas[0].function.as_ref().unwrap().name.as_deref(), Some("shell"));
+        assert_eq!(
+            tc_deltas[0].function.as_ref().unwrap().name.as_deref(),
+            Some("shell")
+        );
     }
 
     #[test]
@@ -1430,7 +1614,10 @@ mod tests {
         let mut history = vec![
             ChatMessage::System("sys".into()),
             ChatMessage::User("goal".into()),
-            ChatMessage::Assistant { content: Some("ok".into()), tool_calls: None },
+            ChatMessage::Assistant {
+                content: Some("ok".into()),
+                tool_calls: None,
+            },
         ];
 
         let original_len = history.len();

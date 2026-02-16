@@ -2,19 +2,55 @@ use async_trait::async_trait;
 use tracing::Instrument;
 
 use crate::confirm::Confirmer;
+use crate::core::CoreEvent;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
-use crate::core::CoreEvent;
-use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall, ToolSchema};
+use crate::langfuse::ActiveTrace;
+use crate::llm::{
+    self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
+    ToolSchema,
+};
 use crate::tools::ToolRegistry;
 
 use super::{LoopStrategy, StatusSender, TaskContract};
 
 /// Read-only tools allowed in the EXPLORE phase
-const EXPLORE_TOOLS: &[&str] = &["file_read", "grep", "glob", "codebase_map", "shell", "diff"];
+const EXPLORE_TOOLS: &[&str] = &[
+    "file_read",
+    "grep",
+    "glob",
+    "codebase_map",
+    "shell",
+    "diff",
+    "git",
+    "gh",
+];
 /// Tools allowed in the VERIFY phase (read-only + lint)
-const VERIFY_TOOLS: &[&str] = &["file_read", "grep", "glob", "shell", "lint", "diff"];
+const VERIFY_TOOLS: &[&str] = &[
+    "file_read",
+    "grep",
+    "glob",
+    "shell",
+    "lint",
+    "diff",
+    "git",
+    "gh",
+];
+/// Extended VERIFY tools when test generation is enabled (adds write + test_runner)
+const VERIFY_WITH_TESTS_TOOLS: &[&str] = &[
+    "file_read",
+    "file_write",
+    "file_edit",
+    "grep",
+    "glob",
+    "shell",
+    "lint",
+    "test_runner",
+    "diff",
+    "git",
+    "gh",
+];
 /// Coding CLI tools for the EXECUTE phase
 const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
@@ -41,42 +77,167 @@ impl LoopStrategy for CodeStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let use_native = llm.supports_tools();
+        let benchmark_fast = is_benchmark_fast_cli_mode(contract);
 
         // Phase 1: EXPLORE
-        tracing::info!("CodeStrategy: starting EXPLORE phase");
-        send_status(status_tx, "Exploring codebase...").await;
-        let exploration = if use_native {
-            self.explore_native(contract, tools, docker, llm, executor, confirmer, status_tx)
-                .instrument(tracing::info_span!("explore"))
-                .await?
+        let exploration = if benchmark_fast {
+            tracing::info!("CodeStrategy: benchmark fast mode enabled, skipping EXPLORE");
+            send_status(status_tx, "Benchmark fast mode: skipping explore phase").await;
+            ExplorationResult {
+                plan: contract.goal.clone(),
+                context: String::new(),
+                files: String::new(),
+            }
         } else {
-            self.explore_text_fallback(contract, tools, docker, llm, executor, confirmer, status_tx)
+            tracing::info!("CodeStrategy: starting EXPLORE phase");
+            send_status(status_tx, "Exploring codebase...").await;
+            let explore_span = trace.map(|t| t.span("phase:explore", None));
+            let exploration = if use_native {
+                self.explore_native(
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                )
                 .instrument(tracing::info_span!("explore"))
                 .await?
+            } else {
+                self.explore_text_fallback(
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                )
+                .instrument(tracing::info_span!("explore"))
+                .await?
+            };
+            if let Some(s) = explore_span {
+                s.end(Some(&lf_truncate(&exploration.plan, 500)));
+            }
+            exploration
         };
 
-        // Phase 2: EXECUTE (unchanged — calls CLI tool directly)
+        // Phase 2: EXECUTE (calls CLI tool directly)
         tracing::info!("CodeStrategy: starting EXECUTE phase");
         send_status(status_tx, "Executing code changes...").await;
+        let exec_span =
+            trace.map(|t| t.span("phase:execute", Some(&lf_truncate(&exploration.plan, 300))));
         let exec_result = self
-            .execute_code(contract, tools, docker, llm, &exploration)
+            .execute_code(contract, tools, docker, llm, &exploration, !benchmark_fast)
             .instrument(tracing::info_span!("execute"))
             .await?;
+        if let Some(s) = exec_span {
+            s.end(Some(&lf_truncate(&exec_result, 500)));
+        }
+
+        if benchmark_fast {
+            tracing::info!("CodeStrategy: benchmark fast mode enabled, skipping VERIFY");
+            send_status(status_tx, "Benchmark fast mode: skipping verify phase").await;
+            return Ok(exec_result);
+        }
 
         // Phase 3: VERIFY
         tracing::info!("CodeStrategy: starting VERIFY phase");
         send_status(status_tx, "Verifying changes...").await;
+        let verify_span = trace.map(|t| t.span("phase:verify", None));
         let summary = if use_native {
-            self.verify_native(contract, tools, docker, llm, &exec_result, executor, confirmer, status_tx)
-                .instrument(tracing::info_span!("verify"))
-                .await?
+            self.verify_native(
+                contract,
+                tools,
+                docker,
+                llm,
+                &exec_result,
+                executor,
+                confirmer,
+                status_tx,
+                trace,
+            )
+            .instrument(tracing::info_span!("verify"))
+            .await?
         } else {
-            self.verify_text_fallback(contract, tools, docker, llm, &exec_result, executor, confirmer, status_tx)
-                .instrument(tracing::info_span!("verify"))
-                .await?
+            self.verify_text_fallback(
+                contract,
+                tools,
+                docker,
+                llm,
+                &exec_result,
+                executor,
+                confirmer,
+                status_tx,
+                trace,
+            )
+            .instrument(tracing::info_span!("verify"))
+            .await?
         };
+        if let Some(s) = verify_span {
+            s.end(Some(&lf_truncate(&summary, 500)));
+        }
+
+        // Phase 3b: SELF-HEAL — if test failures detected, attempt one corrective cycle
+        if contract.test_generation {
+            if let Some(fix_contract) = crate::self_heal::attempt_test_fix(&summary, &contract.goal)
+            {
+                tracing::warn!("CodeStrategy: test failures detected, attempting self-heal");
+                send_status(status_tx, "Test failures detected — attempting fix...").await;
+                let heal_span =
+                    trace.map(|t| t.span("phase:self_heal", Some(&lf_truncate(&summary, 300))));
+
+                // Re-run EXECUTE with the corrective contract
+                let fix_exploration = ExplorationResult {
+                    plan: fix_contract.goal.clone(),
+                    context: fix_contract.context.clone(),
+                    files: String::new(),
+                };
+
+                match self
+                    .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
+                    .instrument(tracing::info_span!("self_heal_execute"))
+                    .await
+                {
+                    Ok(fix_result) => {
+                        // Re-verify after fix
+                        send_status(status_tx, "Re-verifying after fix...").await;
+                        let fix_summary = if use_native {
+                            self.verify_native(
+                                contract,
+                                tools,
+                                docker,
+                                llm,
+                                &fix_result,
+                                executor,
+                                confirmer,
+                                status_tx,
+                                trace,
+                            )
+                            .instrument(tracing::info_span!("self_heal_verify"))
+                            .await?
+                        } else {
+                            self.verify_text_fallback(
+                                contract,
+                                tools,
+                                docker,
+                                llm,
+                                &fix_result,
+                                executor,
+                                confirmer,
+                                status_tx,
+                                trace,
+                            )
+                            .instrument(tracing::info_span!("self_heal_verify"))
+                            .await?
+                        };
+                        tracing::info!("CodeStrategy: self-heal cycle complete");
+                        if let Some(s) = heal_span {
+                            s.end(Some("fixed"));
+                        }
+                        return Ok(fix_summary);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
+                        if let Some(s) = heal_span {
+                            s.end(Some(&format!("failed: {}", e)));
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(summary)
     }
@@ -94,6 +255,7 @@ impl CodeStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<ExplorationResult> {
         let system_prompt = build_explore_prompt_native(contract);
         let schemas = phase_schemas(tools, EXPLORE_TOOLS);
@@ -138,19 +300,28 @@ impl CodeStrategy {
                 // Check if the text portion contains a plan
                 if !text_accum.is_empty() {
                     if let Some(plan) = extract_plan(&text_accum) {
-                        tracing::info!(step, path = "native", "EXPLORE complete — got plan from text");
+                        tracing::info!(
+                            step,
+                            path = "native",
+                            "EXPLORE complete — got plan from text"
+                        );
                         return Ok(plan);
                     }
                 }
 
-                let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+                let text = if text_accum.is_empty() {
+                    None
+                } else {
+                    Some(text_accum)
+                };
                 history.push(ChatMessage::Assistant {
                     content: text,
                     tool_calls: Some(tool_calls.clone()),
                 });
 
                 // Split into allowed and disallowed tool calls
-                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls.iter()
+                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls
+                    .iter()
                     .partition(|tc| EXPLORE_TOOLS.contains(&tc.name.as_str()));
 
                 for tc in &disallowed {
@@ -168,16 +339,21 @@ impl CodeStrategy {
                 for tc in &allowed {
                     send_status(status_tx, &format!("Exploring: {} ...", tc.name)).await;
                 }
-                let futs: Vec<_> = allowed.iter().map(|tc| async move {
-                    let json = serde_json::json!({
-                        "tool": tc.name,
-                        "params": tc.arguments,
-                    });
-                    let result = executor
-                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                        .await;
-                    (*tc, result)
-                }).collect();
+                let futs: Vec<_> = allowed
+                    .iter()
+                    .map(|tc| async move {
+                        let json = serde_json::json!({
+                            "tool": tc.name,
+                            "params": tc.arguments,
+                        });
+                        let result = executor
+                            .execute_tool(
+                                &tc.name, &json, tools, docker, confirmer, status_tx, trace,
+                            )
+                            .await;
+                        (*tc, result)
+                    })
+                    .collect();
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
@@ -211,7 +387,8 @@ impl CodeStrategy {
         tracing::warn!("EXPLORE phase (native) hit step limit, requesting plan");
         history.push(ChatMessage::User(
             "You've used all exploration steps. Output your plan NOW as JSON:\n\
-             {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}".to_string(),
+             {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}"
+                .to_string(),
         ));
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         if let ChatResponse::Text(text) = &response {
@@ -241,6 +418,7 @@ impl CodeStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<ExplorationResult> {
         let system_prompt = build_explore_prompt(contract, tools);
         let mut history = vec![
@@ -285,10 +463,15 @@ impl CodeStrategy {
             send_status(status_tx, &format!("Exploring: {} ...", tool_name)).await;
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, status_tx, trace)
                 .await?;
 
-            tracing::debug!(step, tool = tool_name, path = "text", "EXPLORE tool executed");
+            tracing::debug!(
+                step,
+                tool = tool_name,
+                path = "text",
+                "EXPLORE tool executed"
+            );
             history.push(Message::user(&tool_output));
         }
 
@@ -310,7 +493,7 @@ impl CodeStrategy {
     }
 
     /// Phase 2: Call a coding CLI tool with the enriched plan from Phase 1.
-    /// Unchanged — calls CLI tool directly, no LLM tool loop.
+    /// Includes optional ripple effect analysis from code_structure memories.
     async fn execute_code(
         &self,
         contract: &TaskContract,
@@ -318,24 +501,62 @@ impl CodeStrategy {
         docker: &DockerSession,
         llm: &dyn LlmProvider,
         exploration: &ExplorationResult,
+        allow_retry_rewrite: bool,
     ) -> Result<String> {
-        let coding_tool_name = contract
+        let mut candidates: Vec<&str> = Vec::new();
+        if let Some(pref) = contract
             .cli_tool_preference
             .as_deref()
             .filter(|pref| tools.get(pref).is_some())
-            .or_else(|| {
-                CODING_TOOLS
-                    .iter()
-                    .find(|&&name| tools.get(name).is_some())
-                    .copied()
-            })
-            .ok_or_else(|| {
-                AthenaError::Tool(
-                    "No coding CLI tool available (need claude_code, codex, or opencode)".into(),
-                )
-            })?;
+        {
+            candidates.push(pref);
+        }
+        for &name in CODING_TOOLS {
+            if tools.get(name).is_some() && !candidates.contains(&name) {
+                candidates.push(name);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(AthenaError::Tool(
+                "No coding CLI tool available (need claude_code, codex, or opencode)".into(),
+            ));
+        }
 
-        let tool = tools.get(coding_tool_name).unwrap();
+        // Ripple effect: analyze files from exploration to warn about dependents
+        let ripple_section = if !exploration.files.is_empty() {
+            // Extract file paths from the exploration summary
+            let file_names: Vec<&str> = exploration
+                .files
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim().trim_start_matches("- ");
+                    if trimmed.ends_with(".rs")
+                        || trimmed.ends_with(".py")
+                        || trimmed.ends_with(".ts")
+                        || trimmed.ends_with(".go")
+                        || trimmed.contains("src/")
+                    {
+                        // Extract just the filename/path portion
+                        Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
+                    } else {
+                        None
+                    }
+                })
+                .take(10)
+                .collect();
+
+            if file_names.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
+                     Check for breaking changes to public APIs.",
+                    file_names.join(", ")
+                )
+            }
+        } else {
+            String::new()
+        };
 
         let mut prompt_parts = Vec::new();
 
@@ -357,54 +578,106 @@ impl CodeStrategy {
             ));
         }
 
-        let full_prompt = prompt_parts.join("\n\n");
-
-        let params = serde_json::json!({
-            "prompt": full_prompt,
-            "context": contract.context,
-            "files": exploration.files,
-        });
-
-        tracing::info!(tool = coding_tool_name, "EXECUTE: calling coding tool");
-        let result = tool.execute(docker, &params).await?;
-
-        if result.success {
-            tracing::info!(tool = coding_tool_name, "EXECUTE: coding tool succeeded");
-            return Ok(result.output);
+        if !ripple_section.is_empty() {
+            prompt_parts.push(ripple_section);
         }
 
-        tracing::warn!(
-            tool = coding_tool_name,
-            "EXECUTE: coding tool failed, attempting retry"
-        );
+        let full_prompt = prompt_parts.join("\n\n");
+        let mut failures: Vec<String> = Vec::new();
 
-        let retry_messages = vec![
-            Message::system(
-                "You are helping with a coding task. The coding tool failed. \
-                 Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
-            ),
-            Message::user(&format!(
-                "Original prompt:\n{}\n\nError output:\n{}\n\n\
-                 Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
-                full_prompt, result.output
-            )),
-        ];
+        for (idx, &tool_name) in candidates.iter().enumerate() {
+            if tool_name == "claude_code" && std::env::var_os("CLAUDECODE").is_some() {
+                let msg = "Skipping claude_code: running inside a Claude Code session";
+                tracing::warn!("{}", msg);
+                failures.push(format!("{}: {}", tool_name, msg));
+                continue;
+            }
 
-        let revised_prompt = llm.chat(&retry_messages).await?;
+            let tool = match tools.get(tool_name) {
+                Some(t) => t,
+                None => {
+                    failures.push(format!("{}: not available", tool_name));
+                    continue;
+                }
+            };
 
-        let retry_params = serde_json::json!({
-            "prompt": revised_prompt,
-            "context": format!(
-                "{}\n\nPrevious attempt failed with:\n{}",
-                contract.context, result.output
-            ),
-            "files": exploration.files,
-        });
+            let params = serde_json::json!({
+                "prompt": full_prompt,
+                "context": contract.context,
+                "files": exploration.files,
+            });
 
-        tracing::info!(tool = coding_tool_name, "EXECUTE: retrying with revised prompt");
-        let retry_result = tool.execute(docker, &retry_params).await?;
+            tracing::info!(tool = tool_name, "EXECUTE: calling coding tool");
+            let result = match tool.execute(docker, &params).await {
+                Ok(r) => r,
+                Err(e) => {
+                    failures.push(format!("{}: {}", tool_name, e));
+                    continue;
+                }
+            };
 
-        Ok(retry_result.output)
+            if result.success {
+                tracing::info!(tool = tool_name, "EXECUTE: coding tool succeeded");
+                return Ok(result.output);
+            }
+
+            failures.push(format!(
+                "{}: {}",
+                tool_name,
+                lf_truncate(&result.output, 250)
+            ));
+
+            // On the last candidate, try one prompt rewrite retry before failing.
+            if allow_retry_rewrite && idx + 1 == candidates.len() {
+                tracing::warn!(
+                    tool = tool_name,
+                    "EXECUTE: coding tool failed, attempting retry"
+                );
+                let retry_messages = vec![
+                    Message::system(
+                        "You are helping with a coding task. The coding tool failed. \
+                         Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
+                    ),
+                    Message::user(&format!(
+                        "Original prompt:\n{}\n\nError output:\n{}\n\n\
+                         Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
+                        full_prompt, result.output
+                    )),
+                ];
+
+                let revised_prompt = llm.chat(&retry_messages).await?;
+                let retry_params = serde_json::json!({
+                    "prompt": revised_prompt,
+                    "context": format!(
+                        "{}\n\nPrevious attempt failed with:\n{}",
+                        contract.context, result.output
+                    ),
+                    "files": exploration.files,
+                });
+
+                tracing::info!(tool = tool_name, "EXECUTE: retrying with revised prompt");
+                match tool.execute(docker, &retry_params).await {
+                    Ok(retry_result) if retry_result.success => return Ok(retry_result.output),
+                    Ok(retry_result) => {
+                        failures.push(format!(
+                            "{} (retry): {}",
+                            tool_name,
+                            lf_truncate(&retry_result.output, 250)
+                        ));
+                    }
+                    Err(e) => failures.push(format!("{} (retry): {}", tool_name, e)),
+                }
+            }
+        }
+
+        Err(AthenaError::Tool(format!(
+            "All coding CLI tools failed.\n{}",
+            failures
+                .iter()
+                .map(|f| format!("- {}", f))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )))
     }
 
     // ── VERIFY: native path ──────────────────────────────────────────
@@ -419,9 +692,15 @@ impl CodeStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let system_prompt = build_verify_prompt_native(contract, exec_result);
-        let schemas = phase_schemas(tools, VERIFY_TOOLS);
+        let verify_tools = if contract.test_generation {
+            VERIFY_WITH_TESTS_TOOLS
+        } else {
+            VERIFY_TOOLS
+        };
+        let schemas = phase_schemas(tools, verify_tools);
 
         let mut history: Vec<ChatMessage> = vec![
             ChatMessage::System(system_prompt),
@@ -464,15 +743,20 @@ impl CodeStrategy {
             }
 
             if !tool_calls.is_empty() {
-                let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+                let text = if text_accum.is_empty() {
+                    None
+                } else {
+                    Some(text_accum)
+                };
                 history.push(ChatMessage::Assistant {
                     content: text,
                     tool_calls: Some(tool_calls.clone()),
                 });
 
                 // Split into allowed and disallowed tool calls
-                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls.iter()
-                    .partition(|tc| VERIFY_TOOLS.contains(&tc.name.as_str()));
+                let (allowed, disallowed): (Vec<_>, Vec<_>) = tool_calls
+                    .iter()
+                    .partition(|tc| verify_tools.contains(&tc.name.as_str()));
 
                 for tc in &disallowed {
                     history.push(ChatMessage::Tool {
@@ -480,7 +764,7 @@ impl CodeStrategy {
                         content: format!(
                             "Tool '{}' is not allowed in the verification phase. Use only: {}",
                             tc.name,
-                            VERIFY_TOOLS.join(", ")
+                            verify_tools.join(", ")
                         ),
                     });
                 }
@@ -489,16 +773,21 @@ impl CodeStrategy {
                 for tc in &allowed {
                     send_status(status_tx, &format!("Verifying: {} ...", tc.name)).await;
                 }
-                let futs: Vec<_> = allowed.iter().map(|tc| async move {
-                    let json = serde_json::json!({
-                        "tool": tc.name,
-                        "params": tc.arguments,
-                    });
-                    let result = executor
-                        .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                        .await;
-                    (*tc, result)
-                }).collect();
+                let futs: Vec<_> = allowed
+                    .iter()
+                    .map(|tc| async move {
+                        let json = serde_json::json!({
+                            "tool": tc.name,
+                            "params": tc.arguments,
+                        });
+                        let result = executor
+                            .execute_tool(
+                                &tc.name, &json, tools, docker, confirmer, status_tx, trace,
+                            )
+                            .await;
+                        (*tc, result)
+                    })
+                    .collect();
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
@@ -539,8 +828,14 @@ impl CodeStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
-        let system_prompt = build_verify_prompt(contract, tools, exec_result);
+        let verify_tools = if contract.test_generation {
+            VERIFY_WITH_TESTS_TOOLS
+        } else {
+            VERIFY_TOOLS
+        };
+        let system_prompt = build_verify_prompt(contract, tools, exec_result, verify_tools);
         let mut history = vec![
             Message::system(&system_prompt),
             Message::user(
@@ -565,11 +860,11 @@ impl CodeStrategy {
 
             let tool_name = json["tool"].as_str().unwrap_or("");
 
-            if !VERIFY_TOOLS.contains(&tool_name) {
+            if !verify_tools.contains(&tool_name) {
                 history.push(Message::user(&format!(
                     "Tool '{}' is not allowed in the verification phase. Use only: {}",
                     tool_name,
-                    VERIFY_TOOLS.join(", ")
+                    verify_tools.join(", ")
                 )));
                 continue;
             }
@@ -577,10 +872,15 @@ impl CodeStrategy {
             send_status(status_tx, &format!("Verifying: {} ...", tool_name)).await;
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, status_tx, trace)
                 .await?;
 
-            tracing::debug!(step, tool = tool_name, path = "text", "VERIFY tool executed");
+            tracing::debug!(
+                step,
+                tool = tool_name,
+                path = "text",
+                "VERIFY tool executed"
+            );
             history.push(Message::user(&tool_output));
         }
 
@@ -590,6 +890,11 @@ impl CodeStrategy {
         let response = llm.chat(&history).await?;
         Ok(response)
     }
+}
+
+fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
+    let context = contract.context.to_lowercase();
+    context.contains("[benchmark_fast_cli]") || context.contains("[eval_fast_cli]")
 }
 
 /// Build tool schemas filtered to only the tools allowed in a given phase.
@@ -725,7 +1030,7 @@ INSTRUCTIONS:
 - Do NOT wrap JSON in markdown code blocks. Output raw JSON only when calling a tool.
 - When you have enough context, output a structured plan as a JSON object:
   {{"plan": "<step-by-step plan for the coding task>", "context": "<what you learned about the codebase>", "files": "<key file paths and relevant excerpts>"}}
-- This plan will be passed to a coding agent (Claude Code CLI) that will execute it.
+- This plan will be passed to a coding CLI agent that will execute it.
 - Be thorough but efficient — you have at most {max_steps} exploration steps."#,
         soul = soul_section,
         context = contract.context,
@@ -746,6 +1051,18 @@ fn build_verify_prompt_native(contract: &TaskContract, exec_result: &str) -> Str
         exec_result.to_string()
     };
 
+    let test_gen_section = if contract.test_generation {
+        r#"
+- IMPORTANT: You have write access in this verification phase.
+- After reading the diff of changes, write focused #[test] functions that cover the new/modified behavior.
+- Place tests in the appropriate test module (e.g., `#[cfg(test)] mod tests` block in the same file).
+- Limit test generation to at most 3 test files and 500 lines total.
+- Run the tests with `test_runner` to confirm they pass.
+- If tests fail, fix the IMPLEMENTATION (not the tests) and re-run."#
+    } else {
+        ""
+    };
+
     format!(
         r#"You are verifying the result of a coding task.
 
@@ -756,16 +1073,32 @@ CODING TOOL OUTPUT:
 
 INSTRUCTIONS:
 - Use your tools to read modified files and confirm changes are correct.
-- Run compilation checks (e.g., cargo check) or tests if appropriate.
+- Run compilation checks (e.g., cargo check) or tests if appropriate.{test_gen}
 - When done verifying, respond with a plain-text summary of what was accomplished and any issues found.
 - Be concise. Focus on correctness, not style."#,
         goal = contract.goal,
         result = result_display,
+        test_gen = test_gen_section,
     )
 }
 
-fn build_verify_prompt(contract: &TaskContract, tools: &ToolRegistry, exec_result: &str) -> String {
-    let tool_descs: String = VERIFY_TOOLS
+/// Truncate a string at a UTF-8 boundary for Langfuse output fields.
+fn lf_truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
+    }
+}
+
+fn build_verify_prompt(
+    contract: &TaskContract,
+    tools: &ToolRegistry,
+    exec_result: &str,
+    verify_tools: &[&str],
+) -> String {
+    let tool_descs: String = verify_tools
         .iter()
         .filter_map(|&name| tools.get(name))
         .map(|t| format!("- {}", t.description()))
@@ -782,6 +1115,15 @@ fn build_verify_prompt(contract: &TaskContract, tools: &ToolRegistry, exec_resul
         exec_result.to_string()
     };
 
+    let test_gen_section = if contract.test_generation {
+        r#"
+- IMPORTANT: You have write access in this verification phase.
+- After reviewing the diff, add focused #[test] cases and run them with `test_runner`.
+- If tests fail, fix the implementation (not the tests) and re-run."#
+    } else {
+        ""
+    };
+
     format!(
         r#"You are verifying the result of a coding task.
 
@@ -796,11 +1138,12 @@ AVAILABLE TOOLS:
 INSTRUCTIONS:
 - To use a tool, respond with ONLY a JSON object: {{"tool": "<name>", "params": {{...}}}}
 - Read modified files to confirm changes are correct.
-- Run compilation checks (e.g., cargo check) or tests if appropriate.
+- Run compilation checks (e.g., cargo check) or tests if appropriate.{test_gen}
 - When done verifying, respond with a plain-text summary of what was accomplished and any issues found.
 - Be concise. Focus on correctness, not style."#,
         goal = contract.goal,
         result = result_display,
         tools = tool_descs,
+        test_gen = test_gen_section,
     )
 }

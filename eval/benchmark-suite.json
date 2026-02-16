@@ -1,0 +1,71 @@
+{
+  "name": "athena-core-v1",
+  "description": "Fixed benchmark suite for Athena mission lanes.",
+  "pass_threshold": 0.7,
+  "defaults": {
+    "ghost": "coder",
+    "lane": "delivery",
+    "risk": "medium",
+    "repo": "athena",
+    "wait_secs": 120,
+    "timeout_secs": 300,
+    "outcome_wait_secs": 180,
+    "test_command": "cargo test -q"
+  },
+  "tasks": [
+    {
+      "id": "delivery_mission_contract_note",
+      "lane": "delivery",
+      "risk": "low",
+      "goal": "Update docs/mission-contract.md by adding a section titled '## Eval Harness Note' with one bullet '- Benchmark run validated by eval harness.' Keep edits minimal and do not modify other files.",
+      "expect": {
+        "max_changed_files": 1,
+        "changed_files_allow": [
+          "docs/mission-contract.md"
+        ],
+        "must_contain": [
+          {
+            "file": "docs/mission-contract.md",
+            "text": "## Eval Harness Note"
+          },
+          {
+            "file": "docs/mission-contract.md",
+            "text": "Benchmark run validated by eval harness."
+          }
+        ]
+      }
+    },
+    {
+      "id": "delivery_eval_smoke_doc",
+      "lane": "delivery",
+      "risk": "low",
+      "goal": "Create or update docs/eval-smoke.md with exactly 4 bullet lines describing benchmark execution readiness. Keep it concise and do not modify other files.",
+      "expect": {
+        "max_changed_files": 1,
+        "changed_files_allow": [
+          "docs/eval-smoke.md"
+        ],
+        "must_contain": [
+          {
+            "file": "docs/eval-smoke.md",
+            "text": "- "
+          }
+        ]
+      }
+    },
+    {
+      "id": "self_improvement_hotspot_analysis",
+      "ghost": "scout",
+      "lane": "self_improvement",
+      "risk": "medium",
+      "test_command": "",
+      "goal": "Analyze this repository and return exactly 3 bullets. Each bullet must contain one file path and one maintainability risk reason. Do not edit files.",
+      "expect": {
+        "no_file_changes": true,
+        "response_patterns": [
+          "(?m)^[-*] .+"
+        ]
+      }
+    }
+  ]
+}

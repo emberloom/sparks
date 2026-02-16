@@ -1,0 +1,46 @@
+name: eval-harness-smoke
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  harness-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build CI config
+        run: |
+          cat > /tmp/athena-ci.toml <<'EOF'
+          [db]
+          path = "/tmp/athena-ci.db"
+          EOF
+
+      - name: Validate eval scripts
+        run: |
+          python3 -m py_compile scripts/eval_harness.py scripts/eval_dashboard.py scripts/mock_athena_dispatch.py
+
+      - name: Run eval harness smoke suite
+        run: |
+          python3 scripts/eval_harness.py \
+            --suite eval/benchmark-mini-ci.json \
+            --config /tmp/athena-ci.toml \
+            --athena-bin scripts/mock_athena_dispatch.py \
+            --no-use-worktree \
+            --history-file /tmp/athena-history.jsonl
+
+      - name: Show latest eval report
+        run: |
+          ls -lt eval/results | head -n 5
+          latest="$(ls -t eval/results/eval-*.md | head -n 1)"
+          echo "Latest report: $latest"
+          cat "$latest"

@@ -72,6 +72,55 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     INSERT OR IGNORE INTO mood_state (id) VALUES (1);",
+    // v9: tool usage tracking — one row per tool, aggregated stats
+    "CREATE TABLE IF NOT EXISTS tool_usage (
+        tool_name TEXT PRIMARY KEY,
+        invocation_count INTEGER NOT NULL DEFAULT 0,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_used TEXT,
+        avg_duration_ms REAL NOT NULL DEFAULT 0.0,
+        last_error TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );",
+    // v10: mission KPI snapshots (lane/repo/risk segmented trend history)
+    "CREATE TABLE IF NOT EXISTS kpi_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lane TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        risk_tier TEXT NOT NULL,
+        captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+        task_success_rate REAL NOT NULL,
+        verification_pass_rate REAL NOT NULL,
+        rollback_rate REAL NOT NULL,
+        mean_time_to_fix_secs REAL,
+        tasks_started INTEGER NOT NULL,
+        tasks_succeeded INTEGER NOT NULL,
+        tasks_failed INTEGER NOT NULL,
+        verifications_total INTEGER NOT NULL,
+        verifications_passed INTEGER NOT NULL,
+        rollbacks INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_kpi_snapshots_lane_repo_time
+        ON kpi_snapshots(lane, repo, captured_at DESC);",
+    // v11: autonomous task outcomes with lane/risk tagging for KPI attribution
+    "CREATE TABLE IF NOT EXISTS autonomous_task_outcomes (
+        task_id TEXT PRIMARY KEY,
+        lane TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        risk_tier TEXT NOT NULL,
+        ghost TEXT,
+        goal TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'started',
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        verification_total INTEGER NOT NULL DEFAULT 0,
+        verification_passed INTEGER NOT NULL DEFAULT 0,
+        rolled_back INTEGER NOT NULL DEFAULT 0,
+        error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_outcomes_lane_repo_risk_time
+        ON autonomous_task_outcomes(lane, repo, risk_tier, started_at DESC);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

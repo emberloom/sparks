@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 
 use crate::confirm::Confirmer;
+use crate::core::CoreEvent;
 use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
-use crate::core::CoreEvent;
-use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall};
+use crate::langfuse::ActiveTrace;
+use crate::llm::{
+    self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
+};
 use crate::tools::ToolRegistry;
 
 use super::{LoopStrategy, StatusSender, TaskContract};
@@ -24,13 +27,18 @@ impl LoopStrategy for ReactStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         if llm.supports_tools() {
-            self.run_native(contract, tools, docker, llm, max_steps, executor, confirmer, status_tx)
-                .await
+            self.run_native(
+                contract, tools, docker, llm, max_steps, executor, confirmer, status_tx, trace,
+            )
+            .await
         } else {
-            self.run_text_fallback(contract, tools, docker, llm, max_steps, executor, confirmer)
-                .await
+            self.run_text_fallback(
+                contract, tools, docker, llm, max_steps, executor, confirmer, trace,
+            )
+            .await
         }
     }
 }
@@ -48,6 +56,7 @@ impl ReactStrategy {
         executor: &Executor,
         confirmer: &dyn Confirmer,
         status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let system_prompt = build_system_prompt_native(contract);
         let schemas = tools.tool_schemas();
@@ -59,9 +68,13 @@ impl ReactStrategy {
 
         let mut budget = TokenBudget::new(llm.context_window());
         let use_streaming = llm.supports_streaming();
+        let model_name = llm.provider_name();
 
         for step in 0..max_steps {
             tracing::debug!(step, path = "native", stream = use_streaming, "ReAct step");
+
+            let gen =
+                trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));
 
             if use_streaming {
                 // Streaming path: consume StreamEvents
@@ -90,6 +103,22 @@ impl ReactStrategy {
                     }
                 }
 
+                // End generation with response info
+                if let Some(g) = gen {
+                    let (pt, ct) = usage
+                        .as_ref()
+                        .map(|u| (u.prompt_tokens, u.completion_tokens))
+                        .unwrap_or((0, 0));
+                    let out = if !tool_calls.is_empty() {
+                        let names: Vec<&str> =
+                            tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                        format!("tools: {}", names.join(", "))
+                    } else {
+                        lf_truncate(&text_accum, 500)
+                    };
+                    g.end(Some(&out), pt, ct);
+                }
+
                 // Record token usage
                 if let Some(ref u) = usage {
                     budget.record_usage(u);
@@ -109,23 +138,32 @@ impl ReactStrategy {
                 }
 
                 if !tool_calls.is_empty() {
-                    let text = if text_accum.is_empty() { None } else { Some(text_accum) };
+                    let text = if text_accum.is_empty() {
+                        None
+                    } else {
+                        Some(text_accum)
+                    };
                     history.push(ChatMessage::Assistant {
                         content: text,
                         tool_calls: Some(tool_calls.clone()),
                     });
 
                     // Execute tool calls in parallel
-                    let futs: Vec<_> = tool_calls.iter().map(|tc| async move {
-                        let json = serde_json::json!({
-                            "tool": tc.name,
-                            "params": tc.arguments,
-                        });
-                        let result = executor
-                            .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                            .await;
-                        (tc, result)
-                    }).collect();
+                    let futs: Vec<_> = tool_calls
+                        .iter()
+                        .map(|tc| async move {
+                            let json = serde_json::json!({
+                                "tool": tc.name,
+                                "params": tc.arguments,
+                            });
+                            let result = executor
+                                .execute_tool(
+                                    &tc.name, &json, tools, docker, confirmer, status_tx, trace,
+                                )
+                                .await;
+                            (tc, result)
+                        })
+                        .collect();
 
                     let results = futures::future::join_all(futs).await;
                     for (tc, result) in results {
@@ -144,6 +182,23 @@ impl ReactStrategy {
             } else {
                 // Non-streaming fallback path
                 let (response, usage) = llm.chat_with_tools(&history, &schemas).await?;
+
+                // End generation
+                if let Some(g) = gen {
+                    let (pt, ct) = usage
+                        .as_ref()
+                        .map(|u| (u.prompt_tokens, u.completion_tokens))
+                        .unwrap_or((0, 0));
+                    let out = match &response {
+                        ChatResponse::ToolCalls { tool_calls, .. } => {
+                            let names: Vec<&str> =
+                                tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                            format!("tools: {}", names.join(", "))
+                        }
+                        ChatResponse::Text(t) => lf_truncate(t, 500),
+                    };
+                    g.end(Some(&out), pt, ct);
+                }
 
                 if let Some(ref u) = usage {
                     budget.record_usage(u);
@@ -169,16 +224,21 @@ impl ReactStrategy {
                             tool_calls: Some(tool_calls.clone()),
                         });
 
-                        let futs: Vec<_> = tool_calls.iter().map(|tc| async move {
-                            let json = serde_json::json!({
-                                "tool": tc.name,
-                                "params": tc.arguments,
-                            });
-                            let result = executor
-                                .execute_tool(&tc.name, &json, tools, docker, confirmer)
-                                .await;
-                            (tc, result)
-                        }).collect();
+                        let futs: Vec<_> = tool_calls
+                            .iter()
+                            .map(|tc| async move {
+                                let json = serde_json::json!({
+                                    "tool": tc.name,
+                                    "params": tc.arguments,
+                                });
+                                let result = executor
+                                    .execute_tool(
+                                        &tc.name, &json, tools, docker, confirmer, status_tx, trace,
+                                    )
+                                    .await;
+                                (tc, result)
+                            })
+                            .collect();
 
                         let results = futures::future::join_all(futs).await;
                         for (tc, result) in results {
@@ -211,17 +271,27 @@ impl ReactStrategy {
         max_steps: usize,
         executor: &Executor,
         confirmer: &dyn Confirmer,
+        trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let system_prompt = build_system_prompt(contract, tools);
         let mut history: Vec<Message> = vec![
             Message::system(&system_prompt),
             Message::user(&contract.goal),
         ];
+        let model_name = llm.provider_name();
 
         for step in 0..max_steps {
             tracing::debug!(step, path = "text", "ReAct step");
 
+            let gen =
+                trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));
+
             let response = llm.chat(&history).await?;
+
+            if let Some(g) = gen {
+                g.end(Some(&lf_truncate(&response, 500)), 0, 0);
+            }
+
             history.push(Message::assistant(&response));
 
             // Try to extract a tool call from the response
@@ -237,7 +307,7 @@ impl ReactStrategy {
             let tool_name = json["tool"].as_str().unwrap_or("");
 
             let tool_output = executor
-                .execute_tool(tool_name, &json, tools, docker, confirmer)
+                .execute_tool(tool_name, &json, tools, docker, confirmer, None, trace)
                 .await?;
 
             tracing::debug!(step, tool = tool_name, path = "text", "Tool executed");
@@ -245,6 +315,16 @@ impl ReactStrategy {
         }
 
         Err(AthenaError::StepLimitExceeded(max_steps))
+    }
+}
+
+/// Truncate a string at a UTF-8 boundary for Langfuse output fields.
+fn lf_truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -309,7 +389,7 @@ fn build_system_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String 
     };
 
     format!(
-r#"{}You are an autonomous agent executing a task inside a Docker container.
+        r#"{}You are an autonomous agent executing a task inside a Docker container.
 
 CONTEXT: {}
 
@@ -352,7 +432,10 @@ pub fn compress_history(history: &mut Vec<ChatMessage>) {
     let mut summary_parts: Vec<String> = Vec::new();
     for msg in &history[preserve_head..middle_end] {
         match msg {
-            ChatMessage::Assistant { tool_calls: Some(tcs), .. } => {
+            ChatMessage::Assistant {
+                tool_calls: Some(tcs),
+                ..
+            } => {
                 let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
                 summary_parts.push(format!("Called: {}", names.join(", ")));
             }
@@ -360,7 +443,10 @@ pub fn compress_history(history: &mut Vec<ChatMessage>) {
                 let preview: String = content.chars().take(80).collect();
                 summary_parts.push(format!("Result: {}", preview));
             }
-            ChatMessage::Assistant { content: Some(text), .. } => {
+            ChatMessage::Assistant {
+                content: Some(text),
+                ..
+            } => {
                 let preview: String = text.chars().take(80).collect();
                 summary_parts.push(format!("Said: {}", preview));
             }
@@ -380,8 +466,5 @@ pub fn compress_history(history: &mut Vec<ChatMessage>) {
     history.push(ChatMessage::User(summary));
     history.extend(tail);
 
-    tracing::debug!(
-        new_len = history.len(),
-        "History compressed"
-    );
+    tracing::debug!(new_len = history.len(), "History compressed");
 }

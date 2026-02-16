@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::knobs::SharedKnobs;
+use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
@@ -59,6 +60,7 @@ pub fn spawn_heartbeat_loop(
     memory: Arc<MemoryStore>,
     mood: Arc<MoodState>,
     soul_file: Option<String>,
+    langfuse: SharedLangfuse,
 ) {
     tokio::spawn(async move {
         loop {
@@ -91,11 +93,15 @@ pub fn spawn_heartbeat_loop(
             // 1. Load HEARTBEAT.md items and sample a subset
             let items = load_heartbeat_items(&soul_file);
             let sampled = if items.is_empty() {
-                vec!["Reflect on recent conversations and whether anything needs follow-up.".to_string()]
+                vec![
+                    "Reflect on recent conversations and whether anything needs follow-up."
+                        .to_string(),
+                ]
             } else {
                 let sample_count = (items.len() / 3).max(1);
                 let indices = randomness::sample_indices(sample_count, items.len());
-                let mut sampled: Vec<String> = indices.into_iter().map(|i| items[i].clone()).collect();
+                let mut sampled: Vec<String> =
+                    indices.into_iter().map(|i| items[i].clone()).collect();
                 sampled.push("Wildcard: think about something unexpected or creative.".to_string());
                 observer.log(
                     ObserverCategory::Heartbeat,
@@ -147,27 +153,59 @@ Based on all this, do you have anything worth sharing? If yes, write a brief, na
                 mood_desc, initiatives, curiosity_memories
             );
 
+            let lf_trace = langfuse.as_ref().map(|lf| {
+                ActiveTrace::start(
+                    lf.clone(),
+                    "funnel3:heartbeat",
+                    None,
+                    None,
+                    None,
+                    vec!["funnel3", "heartbeat"],
+                )
+            });
+            let model_name = llm.provider_name();
+            let gen = lf_trace
+                .as_ref()
+                .map(|t| t.generation("reflect", model_name, None));
+
             let messages = vec![Message::user(&prompt)];
             match llm.chat(&messages).await {
                 Ok(response) => {
                     let trimmed = response.trim();
+                    if let Some(g) = gen {
+                        let preview = if trimmed.len() > 500 {
+                            &trimmed[..trimmed.floor_char_boundary(500)]
+                        } else {
+                            trimmed
+                        };
+                        g.end(Some(preview), 0, 0);
+                    }
                     if crate::proactive::is_refusal(trimmed) {
                         observer.log(
                             ObserverCategory::Heartbeat,
                             "Heartbeat: nothing to say (suppressed)",
                         );
+                        if let Some(t) = lf_trace {
+                            t.end(Some("suppressed"));
+                        }
                     } else {
                         let _ = memory.store("heartbeat", trimmed, None);
-                        let pulse = Pulse::new(
-                            PulseSource::Heartbeat,
-                            Urgency::Low,
-                            trimmed.to_string(),
-                        );
+                        let pulse =
+                            Pulse::new(PulseSource::Heartbeat, Urgency::Low, trimmed.to_string());
                         pulse_bus.send(pulse);
+                        if let Some(t) = lf_trace {
+                            t.end(Some("pulse_emitted"));
+                        }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Heartbeat LLM call failed: {}", e);
+                    if let Some(g) = gen {
+                        g.end(Some(&format!("error: {}", e)), 0, 0);
+                    }
+                    if let Some(t) = lf_trace {
+                        t.end(Some(&format!("error: {}", e)));
+                    }
                 }
             }
         }

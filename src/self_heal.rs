@@ -29,8 +29,9 @@ pub fn attempt_fix(
                         "Verify the code compiles with `cargo check` after the change.".to_string(),
                     ],
                     soul: Some("You are a senior Rust developer ghost, specialized in fixing bugs and improving code robustness. Your goal is to apply a targeted fix to resolve a tool timeout issue.".to_string()),
-                    tools_doc: None, // Let the default be used
+                    tools_doc: None,
                     cli_tool_preference: None,
+                    test_generation: false,
                 })
             } else if original_tool_name == "file_edit"
                 && (message.contains("not found") || message.contains("must be unique"))
@@ -76,6 +77,7 @@ pub fn attempt_fix(
                     ),
                     tools_doc: None,
                     cli_tool_preference: None,
+                    test_generation: false,
                 })
             } else {
                 None
@@ -83,4 +85,53 @@ pub fn attempt_fix(
         }
         _ => None,
     }
+}
+
+/// Analyzes test output and attempts to generate a corrective task.
+/// Called when the VERIFY phase detects test failures.
+pub fn attempt_test_fix(
+    test_output: &str,
+    original_goal: &str,
+) -> Option<TaskContract> {
+    if !test_output.contains("test result: FAILED")
+        && !test_output.contains("FAILED")
+        && !test_output.contains("error[E")
+    {
+        return None;
+    }
+
+    let context = format!(
+        "Tests failed after implementing: {}\n\nTest output:\n{}",
+        original_goal,
+        if test_output.len() > 4000 {
+            &test_output[..4000]
+        } else {
+            test_output
+        }
+    );
+
+    let goal = "Tests are failing after a code change. Analyze the test output, \
+        identify the root cause, and fix the IMPLEMENTATION (not the tests). \
+        The tests define the expected behavior — the code must conform to them. \
+        After fixing, run the tests again to confirm they pass."
+        .to_string();
+
+    Some(TaskContract {
+        context,
+        goal,
+        constraints: vec![
+            "Fix the implementation, NOT the tests.".to_string(),
+            "Run tests after fixing to verify.".to_string(),
+            "Keep changes minimal and focused on the failing tests.".to_string(),
+        ],
+        soul: Some(
+            "You are a senior developer ghost specialized in debugging test failures. \
+             Analyze test output carefully, identify root causes in the implementation, \
+             and apply targeted fixes."
+                .to_string(),
+        ),
+        tools_doc: None,
+        cli_tool_preference: None,
+        test_generation: false,
+    })
 }

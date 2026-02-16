@@ -1,0 +1,144 @@
+# Athena Eval Harness
+
+Date: 2026-02-15
+
+## Purpose
+
+Fixed benchmark gate for "is Athena getting better?".
+
+It runs a stable task suite end-to-end and scores:
+
+- plan quality
+- execution success
+- tests pass
+- diff quality
+
+## Suite
+
+Default suite file:
+
+- `eval/benchmark-suite.json`
+
+Current lanes covered:
+
+- `delivery`
+- `self_improvement`
+
+CI smoke suite:
+
+- `eval/benchmark-mini-ci.json` (uses `scripts/mock_athena_dispatch.py`)
+
+## Run
+
+```bash
+python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --athena-bin target/debug/athena
+```
+
+Optional:
+
+```bash
+python3 scripts/eval_harness.py --fail-fast
+```
+
+Pin a specific coding CLI backend for this run:
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex
+python3 scripts/eval_harness.py --cli-tool claude_code
+python3 scripts/eval_harness.py --cli-tool opencode
+```
+
+Optional model override (applies to selected CLI tool):
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex --cli-model gpt-5-codex
+```
+
+Optional dispatch context and CLI timeout cap:
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex --dispatch-context "[benchmark_fast_cli]" --cli-timeout-secs 300
+```
+
+Recommended isolation mode (default):
+
+- each task runs in a disposable git worktree
+- no direct edits to your current working tree
+- stale disposable worktrees are auto-cleaned on startup (default: older than 6 hours)
+
+Disable if needed:
+
+```bash
+python3 scripts/eval_harness.py --no-use-worktree
+```
+
+Cleanup controls:
+
+```bash
+python3 scripts/eval_harness.py --no-cleanup-worktrees
+python3 scripts/eval_harness.py --stale-worktree-hours 24
+```
+
+Quick per-CLI comparison loop:
+
+```bash
+for tool in codex claude_code opencode; do
+  python3 scripts/eval_harness.py --cli-tool "$tool" || true
+done
+```
+
+Or use the matrix runner (recommended for all 3 tools):
+
+```bash
+python3 scripts/eval_cli_matrix.py --suite eval/benchmark-cli-smoke.json
+```
+
+Matrix output:
+
+- `eval/results/cli-matrix-<timestamp>.json`
+- `eval/results/cli-matrix-<timestamp>.md`
+
+## Output
+
+Reports are written to:
+
+- `eval/results/eval-<timestamp>.json`
+- `eval/results/eval-<timestamp>.md`
+- `eval/results/history.jsonl` (append-only trend history)
+
+And console prints gate result:
+
+- `gate=PASS` or `gate=FAIL`
+
+## Gate Rule
+
+Gate passes when:
+
+- overall weighted score `>= pass_threshold` (suite-level)
+- all tasks have `exec_success = 1.0`
+
+## Notes
+
+- Default behavior uses disposable worktrees per task.
+- Keep benchmark tasks stable and explicit.
+- Prefer small, real backlog tasks with clear acceptance criteria.
+- Task outcome scoring waits for terminal statuses (`succeeded|failed|rolled_back`) with polling.
+
+## Dashboard
+
+Render combined KPI + eval trend dashboard:
+
+```bash
+python3 scripts/eval_dashboard.py --config config.toml --repo athena
+```
+
+Output:
+
+- `eval/results/dashboard.md`
+- includes KPI snapshot with: task success rate, verification pass rate, rollback rate, and mean time to fix (MTTF)
+
+## CI
+
+GitHub Actions workflow:
+
+- `.github/workflows/eval-harness.yml`

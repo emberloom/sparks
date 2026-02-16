@@ -1,0 +1,28 @@
+{
+  "name": "athena-ci-mini",
+  "description": "CI smoke benchmark for eval harness mechanics.",
+  "pass_threshold": 0.7,
+  "defaults": {
+    "ghost": "coder",
+    "lane": "delivery",
+    "risk": "low",
+    "repo": "athena",
+    "wait_secs": 5,
+    "timeout_secs": 30,
+    "outcome_wait_secs": 5,
+    "test_command": ""
+  },
+  "tasks": [
+    {
+      "id": "ci_mock_dispatch_smoke",
+      "goal": "Smoke-run eval harness with deterministic mock dispatch. Do not edit files.",
+      "expect": {
+        "no_file_changes": true,
+        "response_patterns": [
+          "PLAN:",
+          "EXECUTION:"
+        ]
+      }
+    }
+  ]
+}

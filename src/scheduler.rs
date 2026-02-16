@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::knobs::SharedKnobs;
+use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
@@ -36,14 +37,15 @@ impl Schedule {
             }
             Self::Interval { every_secs, jitter } => {
                 let dur = randomness::jitter_interval(*every_secs, *jitter);
-                Some(now + chrono::Duration::from_std(dur).unwrap_or(chrono::Duration::seconds(*every_secs as i64)))
+                Some(
+                    now + chrono::Duration::from_std(dur)
+                        .unwrap_or(chrono::Duration::seconds(*every_secs as i64)),
+                )
             }
-            Self::Cron { expression } => {
-                match cron::Schedule::from_str(expression) {
-                    Ok(schedule) => schedule.upcoming(Utc).next(),
-                    Err(_) => None,
-                }
-            }
+            Self::Cron { expression } => match cron::Schedule::from_str(expression) {
+                Ok(schedule) => schedule.upcoming(Utc).next(),
+                Err(_) => None,
+            },
         }
     }
 
@@ -62,7 +64,9 @@ impl Schedule {
     pub fn from_db(schedule_type: &str, schedule_data: &str) -> Option<Self> {
         match schedule_type {
             "oneshot" => {
-                let at = DateTime::parse_from_rfc3339(schedule_data).ok()?.with_timezone(&Utc);
+                let at = DateTime::parse_from_rfc3339(schedule_data)
+                    .ok()?
+                    .with_timezone(&Utc);
                 Some(Self::OneShot { at })
             }
             "interval" => {
@@ -71,7 +75,9 @@ impl Schedule {
                 let jitter = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.1);
                 Some(Self::Interval { every_secs, jitter })
             }
-            "cron" => Some(Self::Cron { expression: schedule_data.to_string() }),
+            "cron" => Some(Self::Cron {
+                expression: schedule_data.to_string(),
+            }),
             _ => None,
         }
     }
@@ -98,6 +104,7 @@ pub struct CronEngine {
     pulse_bus: PulseBus,
     llm: Arc<dyn LlmProvider>,
     knobs: SharedKnobs,
+    langfuse: SharedLangfuse,
 }
 
 impl CronEngine {
@@ -107,16 +114,38 @@ impl CronEngine {
         pulse_bus: PulseBus,
         llm: Arc<dyn LlmProvider>,
         knobs: SharedKnobs,
+        langfuse: SharedLangfuse,
     ) -> Self {
-        Self { memory, observer, pulse_bus, llm, knobs }
+        Self {
+            memory,
+            observer,
+            pulse_bus,
+            llm,
+            knobs,
+            langfuse,
+        }
     }
 
     /// Create a new job in the database.
-    pub fn create_job(&self, name: &str, schedule: Schedule, prompt: &str, ghost: Option<&str>) -> crate::error::Result<String> {
+    pub fn create_job(
+        &self,
+        name: &str,
+        schedule: Schedule,
+        prompt: &str,
+        ghost: Option<&str>,
+    ) -> crate::error::Result<String> {
         let id = Uuid::new_v4().to_string();
         let (stype, sdata) = schedule.to_db();
         let next = schedule.next_run().map(|t| t.to_rfc3339());
-        self.memory.create_scheduled_job(&id, name, &stype, &sdata, ghost, prompt, next.as_deref())?;
+        self.memory.create_scheduled_job(
+            &id,
+            name,
+            &stype,
+            &sdata,
+            ghost,
+            prompt,
+            next.as_deref(),
+        )?;
         Ok(id)
     }
 
@@ -156,8 +185,14 @@ impl CronEngine {
                     Ok(jobs) if !jobs.is_empty() => {
                         this.observer.log(
                             ObserverCategory::CronTick,
-                            format!("Fired {} jobs: {}", jobs.len(),
-                                jobs.iter().map(|j| format!("\"{}\"", j.name)).collect::<Vec<_>>().join(", ")),
+                            format!(
+                                "Fired {} jobs: {}",
+                                jobs.len(),
+                                jobs.iter()
+                                    .map(|j| format!("\"{}\"", j.name))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
                         );
                         for job in jobs {
                             this.fire_job(&job).await;
@@ -173,10 +208,41 @@ impl CronEngine {
     }
 
     async fn fire_job(&self, job: &Job) {
+        let schedule_type = match &job.schedule {
+            Schedule::OneShot { .. } => "oneshot",
+            Schedule::Interval { .. } => "interval",
+            Schedule::Cron { .. } => "cron",
+        };
+
+        let lf_trace = self.langfuse.as_ref().map(|lf| {
+            ActiveTrace::start(
+                lf.clone(),
+                &format!("cron:{}", job.name),
+                None,
+                None,
+                Some(&job.prompt),
+                vec!["scheduling", "cron", schedule_type],
+            )
+        });
+
+        let model_name = self.llm.provider_name();
+        let gen = lf_trace
+            .as_ref()
+            .map(|t| t.generation("cron_llm", model_name, Some(&job.prompt)));
+
         let messages = vec![Message::user(&job.prompt)];
         match self.llm.chat(&messages).await {
             Ok(response) => {
                 let response_trimmed = response.trim().to_string();
+                if let Some(g) = gen {
+                    let preview = if response_trimmed.len() > 500 {
+                        &response_trimmed[..response_trimmed.floor_char_boundary(500)]
+                    } else {
+                        &response_trimmed
+                    };
+                    g.end(Some(preview), 0, 0);
+                }
+
                 let _ = self.memory.store("cron", &response_trimmed, None);
                 let pulse = Pulse::new(
                     PulseSource::CronJob(job.name.clone()),
@@ -185,15 +251,25 @@ impl CronEngine {
                 );
                 self.pulse_bus.send(pulse);
 
-                // Update next_run and last_run
                 let next = job.schedule.next_run().map(|t| t.to_rfc3339());
                 let now = Utc::now().to_rfc3339();
-                // For one-shot jobs, disable after firing
                 let disable = matches!(job.schedule, Schedule::OneShot { .. });
-                let _ = self.memory.update_job_run(&job.id, next.as_deref(), &now, disable);
+                let _ = self
+                    .memory
+                    .update_job_run(&job.id, next.as_deref(), &now, disable);
+
+                if let Some(t) = lf_trace {
+                    t.end(Some("completed"));
+                }
             }
             Err(e) => {
                 tracing::warn!("Cron job '{}' LLM call failed: {}", job.name, e);
+                if let Some(g) = gen {
+                    g.end(Some(&format!("error: {}", e)), 0, 0);
+                }
+                if let Some(t) = lf_trace {
+                    t.end(Some(&format!("error: {}", e)));
+                }
             }
         }
     }
