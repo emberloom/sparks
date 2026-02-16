@@ -1179,7 +1179,15 @@ impl Tool for DiffTool {
 // ── Coding CLI tools (host-executed) ────────────────────────────────
 
 const CLI_OUTPUT_LEN: usize = 16_000;
-const CLI_TIMEOUT_SECS: u64 = 3600; // 1 hour
+const CLI_TIMEOUT_SECS_DEFAULT: u64 = 3600; // 1 hour
+
+fn cli_timeout_secs() -> u64 {
+    std::env::var("ATHENA_CLI_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(CLI_TIMEOUT_SECS_DEFAULT)
+}
 
 /// Shared implementation for all coding CLI tools.
 /// Runs on the HOST (not in Docker) via tokio::process::Command.
@@ -1190,9 +1198,10 @@ async fn run_cli_tool(
     tool_name: &str,
 ) -> Result<ToolResult> {
     use tokio::process::Command;
+    let timeout_secs = cli_timeout_secs();
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(CLI_TIMEOUT_SECS),
+        std::time::Duration::from_secs(timeout_secs),
         Command::new(command)
             .args(args)
             .current_dir(workspace)
@@ -1227,7 +1236,7 @@ async fn run_cli_tool(
         }
         Err(_) => Ok(ToolResult {
             success: false,
-            output: format!("{}: timed out after {}s", tool_name, CLI_TIMEOUT_SECS),
+            output: format!("{}: timed out after {}s", tool_name, timeout_secs),
         }),
     }
 }

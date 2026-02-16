@@ -354,6 +354,8 @@ def run_task(
     task: dict[str, Any],
     cli_tool: str | None,
     cli_model: str | None,
+    dispatch_context: str | None,
+    cli_timeout_secs: int,
 ) -> TaskResult:
     merged = dict(defaults)
     merged.update(task)
@@ -371,6 +373,8 @@ def run_task(
 
     before = git_status_paths(repo)
     env = os.environ.copy()
+    if cli_timeout_secs > 0:
+        env["ATHENA_CLI_TIMEOUT_SECS"] = str(cli_timeout_secs)
 
     cmd = [
         str(athena_bin),
@@ -390,6 +394,8 @@ def run_task(
         "--repo",
         repo_name,
     ]
+    if dispatch_context:
+        cmd.extend(["--context", dispatch_context])
     if cli_tool:
         cmd.extend(["--cli-tool", cli_tool])
     if cli_model:
@@ -429,6 +435,10 @@ def run_task(
         notes.append(f"cli_tool={cli_tool}")
     if cli_model:
         notes.append(f"cli_model={cli_model}")
+    if dispatch_context:
+        notes.append(f"dispatch_context={dispatch_context}")
+    if cli_timeout_secs > 0:
+        notes.append(f"cli_timeout_secs={cli_timeout_secs}")
     notes.extend(diff_notes)
     if p.returncode != 0:
         notes.append(f"dispatch_exit={p.returncode}")
@@ -465,6 +475,8 @@ def write_reports(
     threshold: float,
     cli_tool: str | None,
     cli_model: str | None,
+    dispatch_context: str | None,
+    cli_timeout_secs: int,
 ) -> tuple[Path, Path, float, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -480,6 +492,8 @@ def write_reports(
         "overall_score": overall,
         "cli_tool": cli_tool,
         "cli_model": cli_model,
+        "dispatch_context": dispatch_context,
+        "cli_timeout_secs": cli_timeout_secs,
         "results": [r.__dict__ for r in results],
     }
     out_json.write_text(json.dumps(payload, indent=2))
@@ -493,6 +507,8 @@ def write_reports(
         f"- gate: {'PASS' if gate_ok else 'FAIL'}",
         f"- cli_tool: {cli_tool or 'default'}",
         f"- cli_model: {cli_model or 'default'}",
+        f"- dispatch_context: {dispatch_context or 'default'}",
+        f"- cli_timeout_secs: {cli_timeout_secs if cli_timeout_secs > 0 else 'default'}",
         "",
         "| task | lane | risk | status | overall | exec | tests | diff | plan |",
         "|---|---|---|---|---:|---:|---:|---:|---:|",
@@ -525,6 +541,8 @@ def append_history(
     results: list[TaskResult],
     cli_tool: str | None,
     cli_model: str | None,
+    dispatch_context: str | None,
+    cli_timeout_secs: int,
 ) -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -539,6 +557,8 @@ def append_history(
         ),
         "cli_tool": cli_tool,
         "cli_model": cli_model,
+        "dispatch_context": dispatch_context,
+        "cli_timeout_secs": cli_timeout_secs,
         "report_json": str(report_json),
         "report_md": str(report_md),
         "tasks": [
@@ -575,6 +595,17 @@ def parse_args() -> argparse.Namespace:
         "--cli-model",
         default=None,
         help="Optional model name to pass as runtime cli_model override for each dispatch.",
+    )
+    parser.add_argument(
+        "--dispatch-context",
+        default=None,
+        help="Optional dispatch context string applied to each task run.",
+    )
+    parser.add_argument(
+        "--cli-timeout-secs",
+        type=int,
+        default=0,
+        help="If >0, set ATHENA_CLI_TIMEOUT_SECS for each task run.",
     )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--max-tasks", type=int, default=0, help="Run only first N tasks (0 = all).")
@@ -639,7 +670,8 @@ def main() -> int:
         tasks = tasks[: args.max_tasks]
     print(
         f"run_config suite={suite.get('name')} tasks={len(tasks)} "
-        f"cli_tool={args.cli_tool or 'default'} cli_model={args.cli_model or 'default'}",
+        f"cli_tool={args.cli_tool or 'default'} cli_model={args.cli_model or 'default'} "
+        f"dispatch_context={args.dispatch_context or 'default'} cli_timeout_secs={args.cli_timeout_secs}",
         flush=True,
     )
 
@@ -669,6 +701,8 @@ def main() -> int:
                 task,
                 args.cli_tool,
                 args.cli_model,
+                args.dispatch_context,
+                args.cli_timeout_secs,
             )
         finally:
             if args.use_worktree and not args.keep_worktrees:
@@ -697,6 +731,8 @@ def main() -> int:
         threshold,
         args.cli_tool,
         args.cli_model,
+        args.dispatch_context,
+        args.cli_timeout_secs,
     )
     append_history(
         history_path=history_path,
@@ -710,6 +746,8 @@ def main() -> int:
         results=results,
         cli_tool=args.cli_tool,
         cli_model=args.cli_model,
+        dispatch_context=args.dispatch_context,
+        cli_timeout_secs=args.cli_timeout_secs,
     )
     print(f"gate={'PASS' if gate_ok else 'FAIL'} overall={overall:.2f}")
     return 0 if gate_ok else 1

@@ -54,6 +54,12 @@ Optional model override (applies to selected CLI tool):
 python3 scripts/eval_harness.py --cli-tool codex --cli-model gpt-5-codex
 ```
 
+Optional dispatch context and CLI timeout cap:
+
+```bash
+python3 scripts/eval_harness.py --cli-tool codex --dispatch-context "[benchmark_fast_cli]" --cli-timeout-secs 300
+```
+
 Recommended isolation mode (default):
 
 - each task runs in a disposable git worktree
@@ -80,6 +86,17 @@ for tool in codex claude_code opencode; do
   python3 scripts/eval_harness.py --cli-tool "$tool" || true
 done
 ```
+
+Or use the matrix runner (recommended for all 3 tools):
+
+```bash
+python3 scripts/eval_cli_matrix.py --suite eval/benchmark-cli-smoke.json
+```
+
+Matrix output:
+
+- `eval/results/cli-matrix-<timestamp>.json`
+- `eval/results/cli-matrix-<timestamp>.md`
 
 ## Output
 

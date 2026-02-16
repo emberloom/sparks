@@ -80,27 +80,39 @@ impl LoopStrategy for CodeStrategy {
         trace: Option<&ActiveTrace>,
     ) -> Result<String> {
         let use_native = llm.supports_tools();
+        let benchmark_fast = is_benchmark_fast_cli_mode(contract);
 
         // Phase 1: EXPLORE
-        tracing::info!("CodeStrategy: starting EXPLORE phase");
-        send_status(status_tx, "Exploring codebase...").await;
-        let explore_span = trace.map(|t| t.span("phase:explore", None));
-        let exploration = if use_native {
-            self.explore_native(
-                contract, tools, docker, llm, executor, confirmer, status_tx, trace,
-            )
-            .instrument(tracing::info_span!("explore"))
-            .await?
+        let exploration = if benchmark_fast {
+            tracing::info!("CodeStrategy: benchmark fast mode enabled, skipping EXPLORE");
+            send_status(status_tx, "Benchmark fast mode: skipping explore phase").await;
+            ExplorationResult {
+                plan: contract.goal.clone(),
+                context: String::new(),
+                files: String::new(),
+            }
         } else {
-            self.explore_text_fallback(
-                contract, tools, docker, llm, executor, confirmer, status_tx, trace,
-            )
-            .instrument(tracing::info_span!("explore"))
-            .await?
+            tracing::info!("CodeStrategy: starting EXPLORE phase");
+            send_status(status_tx, "Exploring codebase...").await;
+            let explore_span = trace.map(|t| t.span("phase:explore", None));
+            let exploration = if use_native {
+                self.explore_native(
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                )
+                .instrument(tracing::info_span!("explore"))
+                .await?
+            } else {
+                self.explore_text_fallback(
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                )
+                .instrument(tracing::info_span!("explore"))
+                .await?
+            };
+            if let Some(s) = explore_span {
+                s.end(Some(&lf_truncate(&exploration.plan, 500)));
+            }
+            exploration
         };
-        if let Some(s) = explore_span {
-            s.end(Some(&lf_truncate(&exploration.plan, 500)));
-        }
 
         // Phase 2: EXECUTE (calls CLI tool directly)
         tracing::info!("CodeStrategy: starting EXECUTE phase");
@@ -108,11 +120,17 @@ impl LoopStrategy for CodeStrategy {
         let exec_span =
             trace.map(|t| t.span("phase:execute", Some(&lf_truncate(&exploration.plan, 300))));
         let exec_result = self
-            .execute_code(contract, tools, docker, llm, &exploration)
+            .execute_code(contract, tools, docker, llm, &exploration, !benchmark_fast)
             .instrument(tracing::info_span!("execute"))
             .await?;
         if let Some(s) = exec_span {
             s.end(Some(&lf_truncate(&exec_result, 500)));
+        }
+
+        if benchmark_fast {
+            tracing::info!("CodeStrategy: benchmark fast mode enabled, skipping VERIFY");
+            send_status(status_tx, "Benchmark fast mode: skipping verify phase").await;
+            return Ok(exec_result);
         }
 
         // Phase 3: VERIFY
@@ -169,7 +187,7 @@ impl LoopStrategy for CodeStrategy {
                 };
 
                 match self
-                    .execute_code(&fix_contract, tools, docker, llm, &fix_exploration)
+                    .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
                     .instrument(tracing::info_span!("self_heal_execute"))
                     .await
                 {
@@ -483,6 +501,7 @@ impl CodeStrategy {
         docker: &DockerSession,
         llm: &dyn LlmProvider,
         exploration: &ExplorationResult,
+        allow_retry_rewrite: bool,
     ) -> Result<String> {
         let mut candidates: Vec<&str> = Vec::new();
         if let Some(pref) = contract
@@ -609,7 +628,7 @@ impl CodeStrategy {
             ));
 
             // On the last candidate, try one prompt rewrite retry before failing.
-            if idx + 1 == candidates.len() {
+            if allow_retry_rewrite && idx + 1 == candidates.len() {
                 tracing::warn!(
                     tool = tool_name,
                     "EXECUTE: coding tool failed, attempting retry"
@@ -871,6 +890,11 @@ impl CodeStrategy {
         let response = llm.chat(&history).await?;
         Ok(response)
     }
+}
+
+fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
+    let context = contract.context.to_lowercase();
+    context.contains("[benchmark_fast_cli]") || context.contains("[eval_fast_cli]")
 }
 
 /// Build tool schemas filtered to only the tools allowed in a given phase.
