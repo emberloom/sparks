@@ -55,6 +55,7 @@ pub enum PulseTarget {
 #[derive(Debug, Clone)]
 pub struct Pulse {
     pub id: String,
+    pub task_id: Option<String>,
     pub source: PulseSource,
     pub urgency: Urgency,
     pub content: String,
@@ -67,6 +68,7 @@ impl Pulse {
     pub fn new(source: PulseSource, urgency: Urgency, content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
+            task_id: None,
             source,
             urgency,
             content,
@@ -83,6 +85,11 @@ impl Pulse {
 
     pub fn with_ghost(mut self, ghost: impl Into<String>) -> Self {
         self.ghost = Some(ghost.into());
+        self
+    }
+
+    pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
         self
     }
 }
