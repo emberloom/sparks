@@ -135,6 +135,7 @@ Deliverables:
 - supervised batch runner is prepared:
   - `scripts/supervised_self_build_batch.py`
   - operator guide: `docs/self-build-supervised-batch.md`
+- supervised batch must report at least one `pr_opened` before considering auto mode trials
 - promotion matrix:
   - low-risk high-confidence: auto-merge allowed
   - medium/high risk: PR-only human approval
