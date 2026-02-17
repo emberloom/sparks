@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 const ALLOWED_CLI_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
+const ALLOWED_VERIFY_PROFILES: &[&str] = &["fast", "strict"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeatureContract {
@@ -34,6 +35,8 @@ pub struct AcceptanceCriterion {
 pub struct VerificationCheck {
     pub id: String,
     pub command: String,
+    #[serde(default = "default_verify_profile")]
+    pub profile: String,
     #[serde(default)]
     pub mapped_acceptance: Vec<String>,
     #[serde(default = "default_required")]
@@ -76,6 +79,10 @@ fn default_enabled() -> bool {
 
 fn default_required() -> bool {
     true
+}
+
+fn default_verify_profile() -> String {
+    "strict".to_string()
 }
 
 pub fn load_feature_contract(path: &Path) -> anyhow::Result<FeatureContract> {
@@ -141,6 +148,14 @@ impl FeatureContract {
                 errors.push(format!(
                     "verification check '{}' has empty command",
                     check.id
+                ));
+            }
+            if !ALLOWED_VERIFY_PROFILES.contains(&check.profile.as_str()) {
+                errors.push(format!(
+                    "verification check '{}' has invalid profile '{}' (expected one of: {})",
+                    check.id,
+                    check.profile,
+                    ALLOWED_VERIFY_PROFILES.join(", ")
                 ));
             }
             if check.mapped_acceptance.is_empty() {
@@ -572,5 +587,28 @@ tasks:
         .unwrap();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("verification check 'V1' maps unknown acceptance criterion"));
+    }
+
+    #[test]
+    fn rejects_invalid_verification_profile() {
+        let mut c: FeatureContract = serde_yaml::from_str(
+            r#"
+feature_id: verify-profile
+acceptance_criteria:
+  - id: AC-1
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    profile: "nightly"
+    mapped_acceptance: [AC-1]
+tasks:
+  - id: A
+    goal: a
+    mapped_acceptance: [AC-1]
+"#,
+        )
+        .unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid profile"));
     }
 }

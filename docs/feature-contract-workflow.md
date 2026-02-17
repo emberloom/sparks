@@ -18,6 +18,7 @@ Use YAML or JSON with:
 - `verification_checks[]` (recommended, required for `feature verify`):
   - `id`
   - `command`
+  - optional `profile` (`fast` or `strict`, default `strict`)
   - `mapped_acceptance[]`
   - optional `required` (default `true`)
 - `tasks[]` with:
@@ -79,8 +80,13 @@ Dispatch behavior:
 ## Verify
 
 ```bash
-athena feature verify --file eval/feature-contract-example.yaml
+athena feature verify --file eval/feature-contract-example.yaml --profile strict
 ```
+
+Profile behavior:
+
+- `--profile fast` runs only checks tagged `profile: fast`
+- `--profile strict` runs both `fast` and `strict` checks
 
 Verify behavior:
 
@@ -91,6 +97,25 @@ Verify behavior:
   - `eval/results/feature-verify-<feature_id>-<timestamp>.json`
   - `eval/results/feature-verify-<feature_id>-<timestamp>.md`
 - fails non-zero if promotion gate fails
+
+## Gate (Dispatch + Verify + Promote)
+
+```bash
+athena feature gate \
+  --file eval/feature-contract-example.yaml \
+  --wait-secs 240 \
+  --verify-profile strict
+```
+
+Gate behavior:
+
+- runs dispatch flow and emits dispatch ledger
+- runs verify flow with selected verification profile
+- computes promotion decision using risk-tier policy
+- emits consolidated gate artifacts:
+  - `eval/results/feature-gate-<feature_id>-<timestamp>.json`
+  - `eval/results/feature-gate-<feature_id>-<timestamp>.md`
+- exits non-zero when `gate_ok=false`
 
 ## Promote (Supervised Decision)
 

@@ -15,14 +15,17 @@ acceptance_criteria:
 
 verification_checks:
   - id: VC-1
+    profile: fast
     command: "cargo test --quiet feature_contract -- --nocapture"
     mapped_acceptance: [AC-2]
     required: true
   - id: VC-2
+    profile: strict
     command: "cargo run --quiet -- feature plan --file eval/feature-contract-example.yaml"
     mapped_acceptance: [AC-1, AC-3]
     required: true
   - id: VC-3
+    profile: strict
     command: "test -f docs/feature-contract-workflow.md"
     mapped_acceptance: [AC-4]
     required: true

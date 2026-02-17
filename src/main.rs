@@ -250,6 +250,9 @@ enum FeatureAction {
         /// Path to feature contract file
         #[arg(long)]
         file: PathBuf,
+        /// Verification profile to run
+        #[arg(long, default_value = "strict", value_parser = ["fast", "strict"])]
+        profile: String,
     },
     /// Produce supervised promotion decision from latest dispatch/verify ledgers
     Promote {
@@ -296,6 +299,39 @@ enum FeatureAction {
         /// Override repo/product label for all tasks
         #[arg(long)]
         repo: Option<String>,
+    },
+    /// Run dispatch + verify + promote in one command and emit consolidated gate artifact
+    Gate {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+        /// Global wait timeout per task (seconds) when task-level wait_secs is unset
+        #[arg(long, default_value_t = 180)]
+        wait_secs: u64,
+        /// Optional grace window override in seconds (adaptive when omitted)
+        #[arg(long)]
+        outcome_grace_secs: Option<u64>,
+        /// Continue dispatching independent tasks after failures (recommended for full gate signal)
+        #[arg(long, default_value_t = true)]
+        continue_on_failure: bool,
+        /// Optional CLI tool override for this run
+        #[arg(long, value_parser = ["claude_code", "codex", "opencode"])]
+        cli_tool: Option<String>,
+        /// Optional coding model override for this run
+        #[arg(long)]
+        cli_model: Option<String>,
+        /// Override lane for all tasks
+        #[arg(long)]
+        lane: Option<String>,
+        /// Override risk tier for all tasks and promotion policy
+        #[arg(long)]
+        risk: Option<String>,
+        /// Override repo/product label for all tasks
+        #[arg(long)]
+        repo: Option<String>,
+        /// Verification profile to run
+        #[arg(long, default_value = "strict", value_parser = ["fast", "strict"])]
+        verify_profile: String,
     },
 }
 
@@ -569,6 +605,7 @@ struct FeatureRunSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureVerifyCheckRow {
     check_id: String,
+    profile: String,
     command: String,
     required: bool,
     status: String,
@@ -602,9 +639,30 @@ struct FeatureVerifySummary {
     checks_passed: usize,
     checks_failed: usize,
     required_checks_failed: usize,
+    profile: String,
     acceptance_satisfied: bool,
     promotable: bool,
     promotion_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FeatureDispatchRunArtifacts {
+    ledger: FeatureRunLedger,
+    ledger_json: std::path::PathBuf,
+    ledger_md: std::path::PathBuf,
+    aborted_on_failure: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FeatureDispatchOptions {
+    wait_secs: u64,
+    outcome_grace_secs: Option<u64>,
+    continue_on_failure: bool,
+    cli_tool: Option<String>,
+    cli_model: Option<String>,
+    lane: Option<String>,
+    risk: Option<String>,
+    repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -617,6 +675,18 @@ struct FeaturePromotionDecision {
     verify_ledger_json: String,
     auto_promotable: bool,
     approval_required: bool,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureGateLedger {
+    timestamp_utc: String,
+    feature_id: String,
+    verify_profile: String,
+    dispatch_ledger_json: String,
+    verify_ledger_json: String,
+    promote_decision_json: String,
+    gate_ok: bool,
     reasons: Vec<String>,
 }
 
@@ -645,15 +715,17 @@ async fn handle_feature(
             let contract = feature_contract::load_feature_contract(&file)?;
             print_feature_plan(&contract)?;
         }
-        FeatureAction::Verify { file } => {
+        FeatureAction::Verify { file, profile } => {
+            let profile = normalize_verify_profile(&profile)?;
             let contract = feature_contract::load_feature_contract(&file)?;
-            let ledger = run_feature_verify(&contract, &file)?;
+            let ledger = run_feature_verify(&contract, &file, &profile)?;
             let (json_path, md_path) = write_feature_verify_artifacts(&ledger)?;
             println!("feature_verify_json={}", json_path.display());
             println!("feature_verify_md={}", md_path.display());
             println!(
-                "feature_id={} verify checks_total={} checks_failed={} required_checks_failed={} acceptance_satisfied={} promotable={}",
+                "feature_id={} verify profile={} checks_total={} checks_failed={} required_checks_failed={} acceptance_satisfied={} promotable={}",
                 contract.feature_id,
+                profile,
                 ledger.summary.checks_total,
                 ledger.summary.checks_failed,
                 ledger.summary.required_checks_failed,
@@ -743,164 +815,33 @@ async fn handle_feature(
                 println!("feature_id={} dry_run=true", contract.feature_id);
                 return Ok(());
             }
-
-            if let Some(l) = lane.as_deref() {
-                validate_lane(l)?;
-            }
-            if let Some(r) = risk.as_deref() {
-                validate_risk(r)?;
-            }
-
-            let handle = AthenaCore::start(config.clone(), memory).await?;
-            if cli_tool.is_some() || cli_model.is_some() {
-                let mut knobs = handle
-                    .knobs
-                    .write()
-                    .map_err(|_| anyhow::anyhow!("Failed to lock runtime knobs"))?;
-                if let Some(tool) = cli_tool.as_deref() {
-                    knobs.set("cli_tool", tool).map_err(anyhow::Error::msg)?;
-                    eprintln!("Feature override: cli_tool={}", tool);
-                }
-                if let Some(model) = cli_model.as_deref() {
-                    knobs.set("cli_model", model).map_err(anyhow::Error::msg)?;
-                    eprintln!("Feature override: cli_model={}", model);
-                }
-            }
-
-            println!(
-                "feature_id={} mode=dispatch batches={} continue_on_failure={}",
-                contract.feature_id,
-                batches.len(),
-                continue_on_failure
-            );
-            let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
-                std::collections::HashMap::new();
-            let mut dispatch_ids: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            let default_lane = lane
-                .or_else(|| contract.lane.clone())
-                .unwrap_or_else(|| "delivery".to_string());
-            let default_risk = risk
-                .or_else(|| contract.risk.clone())
-                .unwrap_or_else(|| "medium".to_string());
-            let default_repo = repo
-                .or_else(|| contract.repo.clone())
-                .unwrap_or_else(kpi::default_repo_name);
-            validate_lane(&default_lane)?;
-            validate_risk(&default_risk)?;
-            let mut aborted_on_failure = false;
-
-            for (idx, batch) in batches.iter().enumerate() {
-                println!("batch={} tasks={}", idx + 1, batch.join(","));
-                for task_id in batch {
-                    let task = contract.task_by_id(task_id).ok_or_else(|| {
-                        anyhow::anyhow!("Task '{}' missing from contract", task_id)
-                    })?;
-                    if let Some(reason) = blocked_dependency_reason(task, &statuses) {
-                        println!(
-                            "task={} result=skipped reason={}",
-                            task.id,
-                            reason.replace('\n', " ")
-                        );
-                        statuses.insert(task.id.clone(), FeatureRunStatus::Skipped(reason));
-                        continue;
-                    }
-
-                    let lane = task.lane.clone().unwrap_or_else(|| default_lane.clone());
-                    let risk = task.risk.clone().unwrap_or_else(|| default_risk.clone());
-                    let repo = task.repo.clone().unwrap_or_else(|| default_repo.clone());
-                    validate_lane(&lane)?;
-                    validate_risk(&risk)?;
-
-                    let task_wait = task.wait_secs.unwrap_or(wait_secs);
-                    let task_grace = compute_feature_outcome_grace_secs(
-                        task,
-                        &lane,
-                        &risk,
-                        task_wait,
-                        outcome_grace_secs,
-                    );
-                    let task_context = build_feature_task_context(&contract, task);
-                    let mut pulse_rx = handle.pulse_bus.subscribe();
-                    let task_dispatch_id = handle
-                        .dispatch_task(core::AutonomousTask {
-                            goal: task.goal.clone(),
-                            context: task_context,
-                            ghost: task.ghost.clone(),
-                            target: crate::pulse::PulseTarget::Broadcast,
-                            lane,
-                            risk_tier: risk,
-                            repo,
-                            task_id: None,
-                        })
-                        .await?;
-
-                    println!(
-                        "task={} dispatched_task_id={} wait_secs={} outcome_grace_secs={}",
-                        task.id, task_dispatch_id, task_wait, task_grace
-                    );
-                    dispatch_ids.insert(task.id.clone(), task_dispatch_id.clone());
-                    let wait =
-                        wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait)
-                            .await;
-                    let run_status = resolve_feature_run_status_after_wait(
-                        &config,
-                        &task_dispatch_id,
-                        wait,
-                        task_grace,
-                    )
-                    .await?;
-                    match &run_status {
-                        FeatureRunStatus::Succeeded => {
-                            println!("task={} result=succeeded", task.id)
-                        }
-                        FeatureRunStatus::Failed(reason) => println!(
-                            "task={} result=failed reason={}",
-                            task.id,
-                            reason.replace('\n', " ")
-                        ),
-                        FeatureRunStatus::Skipped(reason) => println!(
-                            "task={} result=skipped reason={}",
-                            task.id,
-                            reason.replace('\n', " ")
-                        ),
-                    }
-                    statuses.insert(task.id.clone(), run_status.clone());
-                    if matches!(run_status, FeatureRunStatus::Failed(_)) && !continue_on_failure {
-                        aborted_on_failure = true;
-                        break;
-                    }
-                }
-                if aborted_on_failure {
-                    break;
-                }
-            }
-
-            let mut succeeded = 0usize;
-            let mut failed = 0usize;
-            let mut skipped = 0usize;
-            for status in statuses.values() {
-                match status {
-                    FeatureRunStatus::Succeeded => succeeded += 1,
-                    FeatureRunStatus::Failed(_) => failed += 1,
-                    FeatureRunStatus::Skipped(_) => skipped += 1,
-                }
-            }
-            let ledger = build_feature_run_ledger(
+            let dispatch = run_feature_dispatch_flow(
+                config.clone(),
+                memory.clone(),
                 &contract,
                 &file,
-                &statuses,
-                &dispatch_ids,
-                succeeded,
-                failed,
-                skipped,
-            );
-            let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
-            println!("feature_ledger_json={}", ledger_json.display());
-            println!("feature_ledger_md={}", ledger_md.display());
+                FeatureDispatchOptions {
+                    wait_secs,
+                    outcome_grace_secs,
+                    continue_on_failure,
+                    cli_tool,
+                    cli_model,
+                    lane,
+                    risk,
+                    repo,
+                },
+            )
+            .await?;
+            let ledger = &dispatch.ledger;
+            println!("feature_ledger_json={}", dispatch.ledger_json.display());
+            println!("feature_ledger_md={}", dispatch.ledger_md.display());
             println!(
                 "feature_id={} summary succeeded={} failed={} skipped={} promotable={}",
-                contract.feature_id, succeeded, failed, skipped, ledger.summary.promotable
+                contract.feature_id,
+                ledger.summary.succeeded,
+                ledger.summary.failed,
+                ledger.summary.skipped,
+                ledger.summary.promotable
             );
             if !ledger.summary.promotion_reasons.is_empty() {
                 println!(
@@ -908,13 +849,16 @@ async fn handle_feature(
                     ledger.summary.promotion_reasons.join(" | ")
                 );
             }
-            if aborted_on_failure {
+            if dispatch.aborted_on_failure {
                 anyhow::bail!(
                     "Feature dispatch stopped early due to failed task (use --continue-on-failure to continue)."
                 );
             }
-            if failed > 0 {
-                anyhow::bail!("Feature dispatch completed with {} failed task(s).", failed);
+            if ledger.summary.failed > 0 {
+                anyhow::bail!(
+                    "Feature dispatch completed with {} failed task(s).",
+                    ledger.summary.failed
+                );
             }
             if !ledger.summary.acceptance_satisfied {
                 anyhow::bail!(
@@ -922,8 +866,280 @@ async fn handle_feature(
                 );
             }
         }
+        FeatureAction::Gate {
+            file,
+            wait_secs,
+            outcome_grace_secs,
+            continue_on_failure,
+            cli_tool,
+            cli_model,
+            lane,
+            risk,
+            repo,
+            verify_profile,
+        } => {
+            let verify_profile = normalize_verify_profile(&verify_profile)?;
+            let contract = feature_contract::load_feature_contract(&file)?;
+            let batches = contract.execution_batches()?;
+            if batches.is_empty() {
+                println!("feature_id={} nothing_to_run=true", contract.feature_id);
+                return Ok(());
+            }
+
+            let dispatch = run_feature_dispatch_flow(
+                config.clone(),
+                memory.clone(),
+                &contract,
+                &file,
+                FeatureDispatchOptions {
+                    wait_secs,
+                    outcome_grace_secs,
+                    continue_on_failure,
+                    cli_tool,
+                    cli_model,
+                    lane,
+                    risk: risk.clone(),
+                    repo,
+                },
+            )
+            .await?;
+            println!("feature_ledger_json={}", dispatch.ledger_json.display());
+            println!("feature_ledger_md={}", dispatch.ledger_md.display());
+
+            let verify = run_feature_verify(&contract, &file, &verify_profile)?;
+            let (verify_json, verify_md) = write_feature_verify_artifacts(&verify)?;
+            println!("feature_verify_json={}", verify_json.display());
+            println!("feature_verify_md={}", verify_md.display());
+
+            let risk_for_policy = risk
+                .or_else(|| contract.risk.clone())
+                .unwrap_or_else(|| "medium".to_string());
+            validate_risk(&risk_for_policy)?;
+            let decision = build_feature_promotion_decision(
+                &contract,
+                &risk_for_policy,
+                &file,
+                &dispatch.ledger_json,
+                &dispatch.ledger,
+                &verify_json,
+                &verify,
+            );
+            let (promote_json, promote_md) = write_feature_promotion_artifacts(&decision)?;
+            println!("feature_promote_json={}", promote_json.display());
+            println!("feature_promote_md={}", promote_md.display());
+
+            let gate = build_feature_gate_ledger(
+                &contract.feature_id,
+                &verify_profile,
+                &dispatch.ledger_json,
+                &verify_json,
+                &promote_json,
+                &decision,
+            );
+            let (gate_json, gate_md) = write_feature_gate_artifacts(&gate)?;
+            println!("feature_gate_json={}", gate_json.display());
+            println!("feature_gate_md={}", gate_md.display());
+            println!(
+                "feature_id={} gate_ok={} auto_promotable={} approval_required={} verify_profile={}",
+                contract.feature_id,
+                gate.gate_ok,
+                decision.auto_promotable,
+                decision.approval_required,
+                verify_profile
+            );
+            if !gate.reasons.is_empty() {
+                println!("feature_gate_reasons={}", gate.reasons.join(" | "));
+            }
+            if !gate.gate_ok {
+                anyhow::bail!("Feature gate failed.");
+            }
+        }
     }
     Ok(())
+}
+
+fn normalize_verify_profile(profile: &str) -> anyhow::Result<String> {
+    match profile {
+        "fast" | "strict" => Ok(profile.to_string()),
+        _ => anyhow::bail!("Invalid verify profile '{}'. Use: fast | strict", profile),
+    }
+}
+
+fn verify_check_in_profile(check: &feature_contract::VerificationCheck, profile: &str) -> bool {
+    match profile {
+        "fast" => check.profile == "fast",
+        // strict profile is a superset: it runs both strict and fast checks.
+        "strict" => matches!(check.profile.as_str(), "strict" | "fast"),
+        _ => false,
+    }
+}
+
+async fn run_feature_dispatch_flow(
+    config: Config,
+    memory: Arc<MemoryStore>,
+    contract: &feature_contract::FeatureContract,
+    contract_path: &std::path::Path,
+    opts: FeatureDispatchOptions,
+) -> anyhow::Result<FeatureDispatchRunArtifacts> {
+    if let Some(l) = opts.lane.as_deref() {
+        validate_lane(l)?;
+    }
+    if let Some(r) = opts.risk.as_deref() {
+        validate_risk(r)?;
+    }
+
+    let handle = AthenaCore::start(config.clone(), memory).await?;
+    if opts.cli_tool.is_some() || opts.cli_model.is_some() {
+        let mut knobs = handle
+            .knobs
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to lock runtime knobs"))?;
+        if let Some(tool) = opts.cli_tool.as_deref() {
+            knobs.set("cli_tool", tool).map_err(anyhow::Error::msg)?;
+            eprintln!("Feature override: cli_tool={}", tool);
+        }
+        if let Some(model) = opts.cli_model.as_deref() {
+            knobs.set("cli_model", model).map_err(anyhow::Error::msg)?;
+            eprintln!("Feature override: cli_model={}", model);
+        }
+    }
+
+    let batches = contract.execution_batches()?;
+    println!(
+        "feature_id={} mode=dispatch batches={} continue_on_failure={}",
+        contract.feature_id,
+        batches.len(),
+        opts.continue_on_failure
+    );
+
+    let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
+        std::collections::HashMap::new();
+    let mut dispatch_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let default_lane = opts
+        .lane
+        .clone()
+        .or_else(|| contract.lane.clone())
+        .unwrap_or_else(|| "delivery".to_string());
+    let default_risk = opts
+        .risk
+        .clone()
+        .or_else(|| contract.risk.clone())
+        .unwrap_or_else(|| "medium".to_string());
+    let default_repo = opts
+        .repo
+        .clone()
+        .or_else(|| contract.repo.clone())
+        .unwrap_or_else(kpi::default_repo_name);
+    validate_lane(&default_lane)?;
+    validate_risk(&default_risk)?;
+    let mut aborted_on_failure = false;
+
+    for (idx, batch) in batches.iter().enumerate() {
+        println!("batch={} tasks={}", idx + 1, batch.join(","));
+        for task_id in batch {
+            let task = contract
+                .task_by_id(task_id)
+                .ok_or_else(|| anyhow::anyhow!("Task '{}' missing from contract", task_id))?;
+            if let Some(reason) = blocked_dependency_reason(task, &statuses) {
+                println!(
+                    "task={} result=skipped reason={}",
+                    task.id,
+                    reason.replace('\n', " ")
+                );
+                statuses.insert(task.id.clone(), FeatureRunStatus::Skipped(reason));
+                continue;
+            }
+
+            let lane = task.lane.clone().unwrap_or_else(|| default_lane.clone());
+            let risk = task.risk.clone().unwrap_or_else(|| default_risk.clone());
+            let repo = task.repo.clone().unwrap_or_else(|| default_repo.clone());
+            validate_lane(&lane)?;
+            validate_risk(&risk)?;
+
+            let task_wait = task.wait_secs.unwrap_or(opts.wait_secs);
+            let task_grace = compute_feature_outcome_grace_secs(
+                task,
+                &lane,
+                &risk,
+                task_wait,
+                opts.outcome_grace_secs,
+            );
+            let task_context = build_feature_task_context(contract, task);
+            let mut pulse_rx = handle.pulse_bus.subscribe();
+            let task_dispatch_id = handle
+                .dispatch_task(core::AutonomousTask {
+                    goal: task.goal.clone(),
+                    context: task_context,
+                    ghost: task.ghost.clone(),
+                    target: crate::pulse::PulseTarget::Broadcast,
+                    lane,
+                    risk_tier: risk,
+                    repo,
+                    task_id: None,
+                })
+                .await?;
+
+            println!(
+                "task={} dispatched_task_id={} wait_secs={} outcome_grace_secs={}",
+                task.id, task_dispatch_id, task_wait, task_grace
+            );
+            dispatch_ids.insert(task.id.clone(), task_dispatch_id.clone());
+            let wait = wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait).await;
+            let run_status =
+                resolve_feature_run_status_after_wait(&config, &task_dispatch_id, wait, task_grace)
+                    .await?;
+            match &run_status {
+                FeatureRunStatus::Succeeded => println!("task={} result=succeeded", task.id),
+                FeatureRunStatus::Failed(reason) => println!(
+                    "task={} result=failed reason={}",
+                    task.id,
+                    reason.replace('\n', " ")
+                ),
+                FeatureRunStatus::Skipped(reason) => println!(
+                    "task={} result=skipped reason={}",
+                    task.id,
+                    reason.replace('\n', " ")
+                ),
+            }
+            statuses.insert(task.id.clone(), run_status.clone());
+            if matches!(run_status, FeatureRunStatus::Failed(_)) && !opts.continue_on_failure {
+                aborted_on_failure = true;
+                break;
+            }
+        }
+        if aborted_on_failure {
+            break;
+        }
+    }
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    for status in statuses.values() {
+        match status {
+            FeatureRunStatus::Succeeded => succeeded += 1,
+            FeatureRunStatus::Failed(_) => failed += 1,
+            FeatureRunStatus::Skipped(_) => skipped += 1,
+        }
+    }
+
+    let ledger = build_feature_run_ledger(
+        contract,
+        contract_path,
+        &statuses,
+        &dispatch_ids,
+        succeeded,
+        failed,
+        skipped,
+    );
+    let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
+    Ok(FeatureDispatchRunArtifacts {
+        ledger,
+        ledger_json,
+        ledger_md,
+        aborted_on_failure,
+    })
 }
 
 fn blocked_dependency_reason(
@@ -1281,6 +1497,7 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
 fn run_feature_verify(
     contract: &feature_contract::FeatureContract,
     contract_path: &std::path::Path,
+    profile: &str,
 ) -> anyhow::Result<FeatureVerifyLedger> {
     if contract.verification_checks.is_empty() {
         anyhow::bail!(
@@ -1288,13 +1505,26 @@ fn run_feature_verify(
             contract.feature_id
         );
     }
+    let profile = normalize_verify_profile(profile)?;
 
     let mut check_rows = Vec::new();
     let mut checks_passed = 0usize;
     let mut checks_failed = 0usize;
     let mut required_checks_failed = 0usize;
+    let selected_checks = contract
+        .verification_checks
+        .iter()
+        .filter(|check| verify_check_in_profile(check, &profile))
+        .collect::<Vec<_>>();
+    if selected_checks.is_empty() {
+        anyhow::bail!(
+            "feature '{}' has no verification checks for profile '{}'",
+            contract.feature_id,
+            profile
+        );
+    }
 
-    for check in &contract.verification_checks {
+    for check in selected_checks {
         let output = std::process::Command::new("zsh")
             .arg("-lc")
             .arg(&check.command)
@@ -1332,6 +1562,7 @@ fn run_feature_verify(
         };
         check_rows.push(FeatureVerifyCheckRow {
             check_id: check.id.clone(),
+            profile: check.profile.clone(),
             command: check.command.clone(),
             required: check.required,
             status,
@@ -1389,6 +1620,7 @@ fn run_feature_verify(
             checks_passed,
             checks_failed,
             required_checks_failed,
+            profile,
             acceptance_satisfied,
             promotable,
             promotion_reasons,
@@ -1423,6 +1655,7 @@ fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
     out.push_str(&format!("- feature_id: `{}`\n", ledger.feature_id));
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
     out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
+    out.push_str(&format!("- profile: `{}`\n", ledger.summary.profile));
     out.push_str(&format!(
         "- summary: checks_total={} checks_passed={} checks_failed={} required_checks_failed={} acceptance_satisfied={} promotable={}\n",
         ledger.summary.checks_total,
@@ -1441,12 +1674,13 @@ fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
     out.push('\n');
 
     out.push_str("## Checks\n\n");
-    out.push_str("| check_id | status | required | exit_code | mapped_acceptance | command |\n");
-    out.push_str("|---|---|---|---|---|---|\n");
+    out.push_str("| check_id | profile | status | required | exit_code | mapped_acceptance | command |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
     for row in &ledger.checks {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | `{}` |\n",
+            "| {} | {} | {} | {} | {} | {} | `{}` |\n",
             row.check_id,
+            row.profile,
             row.status,
             row.required,
             row.exit_code
@@ -1588,6 +1822,87 @@ fn render_feature_promotion_markdown(decision: &FeaturePromotionDecision) -> Str
     if !decision.reasons.is_empty() {
         out.push_str("- reasons:\n");
         for reason in &decision.reasons {
+            out.push_str(&format!("  - {}\n", reason));
+        }
+    }
+    out
+}
+
+fn build_feature_gate_ledger(
+    feature_id: &str,
+    verify_profile: &str,
+    dispatch_ledger_json: &std::path::Path,
+    verify_ledger_json: &std::path::Path,
+    promote_decision_json: &std::path::Path,
+    decision: &FeaturePromotionDecision,
+) -> FeatureGateLedger {
+    let gate_ok = decision.auto_promotable && !decision.approval_required;
+    let mut reasons = Vec::new();
+    if !decision.auto_promotable {
+        reasons.push("promotion decision is not auto-promotable".to_string());
+    }
+    if decision.approval_required {
+        reasons.push(format!(
+            "risk tier '{}' requires human approval",
+            decision.risk_tier
+        ));
+    }
+    reasons.extend(decision.reasons.clone());
+    reasons.sort();
+    reasons.dedup();
+
+    FeatureGateLedger {
+        timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        feature_id: feature_id.to_string(),
+        verify_profile: verify_profile.to_string(),
+        dispatch_ledger_json: dispatch_ledger_json.display().to_string(),
+        verify_ledger_json: verify_ledger_json.display().to_string(),
+        promote_decision_json: promote_decision_json.display().to_string(),
+        gate_ok,
+        reasons,
+    }
+}
+
+fn write_feature_gate_artifacts(
+    ledger: &FeatureGateLedger,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("eval/results");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = ledger
+        .feature_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let base = format!("feature-gate-{}-{}", safe_feature_id, ledger.timestamp_utc);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(ledger)?)?;
+    std::fs::write(&md_path, render_feature_gate_markdown(ledger))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_gate_markdown(ledger: &FeatureGateLedger) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Gate Ledger\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", ledger.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
+    out.push_str(&format!("- verify_profile: `{}`\n", ledger.verify_profile));
+    out.push_str(&format!("- gate_ok: `{}`\n", ledger.gate_ok));
+    out.push_str(&format!(
+        "- dispatch_ledger_json: `{}`\n",
+        ledger.dispatch_ledger_json
+    ));
+    out.push_str(&format!(
+        "- verify_ledger_json: `{}`\n",
+        ledger.verify_ledger_json
+    ));
+    out.push_str(&format!(
+        "- promote_decision_json: `{}`\n",
+        ledger.promote_decision_json
+    ));
+    if !ledger.reasons.is_empty() {
+        out.push_str("- reasons:\n");
+        for reason in &ledger.reasons {
             out.push_str(&format!("  - {}\n", reason));
         }
     }
@@ -2577,12 +2892,14 @@ mod tests {
                 VerificationCheck {
                     id: "V1".to_string(),
                     command: "true".to_string(),
+                    profile: "fast".to_string(),
                     mapped_acceptance: vec!["AC-1".to_string()],
                     required: true,
                 },
                 VerificationCheck {
                     id: "V2".to_string(),
                     command: "true".to_string(),
+                    profile: "strict".to_string(),
                     mapped_acceptance: vec!["AC-2".to_string()],
                     required: true,
                 },
@@ -2669,8 +2986,12 @@ mod tests {
     fn feature_verify_fails_when_required_check_fails() {
         let mut contract = sample_contract();
         contract.verification_checks[1].command = "false".to_string();
-        let ledger =
-            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        let ledger = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
         assert_eq!(ledger.summary.required_checks_failed, 1);
         assert!(!ledger.summary.promotable);
     }
@@ -2679,14 +3000,33 @@ mod tests {
     fn feature_verify_fails_when_acceptance_has_no_passing_check() {
         let mut contract = sample_contract();
         contract.verification_checks[1].command = "false".to_string();
-        let ledger =
-            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        let ledger = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
         assert!(!ledger.summary.acceptance_satisfied);
         assert!(ledger
             .summary
             .promotion_reasons
             .iter()
             .any(|r| r.contains("acceptance criteria are not satisfied")));
+    }
+
+    #[test]
+    fn feature_verify_fast_profile_runs_fast_checks_only() {
+        let contract = sample_contract();
+        let ledger = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "fast",
+        )
+        .unwrap();
+        assert_eq!(ledger.summary.profile, "fast");
+        assert_eq!(ledger.summary.checks_total, 1);
+        assert_eq!(ledger.checks[0].check_id, "V1");
+        assert_eq!(ledger.checks[0].profile, "fast");
     }
 
     #[test]
@@ -2704,8 +3044,12 @@ mod tests {
             0,
             0,
         );
-        let verify =
-            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        let verify = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
         let decision = build_feature_promotion_decision(
             &contract,
             "medium",
@@ -2721,6 +3065,37 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("requires human approval")));
+    }
+
+    #[tokio::test]
+    async fn wait_for_autonomous_pulse_ignores_non_autonomous_sources_with_same_task_id() {
+        // Regression: ensure pulses from non-AutonomousTask sources are never
+        // treated as dispatch results, even when their task_id matches.
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut rx = tx.subscribe();
+
+        // Heartbeat and Scheduler pulses with the target task_id must be ignored.
+        let _ = tx.send(
+            Pulse::new(PulseSource::Heartbeat, Urgency::Low, "heartbeat".into())
+                .with_task_id("dispatch-42"),
+        );
+        let _ = tx.send(
+            Pulse::new(PulseSource::CronJob("test".into()), Urgency::Medium, "scheduled".into())
+                .with_task_id("dispatch-42"),
+        );
+        // Wrong task_id from autonomous source must also be ignored.
+        let _ = tx.send(
+            Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "wrong".into())
+                .with_task_id("dispatch-99"),
+        );
+        // Correct source + correct task_id must resolve.
+        let _ = tx.send(
+            Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "done".into())
+                .with_task_id("dispatch-42"),
+        );
+
+        let res = wait_for_autonomous_pulse(&mut rx, "dispatch-42", 2).await;
+        assert_eq!(res, WaitForAutonomousOutcome::Received);
     }
 
     #[test]

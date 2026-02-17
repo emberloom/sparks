@@ -84,6 +84,7 @@ Current implementation status:
   - `athena feature dispatch --file <contract>`
   - `athena feature verify --file <contract>`
   - `athena feature promote --file <contract>`
+  - `athena feature gate --file <contract> --verify-profile <fast|strict>`
 - acceptance traceability floor is implemented:
   - required `acceptance_criteria[]` in feature contracts
   - required per-task `mapped_acceptance[]`
@@ -93,6 +94,8 @@ Current implementation status:
   - `eval/results/feature-verify-*.{json,md}`
 - feature promotion decisions emit supervised policy artifacts:
   - `eval/results/feature-promote-*.{json,md}`
+- one-shot gate emits consolidated artifacts:
+  - `eval/results/feature-gate-*.{json,md}`
 - feature dispatch timeout handling now uses adaptive DB terminal-outcome grace reconciliation (risk/task-profile aware, override with `--outcome-grace-secs`) to reduce false timeout failures
 - reference workflow: `docs/feature-contract-workflow.md`
 
@@ -161,8 +164,6 @@ Exit criteria:
 
 ## Next Execution Sequence
 
-1. Wire feature-level contract ingestion and DAG scheduler.
-2. Add acceptance traceability ledger and integration gate at feature scope.
-3. Implement supervised self-build loop orchestration.
-4. Implement candidate mutation and tournament selection loop.
-5. Turn on gradual autonomy-ramp controller based on KPI trends.
+1. Harden supervised self-build loop orchestration and isolated worktree lifecycle.
+2. Implement candidate mutation and tournament selection loop.
+3. Turn on gradual autonomy-ramp controller based on KPI trends.

@@ -68,6 +68,7 @@ Runtime shape for `athena feature verify`:
 - `verification_checks[]`:
   - `id`
   - `command`
+  - `profile` (`fast | strict`, default `strict`)
   - `mapped_acceptance[]`
   - `required` (default `true`)
 
@@ -79,6 +80,10 @@ Runtime shape for `athena feature verify`:
 Runtime decision command:
 
 - `athena feature promote --file <contract>`
+
+One-shot gate command:
+
+- `athena feature gate --file <contract> --verify-profile strict`
 
 ## Evidence Ledger
 
