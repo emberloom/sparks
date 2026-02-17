@@ -2,6 +2,7 @@ pub mod code;
 pub mod react;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::confirm::Confirmer;
@@ -159,7 +160,7 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
             }
         } else {
             // Pure text response — check if it needs strategy fallback
-            if let Some(json) = llm::extract_json(&text_accum) {
+            if let Some(json) = extract_json_envelope(&text_accum) {
                 if json
                     .get("needs_strategy")
                     .and_then(|v| v.as_bool())
@@ -236,4 +237,36 @@ async fn consume_precheck_stream(
     }
 
     (text, tool_calls, usage)
+}
+
+/// Parse only strict JSON envelopes from text output.
+/// Rejects prose with embedded JSON snippets to avoid ambiguous intent parsing.
+pub(crate) fn extract_json_envelope(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return None;
+    }
+
+    let json = llm::extract_json(trimmed)?;
+    if !json.is_object() {
+        return None;
+    }
+
+    Some(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_json_envelope;
+
+    #[test]
+    fn extract_json_envelope_rejects_prose_without_json() {
+        assert!(extract_json_envelope("I cannot do this directly.").is_none());
+    }
+
+    #[test]
+    fn extract_json_envelope_rejects_malformed_json() {
+        let malformed = r#"{"needs_strategy": true, "reason": "missing brace""#;
+        assert!(extract_json_envelope(malformed).is_none());
+    }
 }

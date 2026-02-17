@@ -7,11 +7,11 @@ use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{
-    self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
+    ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
 };
 use crate::tools::ToolRegistry;
 
-use super::{LoopStrategy, StatusSender, TaskContract};
+use super::{extract_json_envelope, LoopStrategy, StatusSender, TaskContract};
 
 pub struct ReactStrategy;
 
@@ -294,9 +294,9 @@ impl ReactStrategy {
 
             history.push(Message::assistant(&response));
 
-            // Try to extract a tool call from the response
-            let json = match llm::extract_json(&response) {
-                Some(v) if v.get("tool").is_some() => v,
+            // Execute only when a strict tool JSON envelope is parsed.
+            let json = match parse_tool_call_envelope(&response) {
+                Some(v) => v,
                 _ => {
                     // No tool call — LLM is giving a final answer.
                     tracing::info!(step, path = "text", "ReAct complete (text response)");
@@ -325,6 +325,21 @@ fn lf_truncate(s: &str, max: usize) -> String {
     } else {
         let end = s.floor_char_boundary(max);
         format!("{}...", &s[..end])
+    }
+}
+
+/// Parse a strict text-fallback tool call envelope:
+/// {"tool":"<name>","params":{...}}
+fn parse_tool_call_envelope(text: &str) -> Option<serde_json::Value> {
+    let json = extract_json_envelope(text)?;
+    let tool = json.get("tool").and_then(|v| v.as_str())?.trim();
+    if tool.is_empty() {
+        return None;
+    }
+
+    match json.get("params") {
+        Some(v) if v.is_object() => Some(json),
+        _ => None,
     }
 }
 
@@ -467,4 +482,21 @@ pub fn compress_history(history: &mut Vec<ChatMessage>) {
     history.extend(tail);
 
     tracing::debug!(new_len = history.len(), "History compressed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_call_envelope;
+
+    #[test]
+    fn parse_tool_call_envelope_rejects_prose_without_json() {
+        let response = "I'll run the shell command and then summarize.";
+        assert!(parse_tool_call_envelope(response).is_none());
+    }
+
+    #[test]
+    fn parse_tool_call_envelope_rejects_malformed_json() {
+        let response = r#"{"tool":"shell","params":{"command":"ls"}"#;
+        assert!(parse_tool_call_envelope(response).is_none());
+    }
 }
