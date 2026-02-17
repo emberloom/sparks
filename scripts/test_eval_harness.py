@@ -108,6 +108,29 @@ class EvalHarnessRegressionTests(unittest.TestCase):
         self.assertEqual(final.get("status"), "failed")
         self.assertEqual(final.get("error"), eval_harness.OUTCOME_REASON_WAIT_TIMEOUT)
 
+    def test_parse_dispatch_task_id_extracts_uuid(self) -> None:
+        s = "Dispatched autonomous task to coder (task_id=123e4567-e89b-12d3-a456-426614174000)."
+        self.assertEqual(
+            eval_harness.parse_dispatch_task_id(s), "123e4567-e89b-12d3-a456-426614174000"
+        )
+
+    def test_parse_dispatch_task_id_uses_first_match_when_multiple_markers_exist(self) -> None:
+        s = (
+            "task_id=123e4567-e89b-12d3-a456-426614174000 noise "
+            "task_id=123e4567-e89b-12d3-a456-426614174111"
+        )
+        self.assertEqual(
+            eval_harness.parse_dispatch_task_id(s), "123e4567-e89b-12d3-a456-426614174000"
+        )
+
+    def test_parse_dispatch_task_id_rejects_malformed_uuid(self) -> None:
+        s = "Dispatched autonomous task to coder (task_id=123e4567-e89b-12d3-a456)."
+        self.assertIsNone(eval_harness.parse_dispatch_task_id(s))
+
+    def test_parse_dispatch_task_id_returns_none_when_missing_marker(self) -> None:
+        s = "Dispatched autonomous task to coder."
+        self.assertIsNone(eval_harness.parse_dispatch_task_id(s))
+
     def test_evaluate_gate_strict_delivery_rules_fail_on_low_tests(self) -> None:
         results = [
             eval_harness.TaskResult(

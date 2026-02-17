@@ -174,7 +174,10 @@ def git_status_paths(repo: Path) -> set[str]:
 
 
 def parse_dispatch_task_id(stderr: str) -> str | None:
-    m = re.search(r"task_id=([0-9a-fA-F-]{36})", stderr)
+    m = re.search(
+        r"task_id=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b",
+        stderr,
+    )
     return m.group(1) if m else None
 
 
