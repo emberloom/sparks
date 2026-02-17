@@ -18,17 +18,17 @@ As of 2026-02-16 to 2026-02-17:
 Key gaps versus target:
 
 - no OpenEvolve-style prompt and skill mutation/selection loop
-- no candidate tournament that auto-promotes best policy/prompt variant
+- optimizer tournaments are now implemented, but mutation breadth and multi-day winner stability are still limited
 - limited feature-level orchestration from one feature spec into multiple dependent tasks
-- CI real gate remains manual/self-hosted, not always-on for every change
+- full real-gate remains self-hosted rather than universal hosted CI
 
 Maturity estimate:
 
 - agent execution layer: ~85%
 - evaluation layer: ~65%
 - failure logging/telemetry layer: ~70%
-- self-improvement optimizer: ~10%
-- end-to-end closed loop (execute -> evaluate -> evolve -> promote): ~45-55%
+- self-improvement optimizer: ~30%
+- end-to-end closed loop (execute -> evaluate -> evolve -> promote): ~55-60%
 
 ## Operating Model (Spec-Driven)
 
@@ -170,6 +170,8 @@ Deliverables:
 - implemented tournament runner:
   - `scripts/optimizer_tournament.py`
   - emits `eval/results/optimizer-tournament-*.{json,md}` with regression gates and winner selection
+  - promotes active profile only when non-regression gates + positive delta hold (`eval/results/optimizer-profile.json`)
+  - nightly self-hosted run: `.github/workflows/optimizer-tournament-nightly.yml`
 
 Exit criteria:
 
@@ -198,8 +200,22 @@ Exit criteria:
 - do not bypass guardrails for speed
 - any autonomy increase requires measured evidence over time windows, not one-off runs
 
+## Six-Mistake Check (2026-02-17)
+
+Priority fixes currently focused on:
+
+- #2 complicated solutions:
+  - mitigation: keep optimizer/tournament logic in small tested functions (`scripts/test_optimizer_tournament.py`)
+  - next: continue decomposition of control-plane hotspots from maintainability map
+- #4 fragile parsing:
+  - mitigation: tournament now parses key-value outputs robustly, with regression tests for parsing paths
+  - next: replace remaining heuristic contracts with structured markers in manager/strategy loops
+- #6 evals not always-on:
+  - mitigation: nightly full real-gate optimizer workflow added on self-hosted runner
+  - next: move from manual/self-hosted-only dependence toward broader always-on gating where possible
+
 ## Next Execution Sequence
 
-1. Expand candidate generation with backlog-driven prompt/policy/skill variants.
-2. Run nightly optimizer tournaments on fixed real gate and track winner provenance.
-3. Gate candidate promotion on non-regression windows before enabling autonomy-ramp controls.
+1. Expand mutation operators beyond dispatch-context prompts (policy/tool/skill-level variants).
+2. Add rolling-window promotion policy (multi-night consistency before profile promotion).
+3. Continue hardening parsing contracts in manager/strategy to remove brittle string heuristics.

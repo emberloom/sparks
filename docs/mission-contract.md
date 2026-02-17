@@ -59,7 +59,7 @@ Both lanes are measured using the same KPI framework.
 
 Reality check against mission:
 
-- strong agent/eval plumbing exists, but optimizer loop is not implemented yet
+- strong agent/eval plumbing exists, and an initial optimizer tournament loop is implemented
 - real quality gate now runs with strict per-task delivery minima
 - recent real-gate baseline (2026-02-17) is passing (`overall_score=0.96`, 3/3 terminal successes)
 

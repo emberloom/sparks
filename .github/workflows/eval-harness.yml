@@ -27,7 +27,18 @@ jobs:
 
       - name: Validate eval scripts
         run: |
-          python3 -m py_compile scripts/eval_harness.py scripts/eval_dashboard.py scripts/mock_athena_dispatch.py
+          python3 -m py_compile \
+            scripts/eval_harness.py \
+            scripts/eval_dashboard.py \
+            scripts/mock_athena_dispatch.py \
+            scripts/optimizer_tournament.py \
+            scripts/test_eval_harness.py \
+            scripts/test_optimizer_tournament.py
+
+      - name: Run eval script regression tests
+        run: |
+          python3 scripts/test_eval_harness.py
+          python3 scripts/test_optimizer_tournament.py
 
       - name: Run eval harness smoke suite
         run: |

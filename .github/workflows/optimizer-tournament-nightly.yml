@@ -1,0 +1,42 @@
+name: optimizer-tournament-nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 3 * * *"
+
+jobs:
+  nightly-optimizer:
+    # Intended for a self-hosted runner with Athena runtime + credentials configured.
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Athena
+        run: cargo build --bin athena
+
+      - name: Run nightly full real-gate optimizer tournament
+        run: |
+          python3 scripts/optimizer_tournament.py \
+            --suite eval/benchmark-real-gate.json \
+            --config config.toml \
+            --athena-bin target/debug/athena \
+            --cli-tool codex \
+            --regen-backlog \
+            --top-backlog 6 \
+            --backlog-mutations-per-ticket 3 \
+            --max-candidates 18 \
+            --promote-profile \
+            --fail-on-baseline-gate
+
+      - name: Show latest tournament report
+        run: |
+          ls -lt eval/results/optimizer-tournament-*.md | head -n 3
+          cat eval/results/optimizer-tournament-latest.md
