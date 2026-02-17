@@ -48,7 +48,7 @@ References:
 
 ## Roadmap Phases
 
-### Phase 1: Reliability Baseline (Now)
+### Phase 1: Reliability Baseline (Closed 2026-02-17)
 
 Goal: make autonomous execution terminal, deterministic, and measurable.
 
@@ -65,7 +65,13 @@ Exit criteria:
 - real gate stable and used for promotion decisions
 - CLI contract replay determinism for known error fixtures
 
-### Phase 2: Feature-Level Orchestration
+Closure evidence:
+
+- closeout report: `eval/results/phase1-phase2-closeout-latest.md`
+- latest real gate: `eval/results/eval-20260217T141900Z.json` (`gate_ok=true`)
+- promotion policy now consumes latest real-gate status from `eval/results/history.jsonl`
+
+### Phase 2: Feature-Level Orchestration (Closed 2026-02-17)
 
 Goal: scale from single tasks to coherent multi-task feature delivery.
 
@@ -103,6 +109,12 @@ Exit criteria:
 
 - at least 5 features delivered through contract-driven DAG flow
 - 100% feature acceptance criteria linked to objective evidence artifacts
+
+Closure evidence:
+
+- closeout run batch: `eval/results/phase2-closeout-runs-20260217T141929Z.json`
+- gate artifacts: `eval/results/feature-gate-athena-phase2-closeout-*.json` (`5/5 gate_ok=true`)
+- summary report: `eval/results/phase1-phase2-closeout-latest.md`
 
 ### Phase 3: Supervised Self-Build Pipeline
 

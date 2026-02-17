@@ -665,6 +665,32 @@ struct FeatureDispatchOptions {
     repo: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct FeatureRunnableTask {
+    task: feature_contract::FeatureTask,
+    lane: String,
+    risk: String,
+    repo: String,
+    wait_secs: u64,
+    outcome_grace_secs: u64,
+    context: String,
+}
+
+#[derive(Debug, Clone)]
+struct FeatureTaskDispatchOutcome {
+    task_id: String,
+    dispatch_task_id: String,
+    status: FeatureRunStatus,
+}
+
+#[derive(Debug, Clone)]
+struct EvalGateStatus {
+    suite: String,
+    timestamp_utc: String,
+    gate_ok: bool,
+    report_json: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeaturePromotionDecision {
     timestamp_utc: String,
@@ -673,6 +699,10 @@ struct FeaturePromotionDecision {
     contract_path: String,
     dispatch_ledger_json: String,
     verify_ledger_json: String,
+    real_gate_suite: Option<String>,
+    real_gate_timestamp_utc: Option<String>,
+    real_gate_ok: Option<bool>,
+    real_gate_report_json: Option<String>,
     auto_promotable: bool,
     approval_required: bool,
     reasons: Vec<String>,
@@ -769,6 +799,7 @@ async fn handle_feature(
                 );
             }
             let risk = contract.risk.clone().unwrap_or_else(|| "medium".to_string());
+            let real_gate = latest_real_gate_status()?;
             let decision = build_feature_promotion_decision(
                 &contract,
                 &risk,
@@ -777,6 +808,7 @@ async fn handle_feature(
                 &dispatch_ledger,
                 &verify_path,
                 &verify_ledger,
+                real_gate.as_ref(),
             );
             let (json_path, md_path) = write_feature_promotion_artifacts(&decision)?;
             println!("feature_promote_json={}", json_path.display());
@@ -915,6 +947,7 @@ async fn handle_feature(
                 .or_else(|| contract.risk.clone())
                 .unwrap_or_else(|| "medium".to_string());
             validate_risk(&risk_for_policy)?;
+            let real_gate = latest_real_gate_status()?;
             let decision = build_feature_promotion_decision(
                 &contract,
                 &risk_for_policy,
@@ -923,6 +956,7 @@ async fn handle_feature(
                 &dispatch.ledger,
                 &verify_json,
                 &verify,
+                real_gate.as_ref(),
             );
             let (promote_json, promote_md) = write_feature_promotion_artifacts(&decision)?;
             println!("feature_promote_json={}", promote_json.display());
@@ -972,6 +1006,126 @@ fn verify_check_in_profile(check: &feature_contract::VerificationCheck, profile:
         "strict" => matches!(check.profile.as_str(), "strict" | "fast"),
         _ => false,
     }
+}
+
+fn feature_batch_max_parallelism() -> usize {
+    std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(2)
+}
+
+fn latest_eval_gate_status(
+    history_path: &std::path::Path,
+    suite: &str,
+) -> anyhow::Result<Option<EvalGateStatus>> {
+    let raw = match std::fs::read_to_string(history_path) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            anyhow::bail!(
+                "Failed to read eval history '{}': {}",
+                history_path.display(),
+                e
+            )
+        }
+    };
+
+    let mut latest: Option<EvalGateStatus> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value
+            .get("suite")
+            .and_then(|v| v.as_str())
+            .map(|s| s == suite)
+            != Some(true)
+        {
+            continue;
+        }
+        let timestamp_utc = value
+            .get("timestamp_utc")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if timestamp_utc.is_empty() {
+            continue;
+        }
+        let candidate = EvalGateStatus {
+            suite: suite.to_string(),
+            timestamp_utc,
+            gate_ok: value
+                .get("gate_ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            report_json: value
+                .get("report_json")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        };
+        let replace = latest
+            .as_ref()
+            .map(|current| candidate.timestamp_utc > current.timestamp_utc)
+            .unwrap_or(true);
+        if replace {
+            latest = Some(candidate);
+        }
+    }
+    Ok(latest)
+}
+
+fn latest_real_gate_status() -> anyhow::Result<Option<EvalGateStatus>> {
+    latest_eval_gate_status(
+        std::path::Path::new("eval/results/history.jsonl"),
+        "athena-core-v2-real",
+    )
+}
+
+async fn run_feature_task_dispatch(
+    handle: core::CoreHandle,
+    config: Config,
+    runnable: FeatureRunnableTask,
+) -> anyhow::Result<FeatureTaskDispatchOutcome> {
+    let mut pulse_rx = handle.pulse_bus.subscribe();
+    let task_dispatch_id = handle
+        .dispatch_task(core::AutonomousTask {
+            goal: runnable.task.goal.clone(),
+            context: runnable.context,
+            ghost: runnable.task.ghost.clone(),
+            target: crate::pulse::PulseTarget::Broadcast,
+            lane: runnable.lane,
+            risk_tier: runnable.risk,
+            repo: runnable.repo,
+            task_id: None,
+        })
+        .await?;
+
+    println!(
+        "task={} dispatched_task_id={} wait_secs={} outcome_grace_secs={}",
+        runnable.task.id, task_dispatch_id, runnable.wait_secs, runnable.outcome_grace_secs
+    );
+    let wait =
+        wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, runnable.wait_secs).await;
+    let status = resolve_feature_run_status_after_wait(
+        &config,
+        &task_dispatch_id,
+        wait,
+        runnable.outcome_grace_secs,
+    )
+    .await?;
+
+    Ok(FeatureTaskDispatchOutcome {
+        task_id: runnable.task.id,
+        dispatch_task_id: task_dispatch_id,
+        status,
+    })
 }
 
 async fn run_feature_dispatch_flow(
@@ -1037,6 +1191,7 @@ async fn run_feature_dispatch_flow(
 
     for (idx, batch) in batches.iter().enumerate() {
         println!("batch={} tasks={}", idx + 1, batch.join(","));
+        let mut runnable = Vec::new();
         for task_id in batch {
             let task = contract
                 .task_by_id(task_id)
@@ -1056,7 +1211,6 @@ async fn run_feature_dispatch_flow(
             let repo = task.repo.clone().unwrap_or_else(|| default_repo.clone());
             validate_lane(&lane)?;
             validate_risk(&risk)?;
-
             let task_wait = task.wait_secs.unwrap_or(opts.wait_secs);
             let task_grace = compute_feature_outcome_grace_secs(
                 task,
@@ -1065,47 +1219,74 @@ async fn run_feature_dispatch_flow(
                 task_wait,
                 opts.outcome_grace_secs,
             );
-            let task_context = build_feature_task_context(contract, task);
-            let mut pulse_rx = handle.pulse_bus.subscribe();
-            let task_dispatch_id = handle
-                .dispatch_task(core::AutonomousTask {
-                    goal: task.goal.clone(),
-                    context: task_context,
-                    ghost: task.ghost.clone(),
-                    target: crate::pulse::PulseTarget::Broadcast,
-                    lane,
-                    risk_tier: risk,
-                    repo,
-                    task_id: None,
-                })
-                .await?;
+            runnable.push(FeatureRunnableTask {
+                task: task.clone(),
+                lane,
+                risk,
+                repo,
+                wait_secs: task_wait,
+                outcome_grace_secs: task_grace,
+                context: build_feature_task_context(contract, task),
+            });
+        }
+        if runnable.is_empty() {
+            continue;
+        }
 
-            println!(
-                "task={} dispatched_task_id={} wait_secs={} outcome_grace_secs={}",
-                task.id, task_dispatch_id, task_wait, task_grace
-            );
-            dispatch_ids.insert(task.id.clone(), task_dispatch_id.clone());
-            let wait = wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait).await;
-            let run_status =
-                resolve_feature_run_status_after_wait(&config, &task_dispatch_id, wait, task_grace)
-                    .await?;
-            match &run_status {
-                FeatureRunStatus::Succeeded => println!("task={} result=succeeded", task.id),
+        let max_parallel = std::cmp::min(feature_batch_max_parallelism(), runnable.len()).max(1);
+        println!(
+            "batch={} runnable={} max_parallel={}",
+            idx + 1,
+            runnable.len(),
+            max_parallel
+        );
+
+        let mut queue = runnable.into_iter();
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..max_parallel {
+            if let Some(next) = queue.next() {
+                set.spawn(run_feature_task_dispatch(
+                    handle.clone(),
+                    config.clone(),
+                    next,
+                ));
+            }
+        }
+
+        let mut stop_spawning = false;
+        while let Some(joined) = set.join_next().await {
+            let outcome = joined
+                .map_err(|e| anyhow::anyhow!("feature task worker join failed: {}", e))??;
+            match &outcome.status {
+                FeatureRunStatus::Succeeded => {
+                    println!("task={} result=succeeded", outcome.task_id)
+                }
                 FeatureRunStatus::Failed(reason) => println!(
                     "task={} result=failed reason={}",
-                    task.id,
+                    outcome.task_id,
                     reason.replace('\n', " ")
                 ),
                 FeatureRunStatus::Skipped(reason) => println!(
                     "task={} result=skipped reason={}",
-                    task.id,
+                    outcome.task_id,
                     reason.replace('\n', " ")
                 ),
             }
-            statuses.insert(task.id.clone(), run_status.clone());
-            if matches!(run_status, FeatureRunStatus::Failed(_)) && !opts.continue_on_failure {
+            let failed = matches!(outcome.status, FeatureRunStatus::Failed(_));
+            dispatch_ids.insert(outcome.task_id.clone(), outcome.dispatch_task_id);
+            statuses.insert(outcome.task_id.clone(), outcome.status);
+            if failed && !opts.continue_on_failure {
                 aborted_on_failure = true;
-                break;
+                stop_spawning = true;
+            }
+            if !stop_spawning {
+                if let Some(next) = queue.next() {
+                    set.spawn(run_feature_task_dispatch(
+                        handle.clone(),
+                        config.clone(),
+                        next,
+                    ));
+                }
             }
         }
         if aborted_on_failure {
@@ -1736,6 +1917,7 @@ fn build_feature_promotion_decision(
     dispatch_ledger: &FeatureRunLedger,
     verify_path: &std::path::Path,
     verify_ledger: &FeatureVerifyLedger,
+    real_gate: Option<&EvalGateStatus>,
 ) -> FeaturePromotionDecision {
     let mut reasons = Vec::new();
     if !dispatch_ledger.summary.promotable {
@@ -1760,6 +1942,28 @@ fn build_feature_promotion_decision(
     }
 
     let mut auto_promotable = dispatch_ledger.summary.promotable && verify_ledger.summary.promotable;
+    let (real_gate_suite, real_gate_timestamp_utc, real_gate_ok, real_gate_report_json) =
+        if let Some(gate) = real_gate {
+            if !gate.gate_ok {
+                reasons.push(format!(
+                    "latest real eval gate '{}' at {} is FAIL",
+                    gate.suite, gate.timestamp_utc
+                ));
+                auto_promotable = false;
+            }
+            (
+                Some(gate.suite.clone()),
+                Some(gate.timestamp_utc.clone()),
+                Some(gate.gate_ok),
+                gate.report_json.clone(),
+            )
+        } else {
+            reasons.push(
+                "no real eval gate result found (expected suite 'athena-core-v2-real')".to_string(),
+            );
+            auto_promotable = false;
+            (None, None, None, None)
+        };
     let approval_required = !matches!(risk_tier, "low");
     if approval_required {
         reasons.push(format!(
@@ -1776,6 +1980,10 @@ fn build_feature_promotion_decision(
         contract_path: contract_path.display().to_string(),
         dispatch_ledger_json: dispatch_path.display().to_string(),
         verify_ledger_json: verify_path.display().to_string(),
+        real_gate_suite,
+        real_gate_timestamp_utc,
+        real_gate_ok,
+        real_gate_report_json,
         auto_promotable,
         approval_required,
         reasons,
@@ -1819,6 +2027,18 @@ fn render_feature_promotion_markdown(decision: &FeaturePromotionDecision) -> Str
         "- verify_ledger_json: `{}`\n",
         decision.verify_ledger_json
     ));
+    if let Some(suite) = &decision.real_gate_suite {
+        out.push_str(&format!("- real_gate_suite: `{}`\n", suite));
+    }
+    if let Some(ts) = &decision.real_gate_timestamp_utc {
+        out.push_str(&format!("- real_gate_timestamp_utc: `{}`\n", ts));
+    }
+    if let Some(ok) = decision.real_gate_ok {
+        out.push_str(&format!("- real_gate_ok: `{}`\n", ok));
+    }
+    if let Some(report) = &decision.real_gate_report_json {
+        out.push_str(&format!("- real_gate_report_json: `{}`\n", report));
+    }
     if !decision.reasons.is_empty() {
         out.push_str("- reasons:\n");
         for reason in &decision.reasons {
@@ -2779,7 +2999,7 @@ async fn run_chat(
 mod tests {
     use super::{
         build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
-        compute_feature_outcome_grace_secs,
+        compute_feature_outcome_grace_secs, latest_eval_gate_status,
         pulse_matches_task_id, run_feature_verify, wait_for_autonomous_pulse, ChatCommand,
         FeatureRunStatus, WaitForAutonomousOutcome,
     };
@@ -3058,6 +3278,7 @@ mod tests {
             &dispatch,
             Path::new("eval/results/feature-test-verify.json"),
             &verify,
+            None,
         );
         assert!(!decision.auto_promotable);
         assert!(decision.approval_required);
@@ -3065,6 +3286,70 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("requires human approval")));
+    }
+
+    #[test]
+    fn promotion_decision_requires_real_gate_signal_for_auto_promote() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert("T2".to_string(), FeatureRunStatus::Succeeded);
+        let dispatch = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            2,
+            0,
+            0,
+        );
+        let verify = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
+        let decision = build_feature_promotion_decision(
+            &contract,
+            "low",
+            Path::new("eval/feature-contract-example.yaml"),
+            Path::new("eval/results/feature-test-dispatch.json"),
+            &dispatch,
+            Path::new("eval/results/feature-test-verify.json"),
+            &verify,
+            None,
+        );
+        assert!(!decision.auto_promotable);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|r| r.contains("no real eval gate result found")));
+    }
+
+    #[test]
+    fn latest_eval_gate_status_picks_latest_matching_suite() {
+        let history = std::env::temp_dir().join(format!(
+            "athena-history-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &history,
+            r#"{"timestamp_utc":"20260217T100000Z","suite":"athena-core-v2-real","gate_ok":false}
+{"timestamp_utc":"20260217T090000Z","suite":"other-suite","gate_ok":true}
+{"timestamp_utc":"20260217T110000Z","suite":"athena-core-v2-real","gate_ok":true,"report_json":"eval/results/eval-20260217T110000Z.json"}
+"#,
+        )
+        .unwrap();
+        let status = latest_eval_gate_status(&history, "athena-core-v2-real")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.timestamp_utc, "20260217T110000Z");
+        assert!(status.gate_ok);
+        assert_eq!(
+            status.report_json.as_deref(),
+            Some("eval/results/eval-20260217T110000Z.json")
+        );
+        let _ = std::fs::remove_file(&history);
     }
 
     #[tokio::test]

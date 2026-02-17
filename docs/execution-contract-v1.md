@@ -36,7 +36,7 @@ Use canonical reasons:
 
 Wrapper errors should emit structured marker lines:
 
-- `[athena_cli_contract] tool=<tool> code=<code> retry_same=<n> fallback=<tool|none>`
+- `[athena_cli_contract] tool=<tool> code=<code> retry_same=<true|false> fallback=<true|false> exit_code=<n|-> timeout_secs=<n>`
 
 Consumers must parse this marker and apply policy deterministically.
 

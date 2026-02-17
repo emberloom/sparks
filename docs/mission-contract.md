@@ -73,6 +73,10 @@ Estimated maturity by layer:
 
 See detailed roadmap: `docs/self-improvement-roadmap.md`.
 
+Phase closeout evidence (2026-02-17):
+
+- `eval/results/phase1-phase2-closeout-latest.md`
+
 ## Operating Model (Contract Stack)
 
 Athena should execute work using this explicit chain:

@@ -68,6 +68,7 @@ Useful options:
 Dispatch behavior:
 
 - tasks run in topological order
+- independent tasks in the same DAG batch run in bounded parallelism (`ATHENA_FEATURE_BATCH_CONCURRENCY`, default `2`)
 - tasks with failed/skipped dependencies are skipped
 - each task waits for terminal outcome correlation via `task_id`
 - if pulse wait times out, dispatch performs an adaptive DB terminal-outcome grace wait before finalizing
@@ -135,6 +136,7 @@ athena feature promote \
 Promote behavior:
 
 - loads dispatch + verify ledgers (latest for feature by default)
+- loads latest real eval gate status from `eval/results/history.jsonl` (suite `athena-core-v2-real`) and blocks auto-promotion when gate is missing or failing
 - applies risk-tier policy:
   - `low`: auto-promote allowed only when both ledgers are promotable
   - `medium/high`: always approval-required (PR-only)

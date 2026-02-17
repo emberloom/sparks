@@ -80,6 +80,7 @@ Runtime shape for `athena feature verify`:
 Runtime decision command:
 
 - `athena feature promote --file <contract>`
+- auto-promotion additionally requires latest real eval gate (`athena-core-v2-real`) to be passing
 
 One-shot gate command:
 
