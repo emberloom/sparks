@@ -57,7 +57,7 @@ Useful options:
 
 - `--continue-on-failure` keep running independent tasks
 - `--dry-run` resolve DAG and print execution plan without dispatching
-- `--outcome-grace-secs <n>` DB terminal-outcome grace wait after pulse timeout
+- `--outcome-grace-secs <n>` override adaptive DB terminal-outcome grace wait
 - `--cli-tool codex|claude_code|opencode`
 - `--cli-model <model>`
 - `--lane <delivery|self_improvement>`
@@ -69,7 +69,8 @@ Dispatch behavior:
 - tasks run in topological order
 - tasks with failed/skipped dependencies are skipped
 - each task waits for terminal outcome correlation via `task_id`
-- if pulse wait times out, dispatch performs a DB terminal-outcome grace wait before finalizing
+- if pulse wait times out, dispatch performs an adaptive DB terminal-outcome grace wait before finalizing
+- adaptive grace defaults by risk and task profile (ghost/goal/wait timeout), but can be overridden with `--outcome-grace-secs`
 - unresolved waits are finalized with canonical reasons (`outcome_wait_timeout`, `dispatch_channel_closed`)
 - acceptance coverage and satisfaction are summarized in per-run ledgers:
   - `eval/results/feature-<feature_id>-<timestamp>.json`

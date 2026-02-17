@@ -271,9 +271,10 @@ enum FeatureAction {
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
         wait_secs: u64,
-        /// Extra grace window (seconds) to poll DB terminal outcome after pulse wait timeout
-        #[arg(long, default_value_t = 180)]
-        outcome_grace_secs: u64,
+        /// Optional grace window (seconds) to poll DB terminal outcome after pulse wait timeout.
+        /// If omitted, Athena computes adaptive grace from risk tier and task profile.
+        #[arg(long)]
+        outcome_grace_secs: Option<u64>,
         /// Continue dispatching independent tasks after failures
         #[arg(long)]
         continue_on_failure: bool,
@@ -812,6 +813,13 @@ async fn handle_feature(
                     validate_risk(&risk)?;
 
                     let task_wait = task.wait_secs.unwrap_or(wait_secs);
+                    let task_grace = compute_feature_outcome_grace_secs(
+                        task,
+                        &lane,
+                        &risk,
+                        task_wait,
+                        outcome_grace_secs,
+                    );
                     let task_context = build_feature_task_context(&contract, task);
                     let mut pulse_rx = handle.pulse_bus.subscribe();
                     let task_dispatch_id = handle
@@ -828,8 +836,8 @@ async fn handle_feature(
                         .await?;
 
                     println!(
-                        "task={} dispatched_task_id={} wait_secs={}",
-                        task.id, task_dispatch_id, task_wait
+                        "task={} dispatched_task_id={} wait_secs={} outcome_grace_secs={}",
+                        task.id, task_dispatch_id, task_wait, task_grace
                     );
                     dispatch_ids.insert(task.id.clone(), task_dispatch_id.clone());
                     let wait =
@@ -839,7 +847,7 @@ async fn handle_feature(
                         &config,
                         &task_dispatch_id,
                         wait,
-                        outcome_grace_secs,
+                        task_grace,
                     )
                     .await?;
                     match &run_status {
@@ -940,6 +948,51 @@ fn blocked_dependency_reason(
     } else {
         Some(blockers.join("; "))
     }
+}
+
+fn compute_feature_outcome_grace_secs(
+    task: &feature_contract::FeatureTask,
+    lane: &str,
+    risk_tier: &str,
+    wait_secs: u64,
+    override_grace_secs: Option<u64>,
+) -> u64 {
+    if let Some(v) = override_grace_secs {
+        return v.max(1);
+    }
+
+    let mut base = match risk_tier {
+        "low" => 180,
+        "medium" => 300,
+        "high" => 480,
+        _ => 240,
+    };
+    if lane == "self_improvement" {
+        base += 60;
+    }
+
+    let ghost = task.ghost.as_deref().unwrap_or("auto");
+    if matches!(ghost, "coder" | "architect") {
+        base += 180;
+    } else if ghost == "scout" {
+        base += 60;
+    }
+
+    let goal = task.goal.to_ascii_lowercase();
+    if goal.contains("test")
+        || goal.contains("refactor")
+        || goal.contains("compile")
+        || goal.contains("cargo")
+        || goal.contains("benchmark")
+        || goal.contains("integration")
+        || goal.contains("migrat")
+        || goal.contains("implement")
+    {
+        base += 120;
+    }
+
+    let wait_scaled = wait_secs.saturating_mul(2);
+    base.max(wait_scaled).clamp(60, 1800)
 }
 
 fn build_feature_task_context(
@@ -2411,6 +2464,7 @@ async fn run_chat(
 mod tests {
     use super::{
         build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
+        compute_feature_outcome_grace_secs,
         pulse_matches_task_id, run_feature_verify, wait_for_autonomous_pulse, ChatCommand,
         FeatureRunStatus, WaitForAutonomousOutcome,
     };
@@ -2667,5 +2721,21 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("requires human approval")));
+    }
+
+    #[test]
+    fn outcome_grace_override_takes_precedence() {
+        let task = sample_contract().tasks[0].clone();
+        let secs = compute_feature_outcome_grace_secs(&task, "delivery", "low", 30, Some(42));
+        assert_eq!(secs, 42);
+    }
+
+    #[test]
+    fn outcome_grace_scales_with_task_profile() {
+        let mut task = sample_contract().tasks[0].clone();
+        task.ghost = Some("coder".to_string());
+        task.goal = "Implement integration test coverage".to_string();
+        let secs = compute_feature_outcome_grace_secs(&task, "delivery", "low", 60, None);
+        assert!(secs >= 360);
     }
 }
