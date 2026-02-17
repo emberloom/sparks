@@ -5155,6 +5155,11 @@ mod tests {
     }
 
     #[test]
+    fn parse_pr_url_returns_none_when_missing() {
+        assert_eq!(super::parse_pr_url("no pull request link here"), None);
+    }
+
+    #[test]
     fn parse_git_status_paths_supports_rename_line() {
         let out = " M src/main.rs\nR  old.txt -> new.txt\n?? notes.md\n";
         let paths = parse_git_status_paths(out);
