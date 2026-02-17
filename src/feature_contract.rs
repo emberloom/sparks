@@ -18,6 +18,8 @@ pub struct FeatureContract {
     #[serde(default)]
     pub acceptance_criteria: Vec<AcceptanceCriterion>,
     #[serde(default)]
+    pub verification_checks: Vec<VerificationCheck>,
+    #[serde(default)]
     pub tasks: Vec<FeatureTask>,
 }
 
@@ -26,6 +28,16 @@ pub struct AcceptanceCriterion {
     pub id: String,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerificationCheck {
+    pub id: String,
+    pub command: String,
+    #[serde(default)]
+    pub mapped_acceptance: Vec<String>,
+    #[serde(default = "default_required")]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +71,10 @@ pub struct FeatureTask {
 }
 
 fn default_enabled() -> bool {
+    true
+}
+
+fn default_required() -> bool {
     true
 }
 
@@ -112,6 +128,35 @@ impl FeatureContract {
         let mut acceptance_coverage: HashMap<String, usize> = HashMap::new();
         for id in &acceptance_ids {
             acceptance_coverage.insert(id.clone(), 0);
+        }
+
+        let mut verification_ids = std::collections::HashSet::new();
+        for check in &self.verification_checks {
+            if check.id.trim().is_empty() {
+                errors.push("verification check id must not be empty".to_string());
+            } else if !verification_ids.insert(check.id.clone()) {
+                errors.push(format!("duplicate verification check id '{}'", check.id));
+            }
+            if check.command.trim().is_empty() {
+                errors.push(format!(
+                    "verification check '{}' has empty command",
+                    check.id
+                ));
+            }
+            if check.mapped_acceptance.is_empty() {
+                errors.push(format!(
+                    "verification check '{}' must map at least one acceptance criterion",
+                    check.id
+                ));
+            }
+            for mapped in &check.mapped_acceptance {
+                if !acceptance_ids.contains(mapped) {
+                    errors.push(format!(
+                        "verification check '{}' maps unknown acceptance criterion '{}'",
+                        check.id, mapped
+                    ));
+                }
+            }
         }
 
         let mut ids = std::collections::HashSet::new();
@@ -304,6 +349,23 @@ impl FeatureContract {
         }
         coverage
     }
+
+    pub fn acceptance_verification_coverage(&self) -> HashMap<String, Vec<String>> {
+        let mut coverage: HashMap<String, Vec<String>> = self
+            .acceptance_criteria
+            .iter()
+            .map(|a| (a.id.clone(), Vec::new()))
+            .collect();
+        for check in &self.verification_checks {
+            for mapped in &check.mapped_acceptance {
+                coverage
+                    .entry(mapped.clone())
+                    .or_default()
+                    .push(check.id.clone());
+            }
+        }
+        coverage
+    }
 }
 
 fn normalize_lane_and_risk(
@@ -350,6 +412,10 @@ acceptance_criteria:
   - id: AC-1
   - id: AC-2
   - id: AC-3
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-1, AC-2, AC-3]
 tasks:
   - id: T1
     goal: one
@@ -394,6 +460,10 @@ tasks:
 feature_id: cyc
 acceptance_criteria:
   - id: AC-1
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-1]
 tasks:
   - id: A
     goal: a
@@ -417,6 +487,10 @@ tasks:
 feature_id: dep
 acceptance_criteria:
   - id: AC-1
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-1]
 tasks:
   - id: A
     goal: a
@@ -441,6 +515,10 @@ feature_id: cover
 acceptance_criteria:
   - id: AC-1
   - id: AC-2
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-1]
 tasks:
   - id: A
     goal: a
@@ -459,6 +537,10 @@ tasks:
 feature_id: map
 acceptance_criteria:
   - id: AC-1
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-1]
 tasks:
   - id: A
     goal: a
@@ -468,5 +550,27 @@ tasks:
         .unwrap();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("maps unknown acceptance criterion"));
+    }
+
+    #[test]
+    fn rejects_unknown_acceptance_in_verification_check() {
+        let mut c: FeatureContract = serde_yaml::from_str(
+            r#"
+feature_id: verify-map
+acceptance_criteria:
+  - id: AC-1
+verification_checks:
+  - id: V1
+    command: "echo ok"
+    mapped_acceptance: [AC-2]
+tasks:
+  - id: A
+    goal: a
+    mapped_acceptance: [AC-1]
+"#,
+        )
+        .unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("verification check 'V1' maps unknown acceptance criterion"));
     }
 }

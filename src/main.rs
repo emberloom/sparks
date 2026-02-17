@@ -245,6 +245,12 @@ enum FeatureAction {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Run feature-level verification checks mapped to acceptance criteria
+    Verify {
+        /// Path to feature contract file
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Dispatch feature tasks using DAG order and wait for terminal outcomes
     Dispatch {
         /// Path to feature contract file
@@ -541,6 +547,48 @@ struct FeatureRunSummary {
     acceptance_covered: bool,
     acceptance_satisfied: bool,
     promotable: bool,
+    promotion_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureVerifyCheckRow {
+    check_id: String,
+    command: String,
+    required: bool,
+    status: String,
+    exit_code: Option<i32>,
+    mapped_acceptance: Vec<String>,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureVerifyAcceptanceRow {
+    acceptance_id: String,
+    checks: Vec<String>,
+    passed_checks: Vec<String>,
+    satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureVerifyLedger {
+    timestamp_utc: String,
+    feature_id: String,
+    contract_path: String,
+    checks: Vec<FeatureVerifyCheckRow>,
+    acceptance: Vec<FeatureVerifyAcceptanceRow>,
+    summary: FeatureVerifySummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureVerifySummary {
+    checks_total: usize,
+    checks_passed: usize,
+    checks_failed: usize,
+    required_checks_failed: usize,
+    acceptance_satisfied: bool,
+    promotable: bool,
+    promotion_reasons: Vec<String>,
 }
 
 async fn handle_feature(
@@ -554,17 +602,44 @@ async fn handle_feature(
             let batches = contract.execution_batches()?;
             let enabled = contract.tasks.iter().filter(|t| t.enabled).count();
             let acceptance_count = contract.acceptance_criteria.len();
+            let checks_count = contract.verification_checks.len();
             println!(
-                "feature_id={} valid=true tasks_enabled={} acceptance={} batches={}",
+                "feature_id={} valid=true tasks_enabled={} acceptance={} checks={} batches={}",
                 contract.feature_id,
                 enabled,
                 acceptance_count,
+                checks_count,
                 batches.len()
             );
         }
         FeatureAction::Plan { file } => {
             let contract = feature_contract::load_feature_contract(&file)?;
             print_feature_plan(&contract)?;
+        }
+        FeatureAction::Verify { file } => {
+            let contract = feature_contract::load_feature_contract(&file)?;
+            let ledger = run_feature_verify(&contract, &file)?;
+            let (json_path, md_path) = write_feature_verify_artifacts(&ledger)?;
+            println!("feature_verify_json={}", json_path.display());
+            println!("feature_verify_md={}", md_path.display());
+            println!(
+                "feature_id={} verify checks_total={} checks_failed={} required_checks_failed={} acceptance_satisfied={} promotable={}",
+                contract.feature_id,
+                ledger.summary.checks_total,
+                ledger.summary.checks_failed,
+                ledger.summary.required_checks_failed,
+                ledger.summary.acceptance_satisfied,
+                ledger.summary.promotable
+            );
+            if !ledger.summary.promotable {
+                if !ledger.summary.promotion_reasons.is_empty() {
+                    println!(
+                        "feature_verify_reasons={}",
+                        ledger.summary.promotion_reasons.join(" | ")
+                    );
+                }
+                anyhow::bail!("Feature verify failed promotion gate.");
+            }
         }
         FeatureAction::Dispatch {
             file,
@@ -775,6 +850,12 @@ async fn handle_feature(
                 "feature_id={} summary succeeded={} failed={} skipped={} promotable={}",
                 contract.feature_id, succeeded, failed, skipped, ledger.summary.promotable
             );
+            if !ledger.summary.promotion_reasons.is_empty() {
+                println!(
+                    "feature_promotion_reasons={}",
+                    ledger.summary.promotion_reasons.join(" | ")
+                );
+            }
             if aborted_on_failure {
                 anyhow::bail!(
                     "Feature dispatch stopped early due to failed task (use --continue-on-failure to continue)."
@@ -856,12 +937,14 @@ fn build_feature_task_context(
 fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::Result<()> {
     let batches = contract.execution_batches()?;
     let acceptance = contract.acceptance_coverage();
+    let acceptance_verify = contract.acceptance_verification_coverage();
     println!(
-        "feature_id={} tasks_total={} tasks_enabled={} acceptance={} batches={}",
+        "feature_id={} tasks_total={} tasks_enabled={} acceptance={} checks={} batches={}",
         contract.feature_id,
         contract.tasks.len(),
         contract.tasks.iter().filter(|t| t.enabled).count(),
         contract.acceptance_criteria.len(),
+        contract.verification_checks.len(),
         batches.len()
     );
     for ac in &contract.acceptance_criteria {
@@ -878,6 +961,31 @@ fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::R
             } else {
                 covered_by
             }
+        );
+    }
+    for ac in &contract.acceptance_criteria {
+        let checks = acceptance_verify
+            .get(&ac.id)
+            .cloned()
+            .unwrap_or_default()
+            .join(",");
+        println!(
+            "acceptance_verify={} checks={}",
+            ac.id,
+            if checks.is_empty() {
+                "-".to_string()
+            } else {
+                checks
+            }
+        );
+    }
+    for check in &contract.verification_checks {
+        println!(
+            "verification_check={} required={} acceptance={} command={}",
+            check.id,
+            check.required,
+            check.mapped_acceptance.join(","),
+            check.command
         );
     }
     for (idx, batch) in batches.iter().enumerate() {
@@ -937,6 +1045,20 @@ fn build_feature_run_ledger(
             satisfied,
         });
     }
+    let mut promotion_reasons = Vec::new();
+    if failed > 0 {
+        promotion_reasons.push(format!("{} task(s) failed", failed));
+    }
+    if skipped > 0 {
+        promotion_reasons.push(format!("{} task(s) skipped", skipped));
+    }
+    if !all_covered {
+        promotion_reasons.push("some acceptance criteria have no task coverage".to_string());
+    }
+    if !all_satisfied {
+        promotion_reasons
+            .push("some acceptance criteria have no succeeded mapped task".to_string());
+    }
 
     let tasks = contract
         .tasks
@@ -969,6 +1091,7 @@ fn build_feature_run_ledger(
             acceptance_covered: all_covered,
             acceptance_satisfied: all_satisfied,
             promotable: failed == 0 && skipped == 0 && all_satisfied,
+            promotion_reasons,
         },
     }
 }
@@ -998,7 +1121,7 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
     out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
     out.push_str(&format!(
-        "- summary: succeeded={} failed={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n\n",
+        "- summary: succeeded={} failed={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n",
         ledger.summary.succeeded,
         ledger.summary.failed,
         ledger.summary.skipped,
@@ -1006,6 +1129,13 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
         ledger.summary.acceptance_satisfied,
         ledger.summary.promotable
     ));
+    if !ledger.summary.promotion_reasons.is_empty() {
+        out.push_str(&format!(
+            "- promotion_reasons: {}\n",
+            ledger.summary.promotion_reasons.join(" | ")
+        ));
+    }
+    out.push('\n');
 
     out.push_str("## Tasks\n\n");
     out.push_str("| task_id | dispatch_task_id | status | reason | mapped_acceptance |\n");
@@ -1049,6 +1179,222 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
         ));
     }
     out
+}
+
+fn run_feature_verify(
+    contract: &feature_contract::FeatureContract,
+    contract_path: &std::path::Path,
+) -> anyhow::Result<FeatureVerifyLedger> {
+    if contract.verification_checks.is_empty() {
+        anyhow::bail!(
+            "feature '{}' has no verification_checks; add checks mapped to acceptance criteria",
+            contract.feature_id
+        );
+    }
+
+    let mut check_rows = Vec::new();
+    let mut checks_passed = 0usize;
+    let mut checks_failed = 0usize;
+    let mut required_checks_failed = 0usize;
+
+    for check in &contract.verification_checks {
+        let output = std::process::Command::new("zsh")
+            .arg("-lc")
+            .arg(&check.command)
+            .output();
+        let (status, exit_code, stdout_tail, stderr_tail) = match output {
+            Ok(out) => {
+                let ok = out.status.success();
+                if ok {
+                    checks_passed += 1;
+                } else {
+                    checks_failed += 1;
+                    if check.required {
+                        required_checks_failed += 1;
+                    }
+                }
+                (
+                    if ok { "passed" } else { "failed" }.to_string(),
+                    out.status.code(),
+                    tail_text(&String::from_utf8_lossy(&out.stdout), 500),
+                    tail_text(&String::from_utf8_lossy(&out.stderr), 500),
+                )
+            }
+            Err(e) => {
+                checks_failed += 1;
+                if check.required {
+                    required_checks_failed += 1;
+                }
+                (
+                    "error".to_string(),
+                    None,
+                    String::new(),
+                    format!("failed to launch check command: {}", e),
+                )
+            }
+        };
+        check_rows.push(FeatureVerifyCheckRow {
+            check_id: check.id.clone(),
+            command: check.command.clone(),
+            required: check.required,
+            status,
+            exit_code,
+            mapped_acceptance: check.mapped_acceptance.clone(),
+            stdout_tail,
+            stderr_tail,
+        });
+    }
+
+    let mut acceptance_rows = Vec::new();
+    let verification_coverage = contract.acceptance_verification_coverage();
+    let mut acceptance_satisfied = true;
+    for ac in &contract.acceptance_criteria {
+        let checks = verification_coverage
+            .get(&ac.id)
+            .cloned()
+            .unwrap_or_default();
+        let passed_checks = check_rows
+            .iter()
+            .filter(|c| c.status == "passed" && c.mapped_acceptance.iter().any(|id| id == &ac.id))
+            .map(|c| c.check_id.clone())
+            .collect::<Vec<_>>();
+        let satisfied = !passed_checks.is_empty();
+        acceptance_satisfied &= satisfied;
+        acceptance_rows.push(FeatureVerifyAcceptanceRow {
+            acceptance_id: ac.id.clone(),
+            checks,
+            passed_checks,
+            satisfied,
+        });
+    }
+
+    let mut promotion_reasons = Vec::new();
+    if required_checks_failed > 0 {
+        promotion_reasons.push(format!(
+            "{} required verification check(s) failed",
+            required_checks_failed
+        ));
+    }
+    if !acceptance_satisfied {
+        promotion_reasons
+            .push("acceptance criteria are not satisfied by passing checks".to_string());
+    }
+    let promotable = required_checks_failed == 0 && acceptance_satisfied;
+
+    Ok(FeatureVerifyLedger {
+        timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        feature_id: contract.feature_id.clone(),
+        contract_path: contract_path.display().to_string(),
+        checks: check_rows,
+        acceptance: acceptance_rows,
+        summary: FeatureVerifySummary {
+            checks_total: checks_passed + checks_failed,
+            checks_passed,
+            checks_failed,
+            required_checks_failed,
+            acceptance_satisfied,
+            promotable,
+            promotion_reasons,
+        },
+    })
+}
+
+fn write_feature_verify_artifacts(
+    ledger: &FeatureVerifyLedger,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("eval/results");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = ledger
+        .feature_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let base = format!(
+        "feature-verify-{}-{}",
+        safe_feature_id, ledger.timestamp_utc
+    );
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(ledger)?)?;
+    std::fs::write(&md_path, render_feature_verify_markdown(ledger))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Verify Ledger\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", ledger.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
+    out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
+    out.push_str(&format!(
+        "- summary: checks_total={} checks_passed={} checks_failed={} required_checks_failed={} acceptance_satisfied={} promotable={}\n",
+        ledger.summary.checks_total,
+        ledger.summary.checks_passed,
+        ledger.summary.checks_failed,
+        ledger.summary.required_checks_failed,
+        ledger.summary.acceptance_satisfied,
+        ledger.summary.promotable
+    ));
+    if !ledger.summary.promotion_reasons.is_empty() {
+        out.push_str(&format!(
+            "- promotion_reasons: {}\n",
+            ledger.summary.promotion_reasons.join(" | ")
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## Checks\n\n");
+    out.push_str("| check_id | status | required | exit_code | mapped_acceptance | command |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for row in &ledger.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | `{}` |\n",
+            row.check_id,
+            row.status,
+            row.required,
+            row.exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            if row.mapped_acceptance.is_empty() {
+                "-".to_string()
+            } else {
+                row.mapped_acceptance.join(",")
+            },
+            row.command.replace('|', "\\|")
+        ));
+    }
+
+    out.push_str("\n## Acceptance\n\n");
+    out.push_str("| acceptance_id | checks | passed_checks | satisfied |\n");
+    out.push_str("|---|---|---|---|\n");
+    for row in &ledger.acceptance {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            row.acceptance_id,
+            if row.checks.is_empty() {
+                "-".to_string()
+            } else {
+                row.checks.join(",")
+            },
+            if row.passed_checks.is_empty() {
+                "-".to_string()
+            } else {
+                row.passed_checks.join(",")
+            },
+            row.satisfied
+        ));
+    }
+    out
+}
+
+fn tail_text(input: &str, max_chars: usize) -> String {
+    let mut chars = input.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return input.trim().to_string();
+    }
+    let start = chars.len() - max_chars;
+    chars.drain(..start);
+    chars.into_iter().collect::<String>().trim().to_string()
 }
 
 fn handle_memory(
@@ -1775,10 +2121,12 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_run_ledger, classify_chat_command, pulse_matches_task_id,
+        build_feature_run_ledger, classify_chat_command, pulse_matches_task_id, run_feature_verify,
         wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, WaitForAutonomousOutcome,
     };
-    use crate::feature_contract::{AcceptanceCriterion, FeatureContract, FeatureTask};
+    use crate::feature_contract::{
+        AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
+    };
     use crate::pulse::{Pulse, PulseSource, Urgency};
     use std::collections::HashMap;
     use std::path::Path;
@@ -1881,6 +2229,20 @@ mod tests {
                     description: None,
                 },
             ],
+            verification_checks: vec![
+                VerificationCheck {
+                    id: "V1".to_string(),
+                    command: "true".to_string(),
+                    mapped_acceptance: vec!["AC-1".to_string()],
+                    required: true,
+                },
+                VerificationCheck {
+                    id: "V2".to_string(),
+                    command: "true".to_string(),
+                    mapped_acceptance: vec!["AC-2".to_string()],
+                    required: true,
+                },
+            ],
             tasks: vec![
                 FeatureTask {
                     id: "T1".to_string(),
@@ -1957,5 +2319,29 @@ mod tests {
         );
         assert!(ledger.summary.acceptance_satisfied);
         assert!(ledger.summary.promotable);
+    }
+
+    #[test]
+    fn feature_verify_fails_when_required_check_fails() {
+        let mut contract = sample_contract();
+        contract.verification_checks[1].command = "false".to_string();
+        let ledger =
+            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        assert_eq!(ledger.summary.required_checks_failed, 1);
+        assert!(!ledger.summary.promotable);
+    }
+
+    #[test]
+    fn feature_verify_fails_when_acceptance_has_no_passing_check() {
+        let mut contract = sample_contract();
+        contract.verification_checks[1].command = "false".to_string();
+        let ledger =
+            run_feature_verify(&contract, Path::new("eval/feature-contract-example.yaml")).unwrap();
+        assert!(!ledger.summary.acceptance_satisfied);
+        assert!(ledger
+            .summary
+            .promotion_reasons
+            .iter()
+            .any(|r| r.contains("acceptance criteria are not satisfied")));
     }
 }

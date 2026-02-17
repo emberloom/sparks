@@ -15,6 +15,11 @@ Use YAML or JSON with:
 - `acceptance_criteria[]` (required):
   - `id`
   - optional `description`
+- `verification_checks[]` (recommended, required for `feature verify`):
+  - `id`
+  - `command`
+  - `mapped_acceptance[]`
+  - optional `required` (default `true`)
 - `tasks[]` with:
   - `id`, `goal`
   - required `mapped_acceptance[]` (one or more acceptance IDs)
@@ -67,6 +72,22 @@ Dispatch behavior:
 - acceptance coverage and satisfaction are summarized in per-run ledgers:
   - `eval/results/feature-<feature_id>-<timestamp>.json`
   - `eval/results/feature-<feature_id>-<timestamp>.md`
+
+## Verify
+
+```bash
+athena feature verify --file eval/feature-contract-example.yaml
+```
+
+Verify behavior:
+
+- runs each `verification_checks[].command` via shell (`zsh -lc`)
+- records pass/fail with exit codes and output tails
+- computes acceptance satisfaction from passing mapped checks
+- emits ledgers:
+  - `eval/results/feature-verify-<feature_id>-<timestamp>.json`
+  - `eval/results/feature-verify-<feature_id>-<timestamp>.md`
+- fails non-zero if promotion gate fails
 
 Validation guarantees:
 

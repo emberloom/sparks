@@ -82,11 +82,14 @@ Current implementation status:
   - `athena feature validate --file <contract>`
   - `athena feature plan --file <contract>`
   - `athena feature dispatch --file <contract>`
+  - `athena feature verify --file <contract>`
 - acceptance traceability floor is implemented:
   - required `acceptance_criteria[]` in feature contracts
   - required per-task `mapped_acceptance[]`
   - validation enforces full acceptance coverage by enabled tasks
-- feature dispatch now emits evidence ledgers under `eval/results/feature-*.{json,md}`
+- feature dispatch and verify emit evidence ledgers under:
+  - `eval/results/feature-*.{json,md}`
+  - `eval/results/feature-verify-*.{json,md}`
 - reference workflow: `docs/feature-contract-workflow.md`
 
 Exit criteria:

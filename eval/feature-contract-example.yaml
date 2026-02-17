@@ -13,6 +13,20 @@ acceptance_criteria:
   - id: AC-4
     description: "Final evidence summary reflects executed checks and changed files."
 
+verification_checks:
+  - id: VC-1
+    command: "cargo test --quiet feature_contract -- --nocapture"
+    mapped_acceptance: [AC-2]
+    required: true
+  - id: VC-2
+    command: "cargo run --quiet -- feature plan --file eval/feature-contract-example.yaml"
+    mapped_acceptance: [AC-1, AC-3]
+    required: true
+  - id: VC-3
+    command: "test -f docs/feature-contract-workflow.md"
+    mapped_acceptance: [AC-4]
+    required: true
+
 tasks:
   - id: T1
     ghost: scout

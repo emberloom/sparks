@@ -63,6 +63,14 @@ Rules:
 - `manual_checks`: list
 - `performance_or_reliability_checks`: list
 
+Runtime shape for `athena feature verify`:
+
+- `verification_checks[]`:
+  - `id`
+  - `command`
+  - `mapped_acceptance[]`
+  - `required` (default `true`)
+
 ## Promotion Policy
 
 - `low risk`: auto-merge allowed only when gates are green and confidence is high
