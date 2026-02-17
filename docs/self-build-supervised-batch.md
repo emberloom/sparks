@@ -30,6 +30,9 @@ python3 scripts/supervised_self_build_batch.py \
   --cli-tool codex
 ```
 
+By default the runner pre-builds `target/debug/athena` before executing tickets.
+Use `--skip-build` only when you intentionally want to reuse an existing binary.
+
 ## Outputs
 
 - per run:

@@ -155,6 +155,11 @@ def main() -> int:
     p.add_argument("--timeout-secs", type=int, default=1800)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--athena-bin", default="./target/debug/athena")
+    p.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Skip pre-batch cargo build of athena binary.",
+    )
     args = p.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
@@ -164,6 +169,15 @@ def main() -> int:
     if not tickets:
         print("No tickets found.")
         return 1
+
+    if not args.dry_run and not args.skip_build:
+        print("Pre-building athena binary...", flush=True)
+        build = run_cmd(["cargo", "build", "-q"], repo, timeout=max(args.timeout_secs, 900))
+        if build.returncode != 0:
+            sys.stderr.write(build.stdout or "")
+            sys.stderr.write(build.stderr or "")
+            print("Failed to build athena binary before batch.", file=sys.stderr)
+            return build.returncode or 1
 
     rows: list[BatchRow] = []
     for i, ticket in enumerate(tickets, start=1):
@@ -259,4 +273,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
