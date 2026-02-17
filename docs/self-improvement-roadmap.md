@@ -1,158 +1,148 @@
 # Athena Self-Improvement Roadmap
 
-Date: 2026-02-16
+Date: 2026-02-17
+
+## North Star
+
+Build Athena into a spec-driven engineering agent that can reliably deliver backlog work across products and improve itself through measured, policy-bounded iteration.
 
 ## Current State (Baseline)
 
-As of 2026-02-16, Athena has strong execution/eval plumbing but does not yet implement a true self-improvement optimizer loop (OpenEvolve-style prompt/skill evolution and selection).
+As of 2026-02-16 to 2026-02-17:
 
-### Implemented Foundations
+- strong coding-agent backbone exists across `claude_code`, `codex`, and `opencode`
+- autonomous task loop, outcomes, and memory logging exist
+- eval harness, matrix runs, history, and dashboard exist
+- strict real-gate scoring now exists, including task-level delivery minima
 
-- Multi-CLI coding execution (`claude_code`, `codex`, `opencode`)
-- Autonomous task dispatch, outcomes, and memory logging
-- Metrics collection and anomaly-oriented diagnostics wiring
-- Refactoring and pattern scanners
-- Eval harness, matrix runs, trend history, dashboard, CI smoke
+Key gaps versus target:
 
-### Key Gaps vs Vision
+- no OpenEvolve-style prompt and skill mutation/selection loop
+- no candidate tournament that auto-promotes best policy/prompt variant
+- limited feature-level orchestration from one feature spec into multiple dependent tasks
+- CI real gate remains manual/self-hosted, not always-on for every change
 
-- No prompt/skill mutation + selection tournament loop
-- No automatic versioned prompt/skill rewriting from benchmark outcomes
-- No merge-best candidate pipeline across fixed benchmark tasks
-- CI gate is smoke-only (mock dispatch), not full real benchmark
-- CLI smoke benchmark is lightweight and format-driven
-- Benchmark fast mode skips EXPLORE/VERIFY for speed and should not be treated as full-quality proof
+Maturity estimate:
 
-### Maturity Estimate (2026-02-16)
+- agent execution layer: ~85%
+- evaluation layer: ~65%
+- failure logging/telemetry layer: ~70%
+- self-improvement optimizer: ~10%
+- end-to-end closed loop (execute -> evaluate -> evolve -> promote): ~45-55%
 
-- Agent execution layer: ~85%
-- Evaluation layer: ~65%
-- Failure logging/telemetry layer: ~70%
-- Self-improvement optimizer: ~10%
-- End-to-end closed loop (execute -> evaluate -> evolve -> promote): ~45-55%
+## Operating Model (Spec-Driven)
 
-## Mission Program Goals (Updated)
+Execution must follow one contract chain:
 
-1. Reach reliable delivery baseline:
-   - low-risk delivery task success rate >= 40%
-   - keep verification pass rate >= 75%
-   - keep rollback rate <= 15%
-2. Harden execution contract:
-   - one normalized contract across all coding CLIs
-   - deterministic error taxonomy and policy-driven retry/fallback
-3. Guarantee learning artifacts:
-   - every autonomous run emits required artifacts + memory entries
-4. Build Self-Build pipeline (supervised first):
-   - detect -> patch in isolated worktree -> maintenance pack -> critic -> promote
-5. Implement optimizer loop:
-   - generate candidates, evaluate on fixed set, select/persist best, promote by policy
+1. `Feature Contract`: user outcome, architecture constraints, acceptance criteria.
+2. `Task Contracts`: DAG decomposition with dependencies and atomic done criteria.
+3. `Execution Contract`: normalized CLI interface, deterministic error taxonomy, retry/fallback policy.
+4. `Eval Gate`: benchmark and task-level scoring, strict promotion blocker.
+5. `Promotion Policy`: risk-tiered auto-merge vs PR-only.
 
-## Workstreams and Exit Criteria
+References:
 
-### WS1 — Eval Gate Hardening
+- `docs/feature-contract-v1.md`
+- `docs/task-contract-v1.md`
+- `docs/execution-contract-v1.md`
 
-- Expand full benchmark suite (real tasks, stricter acceptance, non-format-only)
-- Add real benchmark CI job (in addition to smoke)
-- Track lane/risk/repo segmented trends
+## Roadmap Phases
+
+### Phase 1: Reliability Baseline (Now)
+
+Goal: make autonomous execution terminal, deterministic, and measurable.
+
+Deliverables:
+
+- strict real-gate baseline for quality decisions
+- deterministic terminal outcome taxonomy (`dispatch_timeout`, `outcome_wait_timeout`, `stale_started`)
+- normalized CLI contract tags and deterministic retry/fallback logic
+- complete artifact and memory logging per terminal run
 
 Exit criteria:
+
 - 14 consecutive scheduled runs without unresolved `started` outcomes
-- CI includes at least one real benchmark gate on non-mock runtime
+- real gate stable and used for promotion decisions
+- CLI contract replay determinism for known error fixtures
 
-### WS2 — CLI Execution Contract Hardening
+### Phase 2: Feature-Level Orchestration
 
-- Standardize CLI adapter contract (inputs, outputs, status, error codes, artifacts)
-- Add deterministic error taxonomy
-- Add policy matrix for retry/fallback by error code
+Goal: scale from single tasks to coherent multi-task feature delivery.
 
-Exit criteria:
-- Contract tests pass for all three CLIs
-- Same error input produces same policy decision (deterministic replay)
+Deliverables:
 
-### WS3 — Reliable Autonomous Learning Output
-
-- Enforce per-run artifact bundle (request, plan, transcript, diff summary, verify summary, outcome)
-- Enforce per-run memory entries (success/failure, root cause, follow-up)
+- feature spec to task DAG planner
+- dependency-aware scheduler (parallel where possible, serialized on dependencies)
+- acceptance traceability map (`feature criterion -> task -> evidence`)
+- integration gate after each merged task and at feature completion
 
 Exit criteria:
-- 100% of terminal autonomous runs include full artifact + memory set
 
-### WS4 — Self-Build Supervised Pipeline
+- at least 5 features delivered through contract-driven DAG flow
+- 100% feature acceptance criteria linked to objective evidence artifacts
 
-- Implement isolated-worktree patch pipeline with maintenance pack
-- Add promotion rules:
-  - auto-merge only low-risk + high-confidence + green gates
-  - medium/high risk always PR-only
-- Enforce guardrails: no secret access, no destructive git ops, no direct main edits
+### Phase 3: Supervised Self-Build Pipeline
+
+Goal: Athena can improve Athena in a bounded loop.
+
+Deliverables:
+
+- loop: detect issue -> propose patch -> isolated worktree implementation -> maintenance pack -> critic review -> promote decision
+- promotion matrix:
+  - low-risk high-confidence: auto-merge allowed
+  - medium/high risk: PR-only human approval
+- hard guardrails enforced by policy:
+  - no secret reads in autonomous patch loop
+  - no destructive git operations
+  - no direct edits to protected branches
 
 Exit criteria:
-- 20 supervised self-build runs, zero guardrail violations
 
-### WS5 — Self-Improvement Backlog + Optimizer Loop
+- 20 supervised self-build runs with zero guardrail violations
+- measurable KPI lift from self-improvement lane without delivery regression
 
-- Auto-generate ranked improvement tickets from failures + maintainability hotspots
-- Prioritize by expected impact and confidence
-- Run candidate prompt/skill policy tournaments on fixed benchmark set
-- Persist best candidates with provenance
+### Phase 4: Optimizer Loop (OpenEvolve-Style)
+
+Goal: continuous prompt, policy, and skill evolution from benchmark feedback.
+
+Deliverables:
+
+- candidate generation from failures and maintainability hotspots
+- mutation operators for prompts/policies/skills
+- tournament evaluation on fixed benchmark set
+- provenance-tracked winner selection and policy-gated promotion
 
 Exit criteria:
-- Daily ranked backlog generated automatically
-- At least one optimizer-selected candidate promoted under policy without regressions
 
-## Recommended Execution Order
+- daily ranked self-improvement backlog generated automatically
+- at least one optimizer-selected candidate promoted with no benchmark regression
 
-1. Eval harness hardening and truthful gate signal
-2. CLI execution contract + deterministic error policy
-3. Self-Build pipeline in supervised mode
-4. Self-improvement backlog + optimizer loop
-5. Raise autonomy thresholds gradually (policy-gated)
+### Phase 5: Controlled Autonomy Ramp
 
-## Governance Rules
+Goal: raise autonomy thresholds only when data justifies it.
 
-- Never bypass guardrails for speed
-- Benchmark fast mode is for integration smoke only, not release-quality proof
-- Promotion and autonomy thresholds must be tied to measured KPI/eval trends
+Deliverables:
 
-## Next 8-9h Execution Plan (Operator Runbook)
+- risk-tier readiness checks wired to rolling KPI windows
+- automatic rollback of autonomy level on sustained degradation
+- explicit autonomy change log with rationale and evidence
 
-### Phase A (Hour 0-1): Stabilize Signal
+Exit criteria:
 
-1. Ensure one reachable LLM backend per configured CLI (claude_code/codex/opencode).
-2. Run `athena doctor` and confirm all funnels are green except known benchmark-quality gaps.
-3. Start detached soak:
-   - `./scripts/start-soak-autonomy.sh 28800 1800 overnight8h`
+- low-risk lane consistently above mission thresholds for 4 consecutive weeks
+- medium-risk lane remains PR-only with high verification pass rate and low rollback trend
 
-Expected artifacts:
+## Governance and Safety
 
-- `eval/results/soak-overnight8h-<timestamp>/soak.log`
-- `eval/results/soak-overnight8h-<timestamp>/summary.md` (on completion)
+- benchmark smoke runs are health checks, not quality proof
+- real gate and task-level acceptance checks are required for promotion decisions
+- do not bypass guardrails for speed
+- any autonomy increase requires measured evidence over time windows, not one-off runs
 
-### Phase B (Hour 1-7): Reliability + Backlog Feed
+## Next Execution Sequence
 
-Every soak iteration should produce:
-
-- doctor result
-- 3-CLI smoke matrix
-- KPI snapshots (`delivery`, `self_improvement`)
-- dashboard refresh
-- current maintainability metrics snapshot
-- ranked improvement backlog (`improvement-backlog-latest.*`)
-
-Monitoring objective:
-
-- no stuck/dangling runs
-- deterministic terminal outcomes
-- stable CLI matrix pass trend
-
-### Phase C (Hour 7-9): Morning Handoff
-
-1. Review soak summary + latest matrix/dashboard/backlog artifacts.
-2. Pick top 1-2 backlog tickets by score and confidence.
-3. Execute one supervised improvement ticket with benchmark rerun.
-4. Update mission KPI snapshot and compare against phase-1 thresholds.
-
-Success criteria for this window:
-
-- soak completes without launcher/runtime crashes
-- backlog is generated automatically from live failure + maintainability signals
-- summary artifact exists with ranked next actions for immediate follow-up
+1. Wire feature-level contract ingestion and DAG scheduler.
+2. Add acceptance traceability ledger and integration gate at feature scope.
+3. Implement supervised self-build loop orchestration.
+4. Implement candidate mutation and tournament selection loop.
+5. Turn on gradual autonomy-ramp controller based on KPI trends.

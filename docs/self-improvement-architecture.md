@@ -4,6 +4,47 @@
 
 ## System Overview
 
+## Target Operating Model (Spec-Driven)
+
+Athena's long-horizon engineering loop should follow one explicit contract stack:
+
+1. `Feature Contract` defines user outcome, scope, constraints, and acceptance criteria.
+2. `Task Contracts` decompose a feature into a DAG of atomic tasks with dependencies.
+3. `Execution Contract` runs each task through normalized CLI wrappers and deterministic retry/fallback policy.
+4. `Eval Gate` scores plan/execution/tests/diff and blocks weak outcomes.
+5. `Promotion Policy` applies risk-tier controls (low-risk auto-merge only; medium/high risk PR-only).
+
+Key references:
+
+- `docs/feature-contract-v1.md`
+- `docs/task-contract-v1.md`
+- `docs/execution-contract-v1.md`
+- `docs/mission-contract.md`
+- `docs/self-improvement-roadmap.md`
+
+### Feature to Task DAG Scaling
+
+To scale from task-level execution to feature-level delivery:
+
+- each feature owns a single acceptance criteria set with stable IDs (for example, `AC-1`, `AC-2`)
+- each task maps to at least one acceptance criterion
+- dependencies are represented as a DAG (no cycles), so independent tasks can run in parallel
+- feature completion is blocked until all acceptance IDs have passing evidence
+
+```mermaid
+flowchart LR
+    FC["Feature Contract"] --> TD["Task DAG"]
+    TD --> T1["T1: Interface Contract"]
+    TD --> T2["T2: Backend Implementation"]
+    TD --> T3["T3: Frontend Integration"]
+    T1 --> T2
+    T1 --> T3
+    T2 --> T4["T4: E2E and Regression Tests"]
+    T3 --> T4
+    T4 --> EG["Eval Gate"]
+    EG --> PP["Promotion Policy"]
+```
+
 ```mermaid
 graph TB
     subgraph "SENSE — What Athena Knows About Herself"

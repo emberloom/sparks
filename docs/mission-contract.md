@@ -1,15 +1,26 @@
 # Athena Mission Contract
 
-Date: 2026-02-15
+Date: 2026-02-17
 
 ## Mission Statement
 
 Athena autonomously delivers backlog work across products and continuously improves her own capability, while maintaining quality and safety.
 
+## Mission Contract (Measurable)
+
+Athena can autonomously complete at least 70% of low-risk repository tasks with at least 95% verification pass rate, at most 5% rollback rate, and zero critical safety incidents.
+
+This maps to:
+
+- X = task success rate
+- Y = verification pass rate
+- Z = rollback rate
+- Safety = zero critical incidents (secret leaks, destructive operations, policy bypass)
+
 ## Mission Lanes
 
 - `delivery`: product and feature backlog execution across repos/products.
-- `self_improvement`: reliability/capability improvements in Athena itself.
+- `self_improvement`: reliability and capability improvements in Athena itself.
 
 Both lanes are measured using the same KPI framework.
 
@@ -25,20 +36,32 @@ Both lanes are measured using the same KPI framework.
   - Definition: `rollbacks / tasks_succeeded`
   - Goal: minimize.
 - `Mean Time To Fix (Recovery)`:
-  - Definition: average seconds from a failed code-change event to next successful code-change event.
+  - Definition: average seconds from a failed code-change event to the next successful code-change event.
   - Goal: minimize.
 
-Safety invariant:
+## Autonomy Readiness Tiers
 
-- `0` critical safety incidents (secret leaks, destructive ops, policy bypass).
+- `low risk` (safe refactors/docs/tests):
+  - autonomy allowed when 14-day rolling metrics satisfy:
+  - `task_success_rate >= 0.70`
+  - `verification_pass_rate >= 0.95`
+  - `rollback_rate <= 0.05`
+  - `mttf <= 3600s`
+  - `critical_safety_incidents = 0`
+- `medium risk` (behavior changes with tests):
+  - PR-only with human approval.
+  - requires real-gate pass and task-level acceptance checks.
+- `high risk` (security, data migration, production-critical):
+  - human-led only.
+  - Athena can draft/verify but cannot promote autonomously.
 
-## Program Baseline (2026-02-16)
+## Program Baseline (2026-02-16 to 2026-02-17)
 
 Reality check against mission:
 
-- strong execution/eval plumbing exists, but optimizer loop is not implemented yet
-- full `athena-core-v1` benchmark remains below gate in recent runs
-- low-risk delivery KPI is currently below the phase-1 target
+- strong agent/eval plumbing exists, but optimizer loop is not implemented yet
+- real quality gate now runs with strict per-task delivery minima
+- recent real-gate baseline (2026-02-17) is passing (`overall_score=0.96`, 3/3 terminal successes)
 
 Estimated maturity by layer:
 
@@ -50,7 +73,23 @@ Estimated maturity by layer:
 
 See detailed roadmap: `docs/self-improvement-roadmap.md`.
 
-## Initial Targets
+## Operating Model (Contract Stack)
+
+Athena should execute work using this explicit chain:
+
+1. `Feature Contract` defines user outcome, architecture bounds, and acceptance criteria.
+2. `Task Contracts` decompose the feature into a DAG with explicit dependencies and done criteria.
+3. `Execution Contract` runs each task via normalized CLI wrappers and deterministic retry/fallback policy.
+4. `Eval Gate` scores plan/execution/tests/diff and blocks promotions on failures.
+5. `Promotion Policy` applies risk-tier rules (auto-merge only for low-risk high-confidence changes).
+
+Contract templates:
+
+- `docs/feature-contract-v1.md`
+- `docs/task-contract-v1.md`
+- `docs/execution-contract-v1.md`
+
+## Phase Targets
 
 Phase 1 (stabilize):
 
@@ -73,21 +112,6 @@ Phase 3 (mission-ready):
 - rollback rate `<= 3%`
 - mean time to fix `<= 8h`
 
-## Near-Term Program Goals (Added)
-
-1. Truthful benchmark gate:
-   - keep smoke benchmarks for integration checks
-   - add/expand real benchmark gates for quality decisions
-2. Execution contract hardening:
-   - normalized CLI wrapper contract across claude_code/codex/opencode
-   - deterministic error taxonomy + retry/fallback policy
-3. Artifact completeness:
-   - every autonomous run must emit artifacts and learning memories
-4. Self-Build supervised pipeline:
-   - worktree patching + maintenance pack + critic + policy promotion
-5. Self-improvement optimizer loop:
-   - candidate generation, tournament evaluation, merge-best under policy
-
 ## Measurement Guardrails
 
 - Track KPIs segmented by:
@@ -97,7 +121,7 @@ Phase 3 (mission-ready):
 - Do not report only aggregate values; review by lane and risk tier.
 - Keep explicit self-improvement capacity (recommended baseline: 20%) so self-improvement does not get starved by delivery.
 
-## How To Track Now vs Evolution
+## Tracking Current State vs Evolution
 
 Use `athena kpi`:
 
@@ -110,30 +134,25 @@ Use `athena kpi`:
 
 Recommended cadence:
 
-- at least daily snapshots per active lane/repo;
-- always snapshot before and after major refactor/autonomy changes.
-
-Operational recommendation:
-
-- keep `self_improvement` capacity explicitly reserved (20% baseline)
-- do not raise autonomy thresholds until delivery lane reaches phase-1 KPI targets
+- at least daily snapshots per active lane/repo
+- always snapshot before and after major refactor/autonomy changes
 
 Tagged attribution source:
 
-- KPI values are now derived from lane/risk-tagged autonomous task outcomes when available.
+- KPI values are derived from lane/risk-tagged autonomous task outcomes when available.
 - Dispatch metadata can be set explicitly from CLI:
   - `athena dispatch --goal "<...>" --lane delivery --risk medium --repo athena`
 - Background autonomous loops emit tagged outcomes under `self_improvement` by default.
 
 ## Langfuse Tracking
 
-Yes, KPI evolution can be tracked in Langfuse.
+KPI evolution can be tracked in Langfuse.
 
 - Command:
   - `athena kpi snapshot --lane self_improvement --repo athena --risk medium --langfuse`
 - Export shape:
   - trace event `mission:kpi_snapshot`
   - tags include `mission`, `kpi`, lane, risk tier
-  - output payload contains the full KPI snapshot values
+  - output payload contains full KPI snapshot values
 
 This gives a timeline in SQLite (`kpi_snapshots`) and in Langfuse for external observability dashboards.

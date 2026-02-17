@@ -166,8 +166,13 @@ And console prints gate result:
 
 Gate passes when:
 
-- overall weighted score `>= pass_threshold` (suite-level)
-- all tasks have `exec_success = 1.0`
+- suite-level threshold passes (`overall weighted score >= pass_threshold`)
+- `require_exec_success` (if enabled) passes
+- all configured `gate_requirements` pass, including optional lane/task minima such as:
+  - minimum `tests_pass`
+  - minimum `diff_quality`
+  - minimum `plan_quality`
+  - minimum per-task `overall`
 
 ## Notes
 
