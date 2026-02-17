@@ -3,11 +3,22 @@ lane: delivery
 risk: low
 repo: athena
 
+acceptance_criteria:
+  - id: AC-1
+    description: "Feature workflow and dispatch correlation behavior is accurately mapped."
+  - id: AC-2
+    description: "Regression test coverage is updated for dispatch wait/task_id behavior."
+  - id: AC-3
+    description: "Operator-facing feature workflow docs are clear and actionable."
+  - id: AC-4
+    description: "Final evidence summary reflects executed checks and changed files."
+
 tasks:
   - id: T1
     ghost: scout
     goal: "Map current feature contract and dispatch flow in src/main.rs and src/core.rs"
     context: "Focus on how autonomous task_id and terminal outcomes are handled."
+    mapped_acceptance: [AC-1]
 
   - id: T2
     ghost: coder
@@ -15,12 +26,14 @@ tasks:
     goal: "Add or improve one regression test for autonomous dispatch task_id correlation"
     context: "Keep scope limited to CLI dispatch wait behavior."
     auto_store: code_change
+    mapped_acceptance: [AC-2]
 
   - id: T3
     ghost: coder
     depends_on: [T1]
     goal: "Improve docs for feature contract workflow if missing examples"
     context: "Touch docs only."
+    mapped_acceptance: [AC-3]
 
   - id: T4
     ghost: scout
@@ -28,3 +41,4 @@ tasks:
     goal: "Summarize evidence that all feature acceptance checks passed"
     context: "List changed files and executed verification commands."
     auto_store: feature_report
+    mapped_acceptance: [AC-4]

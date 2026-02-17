@@ -16,7 +16,16 @@ pub struct FeatureContract {
     #[serde(default)]
     pub repo: Option<String>,
     #[serde(default)]
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    #[serde(default)]
     pub tasks: Vec<FeatureTask>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcceptanceCriterion {
+    pub id: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +50,8 @@ pub struct FeatureTask {
     pub cli_tool: Option<String>,
     #[serde(default)]
     pub cli_model: Option<String>,
+    #[serde(default)]
+    pub mapped_acceptance: Vec<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default = "default_enabled")]
@@ -86,6 +97,22 @@ impl FeatureContract {
         if self.tasks.is_empty() {
             errors.push("tasks must not be empty".to_string());
         }
+        if self.acceptance_criteria.is_empty() {
+            errors.push("acceptance_criteria must not be empty".to_string());
+        }
+
+        let mut acceptance_ids = std::collections::HashSet::new();
+        for ac in &self.acceptance_criteria {
+            if ac.id.trim().is_empty() {
+                errors.push("acceptance criterion id must not be empty".to_string());
+            } else if !acceptance_ids.insert(ac.id.clone()) {
+                errors.push(format!("duplicate acceptance criterion id '{}'", ac.id));
+            }
+        }
+        let mut acceptance_coverage: HashMap<String, usize> = HashMap::new();
+        for id in &acceptance_ids {
+            acceptance_coverage.insert(id.clone(), 0);
+        }
 
         let mut ids = std::collections::HashSet::new();
         for task in &self.tasks {
@@ -97,6 +124,12 @@ impl FeatureContract {
             }
             if task.enabled && task.goal.trim().is_empty() {
                 errors.push(format!("{} has empty goal", label));
+            }
+            if task.enabled && task.mapped_acceptance.is_empty() {
+                errors.push(format!(
+                    "{} must map at least one acceptance criterion",
+                    label
+                ));
             }
             normalize_lane_and_risk(
                 task.lane.as_deref(),
@@ -117,6 +150,18 @@ impl FeatureContract {
             for dep in &task.depends_on {
                 if dep == &task.id {
                     errors.push(format!("{} depends on itself", label));
+                }
+            }
+            if task.enabled {
+                for mapped in &task.mapped_acceptance {
+                    if !acceptance_ids.contains(mapped) {
+                        errors.push(format!(
+                            "{} maps unknown acceptance criterion '{}'",
+                            label, mapped
+                        ));
+                    } else if let Some(count) = acceptance_coverage.get_mut(mapped) {
+                        *count += 1;
+                    }
                 }
             }
         }
@@ -145,6 +190,16 @@ impl FeatureContract {
         if errors.is_empty() {
             if let Err(e) = self.execution_batches() {
                 errors.push(e.to_string());
+            }
+        }
+        if errors.is_empty() {
+            for (id, count) in acceptance_coverage {
+                if count == 0 {
+                    errors.push(format!(
+                        "acceptance criterion '{}' is not covered by any enabled task",
+                        id
+                    ));
+                }
             }
         }
 
@@ -232,6 +287,23 @@ impl FeatureContract {
 
         Ok(batches)
     }
+
+    pub fn acceptance_coverage(&self) -> HashMap<String, Vec<String>> {
+        let mut coverage: HashMap<String, Vec<String>> = self
+            .acceptance_criteria
+            .iter()
+            .map(|a| (a.id.clone(), Vec::new()))
+            .collect();
+        for task in self.tasks.iter().filter(|t| t.enabled) {
+            for mapped in &task.mapped_acceptance {
+                coverage
+                    .entry(mapped.clone())
+                    .or_default()
+                    .push(task.id.clone());
+            }
+        }
+        coverage
+    }
 }
 
 fn normalize_lane_and_risk(
@@ -274,17 +346,25 @@ mod tests {
             r#"
 feature_id: demo
 lane: delivery
+acceptance_criteria:
+  - id: AC-1
+  - id: AC-2
+  - id: AC-3
 tasks:
   - id: T1
     goal: one
+    mapped_acceptance: [AC-1]
   - id: T2
     goal: two
+    mapped_acceptance: [AC-2]
     depends_on: [T1]
   - id: T3
     goal: three
+    mapped_acceptance: [AC-2]
     depends_on: [T1]
   - id: T4
     goal: four
+    mapped_acceptance: [AC-3]
     depends_on: [T2, T3]
 "#,
         );
@@ -312,12 +392,16 @@ tasks:
         let mut c: FeatureContract = serde_yaml::from_str(
             r#"
 feature_id: cyc
+acceptance_criteria:
+  - id: AC-1
 tasks:
   - id: A
     goal: a
+    mapped_acceptance: [AC-1]
     depends_on: [B]
   - id: B
     goal: b
+    mapped_acceptance: [AC-1]
     depends_on: [A]
 "#,
         )
@@ -331,17 +415,58 @@ tasks:
         let mut c: FeatureContract = serde_yaml::from_str(
             r#"
 feature_id: dep
+acceptance_criteria:
+  - id: AC-1
 tasks:
   - id: A
     goal: a
+    mapped_acceptance: [AC-1]
     enabled: false
   - id: B
     goal: b
+    mapped_acceptance: [AC-1]
     depends_on: [A]
 "#,
         )
         .unwrap();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("depends on disabled task"));
+    }
+
+    #[test]
+    fn rejects_unmapped_acceptance() {
+        let mut c: FeatureContract = serde_yaml::from_str(
+            r#"
+feature_id: cover
+acceptance_criteria:
+  - id: AC-1
+  - id: AC-2
+tasks:
+  - id: A
+    goal: a
+    mapped_acceptance: [AC-1]
+"#,
+        )
+        .unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("is not covered by any enabled task"));
+    }
+
+    #[test]
+    fn rejects_unknown_mapped_acceptance() {
+        let mut c: FeatureContract = serde_yaml::from_str(
+            r#"
+feature_id: map
+acceptance_criteria:
+  - id: AC-1
+tasks:
+  - id: A
+    goal: a
+    mapped_acceptance: [AC-2]
+"#,
+        )
+        .unwrap();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("maps unknown acceptance criterion"));
     }
 }

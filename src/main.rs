@@ -34,6 +34,7 @@ mod tool_usage;
 mod tools;
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -487,6 +488,61 @@ enum FeatureRunStatus {
     Skipped(String),
 }
 
+impl FeatureRunStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed(_) => "failed",
+            Self::Skipped(_) => "skipped",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Failed(r) | Self::Skipped(r) => Some(r),
+            Self::Succeeded => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureTaskLedgerRow {
+    task_id: String,
+    dispatch_task_id: Option<String>,
+    status: String,
+    reason: Option<String>,
+    mapped_acceptance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureAcceptanceLedgerRow {
+    acceptance_id: String,
+    covered_by_tasks: Vec<String>,
+    succeeded_tasks: Vec<String>,
+    covered: bool,
+    satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureRunLedger {
+    timestamp_utc: String,
+    feature_id: String,
+    contract_path: String,
+    tasks: Vec<FeatureTaskLedgerRow>,
+    acceptance: Vec<FeatureAcceptanceLedgerRow>,
+    summary: FeatureRunSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureRunSummary {
+    succeeded: usize,
+    failed: usize,
+    skipped: usize,
+    acceptance_covered: bool,
+    acceptance_satisfied: bool,
+    promotable: bool,
+}
+
 async fn handle_feature(
     action: FeatureAction,
     config: Config,
@@ -497,10 +553,12 @@ async fn handle_feature(
             let contract = feature_contract::load_feature_contract(&file)?;
             let batches = contract.execution_batches()?;
             let enabled = contract.tasks.iter().filter(|t| t.enabled).count();
+            let acceptance_count = contract.acceptance_criteria.len();
             println!(
-                "feature_id={} valid=true tasks_enabled={} batches={}",
+                "feature_id={} valid=true tasks_enabled={} acceptance={} batches={}",
                 contract.feature_id,
                 enabled,
+                acceptance_count,
                 batches.len()
             );
         }
@@ -562,6 +620,8 @@ async fn handle_feature(
             );
             let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
                 std::collections::HashMap::new();
+            let mut dispatch_ids: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             let default_lane = lane
                 .or_else(|| contract.lane.clone())
                 .unwrap_or_else(|| "delivery".to_string());
@@ -573,6 +633,7 @@ async fn handle_feature(
                 .unwrap_or_else(kpi::default_repo_name);
             validate_lane(&default_lane)?;
             validate_risk(&default_risk)?;
+            let mut aborted_on_failure = false;
 
             for (idx, batch) in batches.iter().enumerate() {
                 println!("batch={} tasks={}", idx + 1, batch.join(","));
@@ -616,6 +677,7 @@ async fn handle_feature(
                         "task={} dispatched_task_id={} wait_secs={}",
                         task.id, task_dispatch_id, task_wait
                     );
+                    dispatch_ids.insert(task.id.clone(), task_dispatch_id.clone());
                     let wait =
                         wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, task_wait)
                             .await;
@@ -678,11 +740,12 @@ async fn handle_feature(
                     }
                     statuses.insert(task.id.clone(), run_status.clone());
                     if matches!(run_status, FeatureRunStatus::Failed(_)) && !continue_on_failure {
-                        anyhow::bail!(
-                            "Feature dispatch stopped at task '{}' due to failure (use --continue-on-failure to continue).",
-                            task.id
-                        );
+                        aborted_on_failure = true;
+                        break;
                     }
+                }
+                if aborted_on_failure {
+                    break;
                 }
             }
 
@@ -696,12 +759,34 @@ async fn handle_feature(
                     FeatureRunStatus::Skipped(_) => skipped += 1,
                 }
             }
-            println!(
-                "feature_id={} summary succeeded={} failed={} skipped={}",
-                contract.feature_id, succeeded, failed, skipped
+            let ledger = build_feature_run_ledger(
+                &contract,
+                &file,
+                &statuses,
+                &dispatch_ids,
+                succeeded,
+                failed,
+                skipped,
             );
+            let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
+            println!("feature_ledger_json={}", ledger_json.display());
+            println!("feature_ledger_md={}", ledger_md.display());
+            println!(
+                "feature_id={} summary succeeded={} failed={} skipped={} promotable={}",
+                contract.feature_id, succeeded, failed, skipped, ledger.summary.promotable
+            );
+            if aborted_on_failure {
+                anyhow::bail!(
+                    "Feature dispatch stopped early due to failed task (use --continue-on-failure to continue)."
+                );
+            }
             if failed > 0 {
                 anyhow::bail!("Feature dispatch completed with {} failed task(s).", failed);
+            }
+            if !ledger.summary.acceptance_satisfied {
+                anyhow::bail!(
+                    "Feature dispatch completed but acceptance criteria are not fully satisfied."
+                );
             }
         }
     }
@@ -750,6 +835,12 @@ fn build_feature_task_context(
             task.depends_on.join(",")
         ));
     }
+    if !task.mapped_acceptance.is_empty() {
+        context.push_str(&format!(
+            "\n[feature_acceptance:{}]",
+            task.mapped_acceptance.join(",")
+        ));
+    }
     if let Some(category) = task.auto_store.as_deref() {
         context.push_str(&format!("\n[auto_store:{}]", category));
     }
@@ -764,13 +855,31 @@ fn build_feature_task_context(
 
 fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::Result<()> {
     let batches = contract.execution_batches()?;
+    let acceptance = contract.acceptance_coverage();
     println!(
-        "feature_id={} tasks_total={} tasks_enabled={} batches={}",
+        "feature_id={} tasks_total={} tasks_enabled={} acceptance={} batches={}",
         contract.feature_id,
         contract.tasks.len(),
         contract.tasks.iter().filter(|t| t.enabled).count(),
+        contract.acceptance_criteria.len(),
         batches.len()
     );
+    for ac in &contract.acceptance_criteria {
+        let covered_by = acceptance
+            .get(&ac.id)
+            .cloned()
+            .unwrap_or_default()
+            .join(",");
+        println!(
+            "acceptance={} covered_by={}",
+            ac.id,
+            if covered_by.is_empty() {
+                "-".to_string()
+            } else {
+                covered_by
+            }
+        );
+    }
     for (idx, batch) in batches.iter().enumerate() {
         println!("batch={} tasks={}", idx + 1, batch.join(","));
         for task_id in batch {
@@ -778,7 +887,7 @@ fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::R
                 .task_by_id(task_id)
                 .ok_or_else(|| anyhow::anyhow!("task '{}' missing from contract", task_id))?;
             println!(
-                "  - task={} ghost={} depends_on={} goal={}",
+                "  - task={} ghost={} depends_on={} acceptance={} goal={}",
                 task.id,
                 task.ghost.as_deref().unwrap_or("auto"),
                 if task.depends_on.is_empty() {
@@ -786,11 +895,160 @@ fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::R
                 } else {
                     task.depends_on.join(",")
                 },
+                task.mapped_acceptance.join(","),
                 task.goal.replace('\n', " ")
             );
         }
     }
     Ok(())
+}
+
+fn build_feature_run_ledger(
+    contract: &feature_contract::FeatureContract,
+    contract_path: &std::path::Path,
+    statuses: &std::collections::HashMap<String, FeatureRunStatus>,
+    dispatch_ids: &std::collections::HashMap<String, String>,
+    succeeded: usize,
+    failed: usize,
+    skipped: usize,
+) -> FeatureRunLedger {
+    let coverage = contract.acceptance_coverage();
+    let mut acceptance_rows = Vec::new();
+    let mut all_covered = true;
+    let mut all_satisfied = true;
+
+    for ac in &contract.acceptance_criteria {
+        let covered_by_tasks = coverage.get(&ac.id).cloned().unwrap_or_default();
+        let mut succeeded_tasks = Vec::new();
+        for task_id in &covered_by_tasks {
+            if matches!(statuses.get(task_id), Some(FeatureRunStatus::Succeeded)) {
+                succeeded_tasks.push(task_id.clone());
+            }
+        }
+        let covered = !covered_by_tasks.is_empty();
+        let satisfied = !succeeded_tasks.is_empty();
+        all_covered &= covered;
+        all_satisfied &= satisfied;
+        acceptance_rows.push(FeatureAcceptanceLedgerRow {
+            acceptance_id: ac.id.clone(),
+            covered_by_tasks,
+            succeeded_tasks,
+            covered,
+            satisfied,
+        });
+    }
+
+    let tasks = contract
+        .tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| {
+            let status = statuses.get(&t.id).cloned().unwrap_or_else(|| {
+                FeatureRunStatus::Skipped("not_run_due_to_early_stop".to_string())
+            });
+            FeatureTaskLedgerRow {
+                task_id: t.id.clone(),
+                dispatch_task_id: dispatch_ids.get(&t.id).cloned(),
+                status: status.label().to_string(),
+                reason: status.reason().map(|s| s.to_string()),
+                mapped_acceptance: t.mapped_acceptance.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    FeatureRunLedger {
+        timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        feature_id: contract.feature_id.clone(),
+        contract_path: contract_path.display().to_string(),
+        tasks,
+        acceptance: acceptance_rows,
+        summary: FeatureRunSummary {
+            succeeded,
+            failed,
+            skipped,
+            acceptance_covered: all_covered,
+            acceptance_satisfied: all_satisfied,
+            promotable: failed == 0 && skipped == 0 && all_satisfied,
+        },
+    }
+}
+
+fn write_feature_ledger_artifacts(
+    ledger: &FeatureRunLedger,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("eval/results");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = ledger
+        .feature_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let base = format!("feature-{}-{}", safe_feature_id, ledger.timestamp_utc);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(ledger)?)?;
+    std::fs::write(&md_path, render_feature_ledger_markdown(ledger))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Run Ledger\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", ledger.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
+    out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
+    out.push_str(&format!(
+        "- summary: succeeded={} failed={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n\n",
+        ledger.summary.succeeded,
+        ledger.summary.failed,
+        ledger.summary.skipped,
+        ledger.summary.acceptance_covered,
+        ledger.summary.acceptance_satisfied,
+        ledger.summary.promotable
+    ));
+
+    out.push_str("## Tasks\n\n");
+    out.push_str("| task_id | dispatch_task_id | status | reason | mapped_acceptance |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for row in &ledger.tasks {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            row.task_id,
+            row.dispatch_task_id
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            row.status,
+            row.reason.clone().unwrap_or_else(|| "-".to_string()),
+            if row.mapped_acceptance.is_empty() {
+                "-".to_string()
+            } else {
+                row.mapped_acceptance.join(",")
+            }
+        ));
+    }
+
+    out.push_str("\n## Acceptance\n\n");
+    out.push_str("| acceptance_id | covered_by_tasks | succeeded_tasks | covered | satisfied |\n");
+    out.push_str("|---|---|---|---|---|\n");
+    for row in &ledger.acceptance {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            row.acceptance_id,
+            if row.covered_by_tasks.is_empty() {
+                "-".to_string()
+            } else {
+                row.covered_by_tasks.join(",")
+            },
+            if row.succeeded_tasks.is_empty() {
+                "-".to_string()
+            } else {
+                row.succeeded_tasks.join(",")
+            },
+            row.covered,
+            row.satisfied
+        ));
+    }
+    out
 }
 
 fn handle_memory(
@@ -1517,10 +1775,13 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand,
-        WaitForAutonomousOutcome,
+        build_feature_run_ledger, classify_chat_command, pulse_matches_task_id,
+        wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, WaitForAutonomousOutcome,
     };
+    use crate::feature_contract::{AcceptanceCriterion, FeatureContract, FeatureTask};
     use crate::pulse::{Pulse, PulseSource, Urgency};
+    use std::collections::HashMap;
+    use std::path::Path;
 
     #[test]
     fn classify_exit_aliases() {
@@ -1602,5 +1863,99 @@ mod tests {
         drop(tx);
         let res = wait_for_autonomous_pulse(&mut rx, "task-match", 1).await;
         assert_eq!(res, WaitForAutonomousOutcome::ChannelClosed);
+    }
+
+    fn sample_contract() -> FeatureContract {
+        FeatureContract {
+            feature_id: "feat".to_string(),
+            lane: Some("delivery".to_string()),
+            risk: Some("low".to_string()),
+            repo: Some("athena".to_string()),
+            acceptance_criteria: vec![
+                AcceptanceCriterion {
+                    id: "AC-1".to_string(),
+                    description: None,
+                },
+                AcceptanceCriterion {
+                    id: "AC-2".to_string(),
+                    description: None,
+                },
+            ],
+            tasks: vec![
+                FeatureTask {
+                    id: "T1".to_string(),
+                    goal: "task1".to_string(),
+                    context: None,
+                    ghost: None,
+                    lane: None,
+                    risk: None,
+                    repo: None,
+                    auto_store: None,
+                    wait_secs: None,
+                    cli_tool: None,
+                    cli_model: None,
+                    mapped_acceptance: vec!["AC-1".to_string()],
+                    depends_on: vec![],
+                    enabled: true,
+                },
+                FeatureTask {
+                    id: "T2".to_string(),
+                    goal: "task2".to_string(),
+                    context: None,
+                    ghost: None,
+                    lane: None,
+                    risk: None,
+                    repo: None,
+                    auto_store: None,
+                    wait_secs: None,
+                    cli_tool: None,
+                    cli_model: None,
+                    mapped_acceptance: vec!["AC-2".to_string()],
+                    depends_on: vec!["T1".to_string()],
+                    enabled: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn feature_ledger_marks_unsatisfied_acceptance() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert(
+            "T2".to_string(),
+            FeatureRunStatus::Failed("terminal_status=failed".to_string()),
+        );
+        let ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            1,
+            1,
+            0,
+        );
+        assert!(!ledger.summary.acceptance_satisfied);
+        assert!(!ledger.summary.promotable);
+    }
+
+    #[test]
+    fn feature_ledger_marks_promotable_when_all_acceptance_satisfied() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert("T2".to_string(), FeatureRunStatus::Succeeded);
+        let ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            2,
+            0,
+            0,
+        );
+        assert!(ledger.summary.acceptance_satisfied);
+        assert!(ledger.summary.promotable);
     }
 }

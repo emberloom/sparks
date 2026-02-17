@@ -12,8 +12,12 @@ Use YAML or JSON with:
 
 - `feature_id`
 - optional defaults: `lane`, `risk`, `repo`
+- `acceptance_criteria[]` (required):
+  - `id`
+  - optional `description`
 - `tasks[]` with:
   - `id`, `goal`
+  - required `mapped_acceptance[]` (one or more acceptance IDs)
   - optional `depends_on[]`, `ghost`, `context`
   - optional `lane`, `risk`, `repo` overrides
   - optional `wait_secs`, `auto_store`, `cli_tool`, `cli_model`
@@ -36,6 +40,7 @@ athena feature plan --file eval/feature-contract-example.yaml
 ```
 
 This prints batch groups derived from DAG levels.
+It also prints acceptance coverage (`acceptance_id -> covered_by task IDs`).
 
 ## Dispatch
 
@@ -59,3 +64,12 @@ Dispatch behavior:
 - tasks with failed/skipped dependencies are skipped
 - each task waits for terminal outcome correlation via `task_id`
 - timeouts are finalized with canonical reasons (`dispatch_timeout`, `outcome_wait_timeout`)
+- acceptance coverage and satisfaction are summarized in per-run ledgers:
+  - `eval/results/feature-<feature_id>-<timestamp>.json`
+  - `eval/results/feature-<feature_id>-<timestamp>.md`
+
+Validation guarantees:
+
+- every enabled task maps at least one acceptance criterion
+- every mapped acceptance ID must exist in `acceptance_criteria`
+- every acceptance criterion must be covered by at least one enabled task
