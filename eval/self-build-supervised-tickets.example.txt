@@ -1,0 +1,6 @@
+# One ticket per line. Keep scope small and bounded.
+# These are starter tickets for supervised Phase 3 runs.
+
+Tighten self-build guardrail policy output formatting and add unit tests for reason-code stability.
+Improve self-build markdown artifact readability by grouping checklist and promotion sections.
+Add regression tests for self-build review checklist merge readiness logic.

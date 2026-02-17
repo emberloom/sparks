@@ -128,6 +128,13 @@ Deliverables:
   - `--base-branch <branch>` for PR target
   - low-risk + high-confidence may auto-merge only in `auto` mode
   - medium/high-risk always stays PR-only
+- guardrail policy now emits explicit violation classes (`policy.guardrail.<code>`) and fail-fast promotion policy output:
+  - `self_build_policy promotion_allowed=<bool> reason_codes=<csv>`
+- supervised PR critic checklist is emitted before merge attempts:
+  - `eval/results/self-build-review-*.{json,md}` (risk, blast radius, rollback plan, blockers)
+- supervised batch runner is prepared:
+  - `scripts/supervised_self_build_batch.py`
+  - operator guide: `docs/self-build-supervised-batch.md`
 - promotion matrix:
   - low-risk high-confidence: auto-merge allowed
   - medium/high risk: PR-only human approval

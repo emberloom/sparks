@@ -638,8 +638,18 @@ struct SelfBuildMaintenanceStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildGuardrailViolation {
+    code: String,
+    message: String,
+    hard_block: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SelfBuildGuardrailReport {
     passed: bool,
+    hard_blocked: bool,
+    hard_block_codes: Vec<String>,
+    details: Vec<SelfBuildGuardrailViolation>,
     violations: Vec<String>,
 }
 
@@ -682,6 +692,20 @@ struct SelfBuildPromotionExecution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelfBuildReviewChecklist {
+    timestamp_utc: String,
+    run_id: String,
+    risk_tier: String,
+    ticket: String,
+    change_files_count: usize,
+    blast_radius_summary: String,
+    rollback_plan: Vec<String>,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+    merge_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SelfBuildLedger {
     timestamp_utc: String,
     run_id: String,
@@ -695,6 +719,8 @@ struct SelfBuildLedger {
     allow_auto_promote: bool,
     promote_mode: String,
     base_branch: String,
+    review_checklist_json: String,
+    review_checklist_md: String,
     worktree_path: String,
     kept_worktree: bool,
     cleanup_error: Option<String>,
@@ -704,6 +730,7 @@ struct SelfBuildLedger {
     maintenance: Vec<SelfBuildMaintenanceStep>,
     guardrails: SelfBuildGuardrailReport,
     critic: SelfBuildCriticReport,
+    review_checklist: SelfBuildReviewChecklist,
     promotion: SelfBuildPromotionDecision,
     promotion_execution: SelfBuildPromotionExecution,
 }
@@ -813,12 +840,167 @@ fn build_promotion_command(name: &str, run: CommandRunResult) -> SelfBuildPromot
     }
 }
 
+fn guardrail_violation(
+    code: &str,
+    message: impl Into<String>,
+    hard_block: bool,
+) -> SelfBuildGuardrailViolation {
+    SelfBuildGuardrailViolation {
+        code: code.to_string(),
+        message: message.into(),
+        hard_block,
+    }
+}
+
+fn parse_numstat_totals(diff_numstat: &[String]) -> (u64, u64) {
+    let mut added = 0u64;
+    let mut deleted = 0u64;
+    for line in diff_numstat {
+        let mut parts = line.split_whitespace();
+        let a = parts.next().unwrap_or("0");
+        let d = parts.next().unwrap_or("0");
+        if a != "-" {
+            added = added.saturating_add(a.parse::<u64>().unwrap_or(0));
+        }
+        if d != "-" {
+            deleted = deleted.saturating_add(d.parse::<u64>().unwrap_or(0));
+        }
+    }
+    (added, deleted)
+}
+
+fn build_self_build_review_checklist(
+    run_id: &str,
+    risk_tier: &str,
+    ticket: &str,
+    changed_files: &[String],
+    diff_numstat: &[String],
+    guardrails: &SelfBuildGuardrailReport,
+    critic: &SelfBuildCriticReport,
+    maintenance: &[SelfBuildMaintenanceStep],
+) -> SelfBuildReviewChecklist {
+    let (added, deleted) = parse_numstat_totals(diff_numstat);
+    let mut blockers = Vec::new();
+    if guardrails.hard_blocked {
+        blockers.push(format!(
+            "hard guardrail policy blocks promotion: {}",
+            guardrails.hard_block_codes.join(",")
+        ));
+    }
+    if !critic.passed {
+        blockers.push("critic did not pass quality gates".to_string());
+    }
+    if changed_files.is_empty() {
+        blockers.push("no code changes were produced".to_string());
+    }
+    if maintenance.iter().any(|m| m.status != "passed") {
+        blockers.push("maintenance pack reported failures".to_string());
+    }
+    let blast_radius = if changed_files.len() <= 3 && added + deleted <= 120 {
+        "low"
+    } else if changed_files.len() <= 8 && added + deleted <= 600 {
+        "medium"
+    } else {
+        "high"
+    };
+    let blast_radius_summary = format!(
+        "{} (files={}, added={}, deleted={})",
+        blast_radius,
+        changed_files.len(),
+        added,
+        deleted
+    );
+
+    let evidence = vec![
+        format!("dispatch_terminal_status={}", critic.reasons.is_empty() || critic.passed),
+        format!(
+            "maintenance_all_passed={}",
+            maintenance.iter().all(|m| m.status == "passed")
+        ),
+        format!("guardrails_passed={}", guardrails.passed),
+        format!("critic_score={:.2}", critic.score),
+    ];
+    let rollback_plan = vec![
+        "If PR is open and unmerged: close PR and delete remote self-build branch.".to_string(),
+        "If merged: revert merge commit with `git revert <merge_commit_sha>` and run maintenance pack."
+            .to_string(),
+        "If regression persists: disable auto-promote for subsequent runs and require manual approval."
+            .to_string(),
+    ];
+
+    SelfBuildReviewChecklist {
+        timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        run_id: run_id.to_string(),
+        risk_tier: risk_tier.to_string(),
+        ticket: trim_for_single_line(ticket, 200),
+        change_files_count: changed_files.len(),
+        blast_radius_summary,
+        rollback_plan,
+        evidence,
+        blockers: blockers.clone(),
+        merge_ready: blockers.is_empty(),
+    }
+}
+
+fn write_self_build_review_artifacts(
+    base_repo: &Path,
+    checklist: &SelfBuildReviewChecklist,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let out_dir = base_repo.join("eval").join("results");
+    std::fs::create_dir_all(&out_dir)?;
+    let base = format!("self-build-review-{}", checklist.run_id);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    let latest_json = out_dir.join("self-build-review-latest.json");
+    let latest_md = out_dir.join("self-build-review-latest.md");
+    std::fs::write(&json_path, serde_json::to_string_pretty(checklist)?)?;
+    std::fs::write(&md_path, render_self_build_review_markdown(checklist))?;
+    let _ = std::fs::copy(&json_path, &latest_json);
+    let _ = std::fs::copy(&md_path, &latest_md);
+    Ok((json_path, md_path))
+}
+
+fn render_self_build_review_markdown(checklist: &SelfBuildReviewChecklist) -> String {
+    let mut out = String::new();
+    out.push_str("# Self-Build Review Checklist\n\n");
+    out.push_str(&format!("- run_id: `{}`\n", checklist.run_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", checklist.timestamp_utc));
+    out.push_str(&format!("- risk_tier: `{}`\n", checklist.risk_tier));
+    out.push_str(&format!("- merge_ready: `{}`\n", checklist.merge_ready));
+    out.push_str(&format!("- blast_radius: `{}`\n", checklist.blast_radius_summary));
+    out.push_str(&format!("- ticket: {}\n\n", checklist.ticket));
+
+    out.push_str("## Evidence\n\n");
+    for ev in &checklist.evidence {
+        out.push_str(&format!("- {}\n", ev));
+    }
+    out.push('\n');
+
+    out.push_str("## Rollback Plan\n\n");
+    for step in &checklist.rollback_plan {
+        out.push_str(&format!("- {}\n", step));
+    }
+    out.push('\n');
+
+    out.push_str("## Blockers\n\n");
+    if checklist.blockers.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for b in &checklist.blockers {
+            out.push_str(&format!("- {}\n", b));
+        }
+    }
+    out
+}
+
 fn plan_self_build_promotion(
     mode: SelfBuildPromoteMode,
     risk_tier: &str,
     auto_promote_recommended: bool,
     critic_passed: bool,
     has_changes: bool,
+    guardrails: &SelfBuildGuardrailReport,
+    review_merge_ready: bool,
 ) -> SelfBuildPromotionPlan {
     if mode == SelfBuildPromoteMode::None {
         return SelfBuildPromotionPlan {
@@ -826,6 +1008,18 @@ fn plan_self_build_promotion(
             open_pr: false,
             merge_pr: false,
             reasons: vec!["promote_mode=none".to_string()],
+        };
+    }
+    if guardrails.hard_blocked {
+        return SelfBuildPromotionPlan {
+            status: "blocked",
+            open_pr: false,
+            merge_pr: false,
+            reasons: guardrails
+                .hard_block_codes
+                .iter()
+                .map(|code| format!("policy.guardrail.{}", code))
+                .collect(),
         };
     }
     if !critic_passed {
@@ -865,6 +1059,14 @@ fn plan_self_build_promotion(
         };
     }
     if auto_promote_recommended {
+        if !review_merge_ready {
+            return SelfBuildPromotionPlan {
+                status: "ready_pr",
+                open_pr: true,
+                merge_pr: false,
+                reasons: vec!["review checklist is not merge-ready".to_string()],
+            };
+        }
         return SelfBuildPromotionPlan {
             status: "ready_merge",
             open_pr: true,
@@ -878,6 +1080,34 @@ fn plan_self_build_promotion(
         merge_pr: false,
         reasons: vec!["auto criteria not met; opening PR for human review".to_string()],
     }
+}
+
+fn self_build_policy_reason_codes(
+    guardrails: &SelfBuildGuardrailReport,
+    critic: &SelfBuildCriticReport,
+    checklist: &SelfBuildReviewChecklist,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if guardrails.hard_blocked {
+        out.extend(
+            guardrails
+                .hard_block_codes
+                .iter()
+                .map(|c| format!("policy.guardrail.{}", c)),
+        );
+    }
+    if !critic.passed {
+        out.push("policy.critic_not_passed".to_string());
+    }
+    if !checklist.merge_ready {
+        out.push("policy.review_not_merge_ready".to_string());
+    }
+    if out.is_empty() {
+        out.push("policy.ok".to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn command_succeeded(run: &CommandRunResult) -> bool {
@@ -1119,11 +1349,15 @@ fn evaluate_self_build_guardrails(
     dispatch_output: &str,
     worktree_branch: &str,
 ) -> SelfBuildGuardrailReport {
-    let mut violations = Vec::new();
+    let mut details = Vec::new();
     if !worktree_branch.trim().is_empty() {
-        violations.push(format!(
-            "worktree attached to branch '{}' (expected detached HEAD)",
-            worktree_branch.trim()
+        details.push(guardrail_violation(
+            "worktree_not_detached",
+            format!(
+                "worktree attached to branch '{}' (expected detached HEAD)",
+                worktree_branch.trim()
+            ),
+            true,
         ));
     }
 
@@ -1137,9 +1371,10 @@ fn evaluate_self_build_guardrails(
     let lowered_output = dispatch_output.to_lowercase();
     for pattern in destructive_patterns {
         if lowered_output.contains(pattern) {
-            violations.push(format!(
-                "detected destructive command pattern '{}'",
-                pattern
+            details.push(guardrail_violation(
+                "destructive_git_or_shell",
+                format!("detected destructive command pattern '{}'", pattern),
+                true,
             ));
         }
     }
@@ -1151,9 +1386,10 @@ fn evaluate_self_build_guardrails(
             || lower.contains("credentials")
             || lower.contains("token")
         {
-            violations.push(format!(
-                "sensitive-looking file changed in self-build run: {}",
-                path
+            details.push(guardrail_violation(
+                "sensitive_file_changed",
+                format!("sensitive-looking file changed in self-build run: {}", path),
+                true,
             ));
         }
     }
@@ -1170,13 +1406,26 @@ fn evaluate_self_build_guardrails(
     let token_like =
         regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#).unwrap();
     if secret_assignment.is_match(&added_lines) || token_like.is_match(&added_lines) {
-        violations.push("detected secret-like material in added diff lines".to_string());
+        details.push(guardrail_violation(
+            "secret_like_diff",
+            "detected secret-like material in added diff lines",
+            true,
+        ));
     }
 
-    violations.sort();
-    violations.dedup();
+    details.sort_by(|a, b| a.code.cmp(&b.code).then(a.message.cmp(&b.message)));
+    details.dedup_by(|a, b| a.code == b.code && a.message == b.message);
+    let violations = details.iter().map(|v| v.message.clone()).collect::<Vec<_>>();
+    let hard_block_codes = details
+        .iter()
+        .filter(|v| v.hard_block)
+        .map(|v| v.code.clone())
+        .collect::<Vec<_>>();
     SelfBuildGuardrailReport {
-        passed: violations.is_empty(),
+        passed: details.is_empty(),
+        hard_blocked: !hard_block_codes.is_empty(),
+        hard_block_codes,
+        details,
         violations,
     }
 }
@@ -1270,6 +1519,8 @@ async fn execute_self_build_promotion(
     run_id: &str,
     ticket: &str,
     risk_tier: &str,
+    guardrails: &SelfBuildGuardrailReport,
+    review_checklist: &SelfBuildReviewChecklist,
     decision: &SelfBuildPromotionDecision,
     critic: &SelfBuildCriticReport,
     changed_files: &[String],
@@ -1280,6 +1531,8 @@ async fn execute_self_build_promotion(
         decision.auto_promote_recommended,
         critic.passed,
         !changed_files.is_empty(),
+        guardrails,
+        review_checklist.merge_ready,
     );
     let mut execution = SelfBuildPromotionExecution {
         mode: self_build_promote_mode_label(mode).to_string(),
@@ -1499,6 +1752,14 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
     ));
     out.push_str(&format!("- promote_mode: `{}`\n", ledger.promote_mode));
     out.push_str(&format!("- base_branch: `{}`\n", ledger.base_branch));
+    out.push_str(&format!(
+        "- review_checklist_json: `{}`\n",
+        ledger.review_checklist_json
+    ));
+    out.push_str(&format!(
+        "- review_checklist_md: `{}`\n",
+        ledger.review_checklist_md
+    ));
     out.push_str(&format!("- ticket: {}\n", ledger.ticket));
     if let Some(ctx) = &ledger.context {
         out.push_str(&format!("- context: {}\n", ctx));
@@ -1556,6 +1817,24 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
 
     out.push_str("## Guardrails\n\n");
     out.push_str(&format!("- passed: `{}`\n", ledger.guardrails.passed));
+    out.push_str(&format!(
+        "- hard_blocked: `{}` codes: `{}`\n",
+        ledger.guardrails.hard_blocked,
+        if ledger.guardrails.hard_block_codes.is_empty() {
+            "-".to_string()
+        } else {
+            ledger.guardrails.hard_block_codes.join(",")
+        }
+    ));
+    if !ledger.guardrails.details.is_empty() {
+        out.push_str("- details:\n");
+        for d in &ledger.guardrails.details {
+            out.push_str(&format!(
+                "  - code={} hard_block={} message={}\n",
+                d.code, d.hard_block, d.message
+            ));
+        }
+    }
     if !ledger.guardrails.violations.is_empty() {
         out.push_str("- violations:\n");
         for v in &ledger.guardrails.violations {
@@ -1588,6 +1867,27 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         out.push_str("- reasons:\n");
         for r in &ledger.promotion.reasons {
             out.push_str(&format!("  - {}\n", r));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("## Review Checklist\n\n");
+    out.push_str(&format!(
+        "- merge_ready: `{}`\n",
+        ledger.review_checklist.merge_ready
+    ));
+    out.push_str(&format!(
+        "- blast_radius: `{}`\n",
+        ledger.review_checklist.blast_radius_summary
+    ));
+    out.push_str("- rollback_plan:\n");
+    for step in &ledger.review_checklist.rollback_plan {
+        out.push_str(&format!("  - {}\n", step));
+    }
+    if !ledger.review_checklist.blockers.is_empty() {
+        out.push_str("- blockers:\n");
+        for b in &ledger.review_checklist.blockers {
+            out.push_str(&format!("  - {}\n", b));
         }
     }
     out.push('\n');
@@ -1857,7 +2157,30 @@ async fn run_self_build(
         &maintenance_rows,
         &guardrails,
     );
+    let review_checklist = build_self_build_review_checklist(
+        &run_id,
+        &risk,
+        &ticket,
+        &changed_files,
+        &diff_numstat,
+        &guardrails,
+        &critic,
+        &maintenance_rows,
+    );
+    let (review_json_path, review_md_path) =
+        write_self_build_review_artifacts(&base_repo, &review_checklist)?;
     let promotion = decide_self_build_promotion(&risk, allow_auto_promote, &critic);
+    let policy_reason_codes = self_build_policy_reason_codes(&guardrails, &critic, &review_checklist);
+    let policy_promotion_allowed = !guardrails.hard_blocked
+        && critic.passed
+        && (promote_mode == SelfBuildPromoteMode::None
+            || promote_mode == SelfBuildPromoteMode::Pr
+            || review_checklist.merge_ready);
+    println!(
+        "self_build_policy promotion_allowed={} reason_codes={}",
+        policy_promotion_allowed,
+        policy_reason_codes.join(",")
+    );
     let promotion_execution = execute_self_build_promotion(
         &worktree,
         promote_mode,
@@ -1865,6 +2188,8 @@ async fn run_self_build(
         &run_id,
         &ticket,
         &risk,
+        &guardrails,
+        &review_checklist,
         &promotion,
         &critic,
         &changed_files,
@@ -1889,6 +2214,8 @@ async fn run_self_build(
         allow_auto_promote,
         promote_mode: self_build_promote_mode_label(promote_mode).to_string(),
         base_branch: base_branch.clone(),
+        review_checklist_json: review_json_path.display().to_string(),
+        review_checklist_md: review_md_path.display().to_string(),
         worktree_path: worktree_s,
         kept_worktree: keep_worktree,
         cleanup_error: cleanup_error.clone(),
@@ -1898,6 +2225,7 @@ async fn run_self_build(
         maintenance: maintenance_rows,
         guardrails,
         critic,
+        review_checklist,
         promotion,
         promotion_execution,
     };
@@ -1905,6 +2233,8 @@ async fn run_self_build(
     let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;
     println!("self_build_json={}", json_path.display());
     println!("self_build_md={}", md_path.display());
+    println!("self_build_review_json={}", review_json_path.display());
+    println!("self_build_review_md={}", review_md_path.display());
     println!("self_build_run_id={}", ledger.run_id);
     println!(
         "self_build_auto_promote_recommended={}",
@@ -4444,7 +4774,8 @@ async fn run_chat(
 mod tests {
     use super::{
         build_feature_promotion_decision, build_feature_run_ledger, classify_chat_command,
-        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
+        build_self_build_review_checklist, compute_feature_outcome_grace_secs,
+        evaluate_self_build_guardrails,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
         wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
@@ -4834,7 +5165,16 @@ index 1111111..2222222 100644
 
     #[test]
     fn promotion_plan_auto_low_can_merge() {
-        let plan = plan_self_build_promotion(SelfBuildPromoteMode::Auto, "low", true, true, true);
+        let guardrails = evaluate_self_build_guardrails(&[], "", "", "");
+        let plan = plan_self_build_promotion(
+            SelfBuildPromoteMode::Auto,
+            "low",
+            true,
+            true,
+            true,
+            &guardrails,
+            true,
+        );
         assert_eq!(plan.status, "ready_merge");
         assert!(plan.open_pr);
         assert!(plan.merge_pr);
@@ -4842,8 +5182,16 @@ index 1111111..2222222 100644
 
     #[test]
     fn promotion_plan_auto_medium_is_pr_only() {
-        let plan =
-            plan_self_build_promotion(SelfBuildPromoteMode::Auto, "medium", true, true, true);
+        let guardrails = evaluate_self_build_guardrails(&[], "", "", "");
+        let plan = plan_self_build_promotion(
+            SelfBuildPromoteMode::Auto,
+            "medium",
+            true,
+            true,
+            true,
+            &guardrails,
+            true,
+        );
         assert_eq!(plan.status, "ready_pr");
         assert!(plan.open_pr);
         assert!(!plan.merge_pr);
@@ -4851,10 +5199,70 @@ index 1111111..2222222 100644
 
     #[test]
     fn promotion_plan_blocks_without_critic_pass() {
-        let plan = plan_self_build_promotion(SelfBuildPromoteMode::Pr, "low", true, false, true);
+        let guardrails = evaluate_self_build_guardrails(&[], "", "", "");
+        let plan = plan_self_build_promotion(
+            SelfBuildPromoteMode::Pr,
+            "low",
+            true,
+            false,
+            true,
+            &guardrails,
+            true,
+        );
         assert_eq!(plan.status, "blocked");
         assert!(!plan.open_pr);
         assert!(!plan.merge_pr);
+    }
+
+    #[test]
+    fn promotion_plan_blocks_on_hard_guardrail_codes() {
+        let guardrails = evaluate_self_build_guardrails(
+            &[".env".to_string()],
+            "+token=\"abc123456789\"",
+            "git reset --hard",
+            "",
+        );
+        let plan = plan_self_build_promotion(
+            SelfBuildPromoteMode::Pr,
+            "low",
+            true,
+            true,
+            true,
+            &guardrails,
+            true,
+        );
+        assert_eq!(plan.status, "blocked");
+        assert!(plan
+            .reasons
+            .iter()
+            .any(|r| r.contains("policy.guardrail.")));
+    }
+
+    #[test]
+    fn review_checklist_marks_merge_not_ready_on_guardrail_failure() {
+        let guardrails = evaluate_self_build_guardrails(
+            &[".env".to_string()],
+            "+token=\"abc123456789\"",
+            "",
+            "",
+        );
+        let critic = super::SelfBuildCriticReport {
+            score: 0.92,
+            passed: true,
+            reasons: Vec::new(),
+        };
+        let checklist = build_self_build_review_checklist(
+            "run-x",
+            "low",
+            "Rotate token handling",
+            &[".env".to_string()],
+            &["10\t1\t.env".to_string()],
+            &guardrails,
+            &critic,
+            &[],
+        );
+        assert!(!checklist.merge_ready);
+        assert!(!checklist.blockers.is_empty());
     }
 
     #[tokio::test]
