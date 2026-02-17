@@ -7,6 +7,12 @@ Run a deterministic supervised batch of Phase 3 self-build tickets and emit a co
 - tickets file: one ticket per line
 - optional example: `eval/self-build-supervised-tickets.example.txt`
 
+## Preflight Checklist
+
+- verify git working tree is clean
+- verify athena binary is built
+- verify gh auth status is valid
+
 ## Dry Run (Preparation)
 
 ```bash
