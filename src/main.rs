@@ -618,6 +618,8 @@ struct SelfBuildDispatchSummary {
     exit_code: Option<i32>,
     timed_out: bool,
     duration_ms: u64,
+    attempts: u8,
+    noop_retry_used: bool,
     status: String,
     task_id: Option<String>,
     outcome: Option<SelfBuildOutcomeRecord>,
@@ -1796,6 +1798,10 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         ledger.dispatch.duration_ms
     ));
     out.push_str(&format!(
+        "- attempts: `{}` noop_retry_used: `{}`\n",
+        ledger.dispatch.attempts, ledger.dispatch.noop_retry_used
+    ));
+    out.push_str(&format!(
         "- task_id: `{}`\n",
         ledger.dispatch.task_id.as_deref().unwrap_or("-")
     ));
@@ -2043,51 +2049,57 @@ async fn run_self_build(
         dispatch_context.push_str("\nAdditional context:\n");
         dispatch_context.push_str(ctx);
     }
-    let mut dispatch_args = vec![
-        "dispatch".to_string(),
-        "--goal".to_string(),
-        ticket.clone(),
-        "--context".to_string(),
-        dispatch_context,
-        "--ghost".to_string(),
-        "coder".to_string(),
-        "--auto-store".to_string(),
-        "self_build_run".to_string(),
-        "--wait-secs".to_string(),
-        wait_secs.to_string(),
-        "--lane".to_string(),
-        "self_improvement".to_string(),
-        "--risk".to_string(),
-        risk.clone(),
-        "--repo".to_string(),
-        repo_label,
-    ];
-    if let Some(config_path) = resolve_child_dispatch_config_path(&base_repo) {
-        dispatch_args.insert(0, config_path.to_string_lossy().to_string());
-        dispatch_args.insert(0, "--config".to_string());
-    }
-    if let Some(tool) = cli_tool.as_deref() {
-        dispatch_args.push("--cli-tool".to_string());
-        dispatch_args.push(tool.to_string());
-    }
-    if let Some(model) = cli_model.as_deref() {
-        dispatch_args.push("--cli-model".to_string());
-        dispatch_args.push(model.to_string());
-    }
+    let child_config_path = resolve_child_dispatch_config_path(&base_repo);
     let dispatch_timeout = wait_secs.saturating_add(180).max(240);
-    let dispatch_run =
+    let build_dispatch_args = |ctx: String| {
+        let mut args = vec![
+            "dispatch".to_string(),
+            "--goal".to_string(),
+            ticket.clone(),
+            "--context".to_string(),
+            ctx,
+            "--ghost".to_string(),
+            "coder".to_string(),
+            "--auto-store".to_string(),
+            "self_build_run".to_string(),
+            "--wait-secs".to_string(),
+            wait_secs.to_string(),
+            "--lane".to_string(),
+            "self_improvement".to_string(),
+            "--risk".to_string(),
+            risk.clone(),
+            "--repo".to_string(),
+            repo_label.clone(),
+        ];
+        if let Some(config_path) = child_config_path.as_ref() {
+            args.insert(0, config_path.to_string_lossy().to_string());
+            args.insert(0, "--config".to_string());
+        }
+        if let Some(tool) = cli_tool.as_deref() {
+            args.push("--cli-tool".to_string());
+            args.push(tool.to_string());
+        }
+        if let Some(model) = cli_model.as_deref() {
+            args.push("--cli-model".to_string());
+            args.push(model.to_string());
+        }
+        args
+    };
+    let mut dispatch_context_current = dispatch_context;
+    let mut dispatch_args = build_dispatch_args(dispatch_context_current.clone());
+    let mut dispatch_run =
         run_command_capture(&worktree, &exe_s, &dispatch_args, dispatch_timeout).await;
-    let dispatch_output = command_combined_output(&dispatch_run);
-    let dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
+    let mut dispatch_output = command_combined_output(&dispatch_run);
+    let mut dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
     if let Some(task_id) = dispatch_task_id.as_deref() {
         let _ = wait_for_terminal_outcome_status(&config, task_id, 30).await?;
     }
-    let dispatch_outcome = if let Some(task_id) = dispatch_task_id.as_deref() {
+    let mut dispatch_outcome = if let Some(task_id) = dispatch_task_id.as_deref() {
         read_task_outcome_record(&config, task_id)?
     } else {
         None
     };
-    let dispatch_status = if dispatch_run.timed_out {
+    let mut dispatch_status = if dispatch_run.timed_out {
         "timeout".to_string()
     } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
         status
@@ -2096,24 +2108,66 @@ async fn run_self_build(
     } else {
         "failed".to_string()
     };
+    let mut dispatch_attempts = 1u8;
+    let mut noop_retry_used = false;
+    let mut status_run =
+        run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
+    let mut changed_files = if command_succeeded(&status_run) {
+        parse_git_status_paths(&status_run.stdout)
+    } else {
+        Vec::new()
+    };
+    if dispatch_status == "succeeded"
+        && dispatch_run.exit_code == Some(0)
+        && changed_files.is_empty()
+    {
+        noop_retry_used = true;
+        dispatch_attempts = 2;
+        dispatch_context_current.push_str(
+            "\nRetry directive:\nThe previous self-build attempt produced zero repository changes. Re-read the target file(s) from disk and apply the requested patch. Only report completion after a concrete git diff exists.\n",
+        );
+        dispatch_args = build_dispatch_args(dispatch_context_current.clone());
+        dispatch_run =
+            run_command_capture(&worktree, &exe_s, &dispatch_args, dispatch_timeout).await;
+        dispatch_output = command_combined_output(&dispatch_run);
+        dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
+        if let Some(task_id) = dispatch_task_id.as_deref() {
+            let _ = wait_for_terminal_outcome_status(&config, task_id, 30).await?;
+        }
+        dispatch_outcome = if let Some(task_id) = dispatch_task_id.as_deref() {
+            read_task_outcome_record(&config, task_id)?
+        } else {
+            None
+        };
+        dispatch_status = if dispatch_run.timed_out {
+            "timeout".to_string()
+        } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
+            status
+        } else if dispatch_run.exit_code == Some(0) {
+            "contract_error".to_string()
+        } else {
+            "failed".to_string()
+        };
+        status_run =
+            run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
+        changed_files = if command_succeeded(&status_run) {
+            parse_git_status_paths(&status_run.stdout)
+        } else {
+            Vec::new()
+        };
+    }
     let dispatch_summary = SelfBuildDispatchSummary {
         command: dispatch_run.command.clone(),
         exit_code: dispatch_run.exit_code,
         timed_out: dispatch_run.timed_out,
         duration_ms: dispatch_run.duration_ms,
+        attempts: dispatch_attempts,
+        noop_retry_used,
         status: dispatch_status.clone(),
         task_id: dispatch_task_id.clone(),
         outcome: dispatch_outcome.clone(),
         stdout_tail: tail_text(&dispatch_run.stdout, 1200),
         stderr_tail: tail_text(&dispatch_run.stderr, 1200),
-    };
-
-    let status_run =
-        run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
-    let changed_files = if command_succeeded(&status_run) {
-        parse_git_status_paths(&status_run.stdout)
-    } else {
-        Vec::new()
     };
 
     let diff_run = run_command_capture(&worktree, "git", &args(&["diff", "--no-color"]), 120).await;

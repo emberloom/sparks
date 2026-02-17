@@ -457,7 +457,9 @@ pub fn list_history(
         sql.push_str(" WHERE ");
         sql.push_str(&where_parts.join(" AND "));
     }
-    sql.push_str(" ORDER BY captured_at DESC LIMIT ?");
+    sql.push_str(
+        " ORDER BY datetime(replace(replace(captured_at, 'T', ' '), 'Z', '')) DESC, captured_at DESC LIMIT ?",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let mut params_dyn: Vec<rusqlite::types::Value> = Vec::new();
@@ -700,6 +702,26 @@ mod tests {
         let rows = list_history(&conn, Some("self_improvement"), Some("athena"), 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lane, "self_improvement");
+    }
+
+    #[test]
+    fn list_history_orders_mixed_timestamp_formats_descending() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO kpi_snapshots
+             (lane, repo, risk_tier, captured_at, task_success_rate, verification_pass_rate, rollback_rate, mean_time_to_fix_secs,
+              tasks_started, tasks_succeeded, tasks_failed, verifications_total, verifications_passed, rollbacks)
+             VALUES
+             ('delivery','athena','low','2026-02-17T05:28:37.000Z',0.11,1.0,0.0,NULL,10,1,9,1,1,0),
+             ('delivery','athena','low','2026-02-17 18:24:17',0.40,1.0,0.0,NULL,10,4,6,1,1,0)",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_history(&conn, Some("delivery"), Some("athena"), 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].captured_at, "2026-02-17 18:24:17");
+        assert_eq!(rows[1].captured_at, "2026-02-17T05:28:37.000Z");
     }
 
     #[test]

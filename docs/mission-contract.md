@@ -63,19 +63,20 @@ Reality check against mission:
 - real quality gate now runs with strict per-task delivery minima
 - recent real-gate baseline (2026-02-17) is passing (`overall_score=0.96`, 3/3 terminal successes)
 
-Estimated maturity by layer:
+Estimated maturity by layer (updated 2026-02-17):
 
 - agent execution: ~85%
 - evaluation: ~65%
 - failure logging/telemetry: ~70%
-- self-improvement optimizer loop: ~10%
-- end-to-end closed loop: ~45-55%
+- self-improvement optimizer loop: ~25%
+- end-to-end closed loop: ~55-60%
 
 See detailed roadmap: `docs/self-improvement-roadmap.md`.
 
 Phase closeout evidence (2026-02-17):
 
 - `eval/results/phase1-phase2-closeout-latest.md`
+- `eval/results/phase3-closeout-latest.md`
 
 ## Operating Model (Contract Stack)
 

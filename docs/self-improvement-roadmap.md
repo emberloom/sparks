@@ -116,7 +116,7 @@ Closure evidence:
 - gate artifacts: `eval/results/feature-gate-athena-phase2-closeout-*.json` (`5/5 gate_ok=true`)
 - summary report: `eval/results/phase1-phase2-closeout-latest.md`
 
-### Phase 3: Supervised Self-Build Pipeline
+### Phase 3: Supervised Self-Build Pipeline (Closed 2026-02-17)
 
 Goal: Athena can improve Athena in a bounded loop.
 
@@ -148,6 +148,15 @@ Exit criteria:
 - 20 supervised self-build runs with zero guardrail violations
 - measurable KPI lift from self-improvement lane without delivery regression
 
+Closure evidence:
+
+- closeout report: `eval/results/phase3-closeout-latest.md`
+- latest supervised batch baseline: `eval/results/self-build-batch-20260217T182304Z.json` (`3/3 succeeded`)
+- latest 20 ledger runs: `guardrail_passed=20/20`
+- KPI snapshots (2026-02-17 18:24 UTC):
+  - `self_improvement low`: success `92.19%`, verify `100%`, rollback `0.85%`
+  - `delivery low`: success `40.30%`, verify `100%`, rollback `0%`
+
 ### Phase 4: Optimizer Loop (OpenEvolve-Style)
 
 Goal: continuous prompt, policy, and skill evolution from benchmark feedback.
@@ -158,6 +167,9 @@ Deliverables:
 - mutation operators for prompts/policies/skills
 - tournament evaluation on fixed benchmark set
 - provenance-tracked winner selection and policy-gated promotion
+- implemented tournament runner:
+  - `scripts/optimizer_tournament.py`
+  - emits `eval/results/optimizer-tournament-*.{json,md}` with regression gates and winner selection
 
 Exit criteria:
 
@@ -188,6 +200,6 @@ Exit criteria:
 
 ## Next Execution Sequence
 
-1. Harden supervised self-build loop orchestration and isolated worktree lifecycle.
-2. Implement candidate mutation and tournament selection loop.
-3. Turn on gradual autonomy-ramp controller based on KPI trends.
+1. Expand candidate generation with backlog-driven prompt/policy/skill variants.
+2. Run nightly optimizer tournaments on fixed real gate and track winner provenance.
+3. Gate candidate promotion on non-regression windows before enabling autonomy-ramp controls.

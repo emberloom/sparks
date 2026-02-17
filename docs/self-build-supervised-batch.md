@@ -32,6 +32,7 @@ python3 scripts/supervised_self_build_batch.py \
 
 By default the runner pre-builds `target/debug/athena` before executing tickets.
 Use `--skip-build` only when you intentionally want to reuse an existing binary.
+`athena self-build run` now retries one time automatically when dispatch reports success but leaves an empty git diff.
 
 ## Outputs
 

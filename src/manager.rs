@@ -25,6 +25,19 @@ struct DirectStep {
     params: serde_json::Value,
 }
 
+fn compact_context_line(input: &str, max_chars: usize) -> String {
+    let first_line = input.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= max_chars {
+        return first_line.to_string();
+    }
+    first_line
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub struct Manager {
     llm: Arc<dyn LlmProvider>,
     orchestrator: Arc<dyn LlmProvider>,
@@ -517,16 +530,19 @@ impl Manager {
 
         // Enrich coder context with code_structure memories (Gap 4)
         let structure_ctx = if ghost_name == "coder" {
-            let structure_memories = self
+            let mut structure_memories = self
                 .memory
-                .search_hybrid("module dependencies imports", None, 10)
+                .search_hybrid("module dependencies imports", None, 24)
                 .unwrap_or_default();
+            structure_memories.retain(|m| m.category == "code_structure");
+            structure_memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            structure_memories.truncate(6);
             if structure_memories.is_empty() {
                 String::new()
             } else {
                 let items: Vec<String> = structure_memories
                     .iter()
-                    .map(|m| format!("- {}", m.content))
+                    .map(|m| format!("- {}", compact_context_line(&m.content, 220)))
                     .collect();
                 format!("\n\nCODE STRUCTURE CONTEXT:\n{}", items.join("\n"))
             }
