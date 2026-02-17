@@ -45,6 +45,9 @@ use memory::MemoryStore;
 use observer::ObserverCategory;
 use scheduler::Schedule;
 
+const OUTCOME_REASON_DISPATCH_TIMEOUT: &str = "dispatch_timeout";
+const OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED: &str = "dispatch_channel_closed";
+
 #[derive(Parser)]
 #[command(name = "athena", about = "Secure autonomous multi-agent system")]
 struct Cli {
@@ -592,7 +595,7 @@ async fn run_dispatch(
             mark_dispatch_task_failed_if_started(
                 &config_for_finalize,
                 &task_id,
-                &format!("dispatch_wait_timeout_after={}s", wait_secs),
+                OUTCOME_REASON_DISPATCH_TIMEOUT,
             );
             Ok(())
         }
@@ -600,7 +603,7 @@ async fn run_dispatch(
             mark_dispatch_task_failed_if_started(
                 &config_for_finalize,
                 &task_id,
-                "dispatch_wait_channel_closed",
+                OUTCOME_REASON_DISPATCH_CHANNEL_CLOSED,
             );
             Ok(())
         }
@@ -1116,8 +1119,7 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand,
-        WaitForAutonomousOutcome,
+        classify_chat_command, pulse_matches_task_id, wait_for_autonomous_pulse, ChatCommand, WaitForAutonomousOutcome,
     };
     use crate::pulse::{Pulse, PulseSource, Urgency};
 
@@ -1189,5 +1191,14 @@ mod tests {
         );
         let res = wait_for_autonomous_pulse(&mut rx, "task-match", 0).await;
         assert_eq!(res, WaitForAutonomousOutcome::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn wait_for_autonomous_pulse_reports_channel_closed() {
+        let (tx, _) = tokio::sync::broadcast::channel(8);
+        let mut rx = tx.subscribe();
+        drop(tx);
+        let res = wait_for_autonomous_pulse(&mut rx, "task-match", 1).await;
+        assert_eq!(res, WaitForAutonomousOutcome::ChannelClosed);
     }
 }

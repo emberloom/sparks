@@ -776,7 +776,7 @@ mod tests {
         let store = TaskOutcomeStore::new(conn);
 
         let changed = store
-            .fail_stale_started_tasks(1800, "stale_started_timeout")
+            .fail_stale_started_tasks(1800, "stale_started")
             .unwrap();
         assert_eq!(changed, 1);
 

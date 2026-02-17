@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,20 @@ def score_ticket(impact: int, confidence: int, effort: int, risk: str) -> float:
     return round((impact * confidence / max(effort, 1)) * risk_penalty, 3)
 
 
+def default_owner(source: str) -> str:
+    if source == "maintainability_hotspot":
+        return "athena-refactor"
+    if source in {"runtime_failures", "tool_usage"}:
+        return "athena-runtime"
+    if source == "eval_history":
+        return "athena-eval"
+    return "athena"
+
+
+def default_eta_days(effort: int) -> str:
+    return {1: "0.5d", 2: "1d", 3: "2d", 4: "3d", 5: "5d"}.get(effort, "3d")
+
+
 def build_ticket(
     source: str,
     title: str,
@@ -71,6 +86,9 @@ def build_ticket(
     acceptance: list[str],
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    owner = (meta or {}).get("owner", default_owner(source))
+    status = (meta or {}).get("status", "open")
+    eta = (meta or {}).get("eta", default_eta_days(effort))
     return {
         "source": source,
         "title": title,
@@ -80,43 +98,88 @@ def build_ticket(
         "effort": effort,
         "risk": risk,
         "score": score_ticket(impact, confidence, effort, risk),
+        "owner": owner,
+        "status": status,
+        "eta": eta,
         "acceptance": acceptance,
         "meta": meta or {},
     }
 
 
+def normalize_failure_error(error: str) -> str:
+    lower = error.lower().strip()
+    if not lower or lower == "(none)":
+        return "(none)"
+    if lower in {"stale_started_timeout", "stale_started"}:
+        return "stale_started"
+    if lower.startswith("dispatch_wait_timeout_after=") or lower == "dispatch_timeout":
+        return "dispatch_timeout"
+    if lower.startswith("eval_outcome_wait_timeout_after=") or lower == "outcome_wait_timeout":
+        return "outcome_wait_timeout"
+    if "401 unauthorized" in lower or "user not found" in lower:
+        return "llm_auth_failure"
+    if "dispatch_wait_channel_closed" in lower or "dispatch_channel_closed" in lower:
+        return "dispatch_channel_closed"
+    return re.sub(r"\s+", " ", error.strip())
+
+
 def tickets_from_failures(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT COALESCE(error, '(none)') as error, COUNT(*) as n
+        SELECT COALESCE(error, '(none)') as error,
+               CASE
+                 WHEN COALESCE(finished_at, started_at) >= datetime('now', '-72 hours') THEN 1
+                 ELSE 0
+               END as recent_72h
         FROM autonomous_task_outcomes
-        WHERE status IN ('failed', 'stale_started_timeout')
-        GROUP BY COALESCE(error, '(none)')
-        ORDER BY n DESC
-        LIMIT 10
+        WHERE status = 'failed'
         """
     ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for error, recent in rows:
+        key = normalize_failure_error(str(error))
+        bucket = grouped.setdefault(
+            key,
+            {"total": 0, "recent_72h": 0, "examples": []},
+        )
+        bucket["total"] += 1
+        bucket["recent_72h"] += int(recent or 0)
+        if len(bucket["examples"]) < 3 and error not in bucket["examples"]:
+            bucket["examples"].append(error)
+
     out: list[dict[str, Any]] = []
-    for error, n in rows:
-        n = int(n)
-        if n <= 0:
+    ranked = sorted(
+        grouped.items(),
+        key=lambda kv: (kv[1]["recent_72h"], kv[1]["total"]),
+        reverse=True,
+    )
+    for error_key, bucket in ranked[:12]:
+        total = int(bucket["total"])
+        recent = int(bucket["recent_72h"])
+        if total <= 0:
             continue
-        title = f"Reduce recurring failure: {error[:72]}"
+        title = f"Reduce recurring failure: {error_key[:72]}"
+        recent_ratio = recent / max(total, 1)
         out.append(
             build_ticket(
                 source="runtime_failures",
                 title=title,
-                evidence=f"{n} failed outcomes with error='{error}'",
-                impact=5 if n >= 5 else 4,
-                confidence=4,
-                effort=3 if "timeout" in str(error).lower() else 4,
+                evidence=f"{total} failed outcomes (recent_72h={recent}) grouped_as='{error_key}'",
+                impact=5 if recent >= 3 or total >= 8 else 4,
+                confidence=5 if recent_ratio >= 0.6 else 4,
+                effort=3 if "timeout" in error_key else 4,
                 risk="medium",
                 acceptance=[
                     "Reproduce with a deterministic regression scenario.",
                     "Implement fix and add regression test or benchmark assertion.",
                     "Observe >=3 consecutive benchmark runs without this error.",
                 ],
-                meta={"error": error, "count": n},
+                meta={
+                    "error_group": error_key,
+                    "count_total": total,
+                    "count_recent_72h": recent,
+                    "examples": bucket["examples"],
+                },
             )
         )
     return out
@@ -154,7 +217,12 @@ def tickets_from_tool_usage(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "Implement retry/fallback policy where safe.",
                     "Drop fail_rate below 0.30 on subsequent snapshots.",
                 ],
-                meta={"tool": tool, "fail_rate": round(rate, 3), "last_error": last_error},
+                meta={
+                    "tool": tool,
+                    "fail_rate": round(rate, 3),
+                    "last_error": last_error,
+                    "status": "open",
+                },
             )
         )
     return out
@@ -258,13 +326,13 @@ def render_markdown(ts: str, tickets: list[dict[str, Any]]) -> str:
         f"- generated_utc: {ts}",
         f"- ticket_count: {len(tickets)}",
         "",
-        "| rank | score | source | risk | title | evidence |",
-        "|---:|---:|---|---|---|---|",
+        "| rank | score | source | risk | status | owner | eta | title | evidence |",
+        "|---:|---:|---|---|---|---|---|---|---|",
     ]
     for i, t in enumerate(tickets, start=1):
         lines.append(
-            f"| {i} | {t['score']:.3f} | `{t['source']}` | `{t['risk']}` | "
-            f"{t['title']} | {t['evidence']} |"
+            f"| {i} | {t['score']:.3f} | `{t['source']}` | `{t['risk']}` | `{t.get('status','open')}` | "
+            f"`{t.get('owner','athena')}` | `{t.get('eta','n/a')}` | {t['title']} | {t['evidence']} |"
         )
     lines.append("")
     lines.append("## Acceptance Checks")

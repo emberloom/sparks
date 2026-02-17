@@ -64,6 +64,18 @@ def load_history(path: Path, limit: int) -> list[dict]:
     return rows[-limit:]
 
 
+def is_smoke_suite(suite_name: str) -> bool:
+    name = suite_name.strip().lower()
+    return "smoke" in name or "mini" in name
+
+
+def latest_matching(history: list[dict], predicate) -> dict | None:
+    for item in reversed(history):
+        if predicate(item):
+            return item
+    return None
+
+
 def pct(n: int, d: int) -> str:
     if d <= 0:
         return "n/a"
@@ -184,21 +196,35 @@ def render_dashboard(history: list[dict], kpis: list[dict], repo_name: str) -> s
     lines.append(f"- repo: `{repo_name}`")
     lines.append("")
 
-    lines.append("## Latest Eval")
-    if history:
-        h = history[-1]
-        lines.append(f"- suite: `{h.get('suite', 'unknown')}`")
-        lines.append(f"- timestamp_utc: `{h.get('timestamp_utc', 'unknown')}`")
-        lines.append(f"- gate: `{'PASS' if h.get('gate_ok') else 'FAIL'}`")
-        lines.append(f"- overall_score: `{h.get('overall_score', 0):.2f}`")
-        lines.append(f"- threshold: `{h.get('threshold', 0):.2f}`")
-        lines.append(f"- task_count: `{h.get('task_count', 0)}`")
-        lines.append(f"- exec_success_rate: `{h.get('exec_success_rate', 0):.2f}`")
+    lines.append("## Latest Smoke Eval (Health)")
+    smoke = latest_matching(history, lambda h: is_smoke_suite(str(h.get("suite", ""))))
+    if smoke:
+        lines.append(f"- suite: `{smoke.get('suite', 'unknown')}`")
+        lines.append(f"- timestamp_utc: `{smoke.get('timestamp_utc', 'unknown')}`")
+        lines.append(f"- gate: `{'PASS' if smoke.get('gate_ok') else 'FAIL'}`")
+        lines.append(f"- overall_score: `{smoke.get('overall_score', 0):.2f}`")
+        lines.append(f"- threshold: `{smoke.get('threshold', 0):.2f}`")
+        lines.append(f"- task_count: `{smoke.get('task_count', 0)}`")
+        lines.append(f"- exec_success_rate: `{smoke.get('exec_success_rate', 0):.2f}`")
     else:
-        lines.append("- no eval history found")
+        lines.append("- no smoke eval history found")
     lines.append("")
 
-    lines.append("## Eval Trend")
+    lines.append("## Latest Real Eval (Quality Gate)")
+    real = latest_matching(history, lambda h: not is_smoke_suite(str(h.get("suite", ""))))
+    if real:
+        lines.append(f"- suite: `{real.get('suite', 'unknown')}`")
+        lines.append(f"- timestamp_utc: `{real.get('timestamp_utc', 'unknown')}`")
+        lines.append(f"- gate: `{'PASS' if real.get('gate_ok') else 'FAIL'}`")
+        lines.append(f"- overall_score: `{real.get('overall_score', 0):.2f}`")
+        lines.append(f"- threshold: `{real.get('threshold', 0):.2f}`")
+        lines.append(f"- task_count: `{real.get('task_count', 0)}`")
+        lines.append(f"- exec_success_rate: `{real.get('exec_success_rate', 0):.2f}`")
+    else:
+        lines.append("- no real quality-gate eval history found")
+    lines.append("")
+
+    lines.append("## Eval Trend (All Suites)")
     lines.append("")
     lines.append("| timestamp | suite | gate | overall | tasks | exec_success_rate |")
     lines.append("|---|---|---|---:|---:|---:|")

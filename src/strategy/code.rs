@@ -56,6 +56,24 @@ const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
 const MAX_EXPLORE_STEPS: usize = 5;
 const MAX_VERIFY_STEPS: usize = 5;
+const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliFailurePolicy {
+    code: String,
+    retry_same: bool,
+    fallback: bool,
+}
+
+impl Default for CliFailurePolicy {
+    fn default() -> Self {
+        Self {
+            code: "unclassified".to_string(),
+            retry_same: false,
+            fallback: true,
+        }
+    }
+}
 
 struct ExplorationResult {
     plan: String,
@@ -620,15 +638,63 @@ impl CodeStrategy {
                 tracing::info!(tool = tool_name, "EXECUTE: coding tool succeeded");
                 return Ok(result.output);
             }
+            let policy = parse_cli_failure_policy(&result.output);
 
             failures.push(format!(
-                "{}: {}",
+                "{} [{}]: {}",
                 tool_name,
+                policy.code,
                 lf_truncate(&result.output, 250)
             ));
 
+            if policy.retry_same {
+                tracing::warn!(
+                    tool = tool_name,
+                    code = %policy.code,
+                    "EXECUTE: retrying same coding tool based on policy"
+                );
+                match tool.execute(docker, &params).await {
+                    Ok(retry_once) if retry_once.success => return Ok(retry_once.output),
+                    Ok(retry_once) => {
+                        let retry_policy = parse_cli_failure_policy(&retry_once.output);
+                        failures.push(format!(
+                            "{} (policy-retry) [{}]: {}",
+                            tool_name,
+                            retry_policy.code,
+                            lf_truncate(&retry_once.output, 250)
+                        ));
+                        if !retry_policy.fallback {
+                            return Err(AthenaError::Tool(format!(
+                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                                tool_name,
+                                retry_policy.code,
+                                failures
+                                    .iter()
+                                    .map(|f| format!("- {}", f))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            )));
+                        }
+                    }
+                    Err(e) => failures.push(format!("{} (policy-retry): {}", tool_name, e)),
+                }
+            }
+
+            if !policy.fallback {
+                return Err(AthenaError::Tool(format!(
+                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                    tool_name,
+                    policy.code,
+                    failures
+                        .iter()
+                        .map(|f| format!("- {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )));
+            }
+
             // On the last candidate, try one prompt rewrite retry before failing.
-            if allow_retry_rewrite && idx + 1 == candidates.len() {
+            if allow_retry_rewrite && policy.fallback && idx + 1 == candidates.len() {
                 tracing::warn!(
                     tool = tool_name,
                     "EXECUTE: coding tool failed, attempting retry"
@@ -897,6 +963,28 @@ fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
     context.contains("[benchmark_fast_cli]") || context.contains("[eval_fast_cli]")
 }
 
+fn parse_cli_failure_policy(output: &str) -> CliFailurePolicy {
+    let mut policy = CliFailurePolicy::default();
+    let Some(line) = output.lines().next() else {
+        return policy;
+    };
+    if !line.starts_with(CLI_CONTRACT_PREFIX) {
+        return policy;
+    }
+    for token in line.split_whitespace().skip(1) {
+        let Some((k, v)) = token.split_once('=') else {
+            continue;
+        };
+        match k {
+            "code" => policy.code = v.to_string(),
+            "retry_same" => policy.retry_same = v.eq_ignore_ascii_case("true"),
+            "fallback" => policy.fallback = v.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+    policy
+}
+
 /// Build tool schemas filtered to only the tools allowed in a given phase.
 fn phase_schemas(tools: &ToolRegistry, allowed: &[&str]) -> Vec<ToolSchema> {
     tools
@@ -1146,4 +1234,46 @@ INSTRUCTIONS:
         tools = tool_descs,
         test_gen = test_gen_section,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cli_failure_policy, CliFailurePolicy};
+
+    #[test]
+    fn parse_cli_failure_policy_defaults_for_plain_text() {
+        let policy = parse_cli_failure_policy("plain failure text");
+        assert_eq!(
+            policy,
+            CliFailurePolicy {
+                code: "unclassified".to_string(),
+                retry_same: false,
+                fallback: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_reads_contract_fields() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true",
+        );
+        assert_eq!(policy.code, "transient_upstream");
+        assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_non_fallback_is_deterministic() {
+        let a = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
+        );
+        let b = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
+        );
+        assert_eq!(a, b);
+        assert_eq!(a.code, "invalid_request");
+        assert!(!a.retry_same);
+        assert!(!a.fallback);
+    }
 }

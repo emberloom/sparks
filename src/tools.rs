@@ -1180,6 +1180,7 @@ impl Tool for DiffTool {
 
 const CLI_OUTPUT_LEN: usize = 16_000;
 const CLI_TIMEOUT_SECS_DEFAULT: u64 = 3600; // 1 hour
+const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
 
 fn cli_timeout_secs() -> u64 {
     std::env::var("ATHENA_CLI_TIMEOUT_SECS")
@@ -1187,6 +1188,53 @@ fn cli_timeout_secs() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(CLI_TIMEOUT_SECS_DEFAULT)
+}
+
+fn cli_error_policy_from_output(text: &str) -> (&'static str, bool, bool) {
+    let lower = text.to_lowercase();
+    if lower.contains("cannot be launched inside another claude code session")
+        || lower.contains("unavailable inside an existing claude code session")
+    {
+        return ("session_conflict", false, true);
+    }
+    if lower.contains("missing 'prompt' param") {
+        return ("invalid_request", false, false);
+    }
+    if lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("connection reset")
+        || lower.contains("dns")
+        || lower.contains("econn")
+    {
+        return ("transient_upstream", true, true);
+    }
+    ("cli_failed", false, true)
+}
+
+fn format_cli_contract_error(
+    tool_name: &str,
+    code: &str,
+    retry_same: bool,
+    fallback: bool,
+    exit_code: Option<i32>,
+    timeout_secs: u64,
+    detail: &str,
+) -> String {
+    let exit_code_str = exit_code
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "{} tool={} code={} retry_same={} fallback={} exit_code={} timeout_secs={}\n{}",
+        CLI_CONTRACT_PREFIX,
+        tool_name,
+        code,
+        retry_same,
+        fallback,
+        exit_code_str,
+        timeout_secs,
+        detail
+    )
 }
 
 /// Shared implementation for all coding CLI tools.
@@ -1219,25 +1267,63 @@ async fn run_cli_tool(
             } else {
                 format!("{}\n[stderr]\n{}", stdout, stderr)
             };
+            if output.status.success() {
+                return Ok(ToolResult {
+                    success: true,
+                    output: truncate(&combined, CLI_OUTPUT_LEN),
+                });
+            }
+            let (code, retry_same, fallback) = cli_error_policy_from_output(&combined);
             Ok(ToolResult {
-                success: output.status.success(),
-                output: truncate(&combined, CLI_OUTPUT_LEN),
+                success: false,
+                output: truncate(
+                    &format_cli_contract_error(
+                        tool_name,
+                        code,
+                        retry_same,
+                        fallback,
+                        output.status.code(),
+                        timeout_secs,
+                        &combined,
+                    ),
+                    CLI_OUTPUT_LEN,
+                ),
             })
         }
         Ok(Err(e)) => {
             // Command failed to start (not installed, permission denied, etc.)
+            let detail = format!(
+                "{}: command failed — {}. Is it installed and in PATH?",
+                tool_name, e
+            );
             Ok(ToolResult {
                 success: false,
-                output: format!(
-                    "{}: command failed — {}. Is it installed and in PATH?",
-                    tool_name, e
+                output: format_cli_contract_error(
+                    tool_name,
+                    "cli_unavailable",
+                    false,
+                    true,
+                    None,
+                    timeout_secs,
+                    &detail,
                 ),
             })
         }
-        Err(_) => Ok(ToolResult {
-            success: false,
-            output: format!("{}: timed out after {}s", tool_name, timeout_secs),
-        }),
+        Err(_) => {
+            let detail = format!("{}: timed out after {}s", tool_name, timeout_secs);
+            Ok(ToolResult {
+                success: false,
+                output: format_cli_contract_error(
+                    tool_name,
+                    "cli_timeout",
+                    false,
+                    true,
+                    None,
+                    timeout_secs,
+                    &detail,
+                ),
+            })
+        }
     }
 }
 
@@ -2472,6 +2558,44 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn test_cli_error_policy_classification() {
+        let (code, retry_same, fallback) =
+            cli_error_policy_from_output("Error: missing 'prompt' param");
+        assert_eq!(code, "invalid_request");
+        assert!(!retry_same);
+        assert!(!fallback);
+
+        let (code, retry_same, fallback) = cli_error_policy_from_output(
+            "Claude Code cannot be launched inside another Claude Code session.",
+        );
+        assert_eq!(code, "session_conflict");
+        assert!(!retry_same);
+        assert!(fallback);
+
+        let (code, retry_same, fallback) = cli_error_policy_from_output("HTTP 429 rate limit");
+        assert_eq!(code, "transient_upstream");
+        assert!(retry_same);
+        assert!(fallback);
+    }
+
+    #[test]
+    fn test_cli_contract_error_line_contains_policy_fields() {
+        let out = format_cli_contract_error(
+            "codex",
+            "cli_timeout",
+            false,
+            true,
+            None,
+            120,
+            "codex: timed out after 120s",
+        );
+        assert!(out.contains("[athena_cli_contract]"));
+        assert!(out.contains("tool=codex"));
+        assert!(out.contains("code=cli_timeout"));
+        assert!(out.contains("fallback=true"));
     }
 
     // ── ManageToolsTool ──────────────────────────────────────────────

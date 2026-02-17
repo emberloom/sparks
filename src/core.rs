@@ -24,7 +24,7 @@ use crate::scheduler::CronEngine;
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
-const STALE_STARTED_REASON: &str = "stale_started_timeout";
+const STALE_STARTED_REASON: &str = "stale_started";
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]

@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "rolled_back"}
+OUTCOME_REASON_WAIT_TIMEOUT = "outcome_wait_timeout"
 
 
 def _to_text(value: object) -> str:
@@ -138,6 +139,23 @@ def parse_db_path(config_path: Path) -> Path:
             if value:
                 return Path(value).expanduser()
     return default
+
+
+def lane_timeout_budget(lane: str, risk: str, fast_mode: bool = False) -> tuple[int, int, int]:
+    if fast_mode:
+        return 120, 120, 240
+    lane_key = lane.strip().lower()
+    risk_key = risk.strip().lower()
+    if lane_key == "delivery":
+        wait_map = {"low": 420, "medium": 600, "high": 900}
+        wait = wait_map.get(risk_key, 600)
+        return wait, max(wait, 480), max(wait + 240, 900)
+    if lane_key == "self_improvement":
+        wait_map = {"low": 240, "medium": 360, "high": 540}
+        wait = wait_map.get(risk_key, 360)
+        return wait, max(wait, 300), max(wait + 180, 600)
+    wait = 300
+    return wait, 360, 600
 
 
 def git_status_paths(repo: Path) -> set[str]:
@@ -388,11 +406,26 @@ def run_task(
     lane = str(merged.get("lane", "delivery"))
     risk = str(merged.get("risk", "medium"))
     repo_name = str(merged.get("repo", "athena"))
-    wait_secs = int(merged.get("wait_secs", 240))
-    timeout_secs = int(merged.get("timeout_secs", wait_secs + 180))
-    outcome_wait_secs = int(merged.get("outcome_wait_secs", max(wait_secs, 120)))
+    strict_timeout_budget = bool(merged.get("strict_timeout_budget", True))
+    fast_mode = bool(dispatch_context and "[benchmark_fast_cli]" in dispatch_context.lower())
+    min_wait_secs, min_outcome_wait_secs, min_timeout_secs = lane_timeout_budget(
+        lane, risk, fast_mode=fast_mode
+    )
+    wait_raw = int(merged.get("wait_secs", min_wait_secs))
+    outcome_wait_raw = int(merged.get("outcome_wait_secs", max(wait_raw, 120)))
+    timeout_raw = int(merged.get("timeout_secs", wait_raw + 180))
+    if strict_timeout_budget:
+        wait_secs = max(wait_raw, min_wait_secs)
+        outcome_wait_secs = max(outcome_wait_raw, min_outcome_wait_secs)
+        timeout_secs = max(timeout_raw, min_timeout_secs, wait_secs + 60)
+    else:
+        wait_secs = max(wait_raw, 1)
+        outcome_wait_secs = max(outcome_wait_raw, 1)
+        timeout_secs = max(timeout_raw, 1)
     goal = build_dispatch_goal(str(merged.get("goal", "")).strip())
     test_command = str(merged.get("test_command", "")).strip()
+    if lane == "delivery" and not test_command:
+        test_command = "cargo check -q"
     task_name = str(merged.get("id", "unknown"))
 
     before = git_status_paths(repo)
@@ -434,8 +467,7 @@ def run_task(
             conn, dispatch_task_id, max_wait_secs=outcome_wait_secs
         )
         if not outcome_terminal:
-            timeout_error = f"eval_outcome_wait_timeout_after={outcome_wait_secs}s"
-            if fail_outcome_if_started(conn, dispatch_task_id, timeout_error):
+            if fail_outcome_if_started(conn, dispatch_task_id, OUTCOME_REASON_WAIT_TIMEOUT):
                 outcome = query_outcome(conn, dispatch_task_id)
                 outcome_terminal = outcome.get("status") in TERMINAL_STATUSES
 
@@ -460,6 +492,9 @@ def run_task(
     )
 
     notes = [f"test_command={test_note}"]
+    notes.append(
+        f"timeout_budget(wait={wait_secs}s,outcome_wait={outcome_wait_secs}s,subprocess={timeout_secs}s)"
+    )
     if cli_tool:
         notes.append(f"cli_tool={cli_tool}")
     if cli_model:

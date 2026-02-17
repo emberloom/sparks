@@ -26,6 +26,8 @@ Roadmap and target gate model: `docs/self-improvement-roadmap.md`.
 Default suite file:
 
 - `eval/benchmark-suite.json`
+- real quality gate profile: `eval/benchmark-real-gate.json`
+- smoke profile: `eval/benchmark-cli-smoke.json`
 
 Current lanes covered:
 
@@ -137,6 +139,16 @@ On completion, a summary is generated at:
 
 - `<run_dir>/summary.md`
 
+## Real Quality Gate
+
+Run real delivery-quality suite (separate from smoke health):
+
+```bash
+python3 scripts/eval_harness.py --suite eval/benchmark-real-gate.json
+```
+
+Use smoke for integration uptime and real suite for promotion decisions.
+
 ## Output
 
 Reports are written to:
@@ -185,4 +197,4 @@ GitHub Actions workflow:
 Planned CI evolution:
 
 - keep smoke job as quick regression sentinel
-- add real benchmark gate job (non-mock runtime) for promotion decisions
+- real benchmark gate is wired as manual self-hosted workflow: `.github/workflows/eval-real-gate.yml`
