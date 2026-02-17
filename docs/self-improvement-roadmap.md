@@ -123,6 +123,11 @@ Goal: Athena can improve Athena in a bounded loop.
 Deliverables:
 
 - loop: detect issue -> propose patch -> isolated worktree implementation -> maintenance pack -> critic review -> promote decision
+- `athena self-build run` now emits supervised promotion execution artifacts with explicit mode:
+  - `--promote-mode none|pr|auto`
+  - `--base-branch <branch>` for PR target
+  - low-risk + high-confidence may auto-merge only in `auto` mode
+  - medium/high-risk always stays PR-only
 - promotion matrix:
   - low-risk high-confidence: auto-merge allowed
   - medium/high risk: PR-only human approval
