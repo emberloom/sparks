@@ -965,24 +965,65 @@ fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
 
 fn parse_cli_failure_policy(output: &str) -> CliFailurePolicy {
     let mut policy = CliFailurePolicy::default();
-    let Some(line) = output.lines().next() else {
+    let Some(marker_idx) = output.find(CLI_CONTRACT_PREFIX) else {
         return policy;
     };
-    if !line.starts_with(CLI_CONTRACT_PREFIX) {
+    let Some(line) = output[marker_idx..].lines().next() else {
         return policy;
-    }
-    for token in line.split_whitespace().skip(1) {
-        let Some((k, v)) = token.split_once('=') else {
+    };
+
+    let mut code_set = false;
+    let mut retry_set = false;
+    let mut fallback_set = false;
+
+    for token in line
+        .trim_start_matches(CLI_CONTRACT_PREFIX)
+        .split_whitespace()
+    {
+        let Some((k, v)) = parse_contract_token(token) else {
             continue;
         };
         match k {
-            "code" => policy.code = v.to_string(),
-            "retry_same" => policy.retry_same = v.eq_ignore_ascii_case("true"),
-            "fallback" => policy.fallback = v.eq_ignore_ascii_case("true"),
+            "code" if !code_set => {
+                policy.code = v.to_string();
+                code_set = true;
+            }
+            "retry_same" if !retry_set => {
+                if let Some(parsed) = parse_contract_bool(v) {
+                    policy.retry_same = parsed;
+                    retry_set = true;
+                }
+            }
+            "fallback" if !fallback_set => {
+                if let Some(parsed) = parse_contract_bool(v) {
+                    policy.fallback = parsed;
+                    fallback_set = true;
+                }
+            }
             _ => {}
         }
     }
     policy
+}
+
+fn parse_contract_token(token: &str) -> Option<(&str, &str)> {
+    let mut parts = token.split('=');
+    let key = parts.next()?;
+    let value = parts.next()?;
+    if key.is_empty() || value.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((key, value))
+}
+
+fn parse_contract_bool(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Build tool schemas filtered to only the tools allowed in a given phase.
@@ -1254,12 +1295,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_failure_policy_reads_contract_fields() {
+    fn parse_cli_failure_policy_reads_contract_fields_marker_first() {
         let policy = parse_cli_failure_policy(
             "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true",
         );
         assert_eq!(policy.code, "transient_upstream");
         assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_reads_contract_fields_marker_middle() {
+        let policy = parse_cli_failure_policy(
+            "cli failed before structured marker\n\
+             detail: wrapper error [athena_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false exit_code=2",
+        );
+        assert_eq!(policy.code, "invalid_request");
+        assert!(!policy.retry_same);
+        assert!(!policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_ignores_malformed_tokens() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=invalid_request retry_same=maybe fallback=true=false",
+        );
+        assert_eq!(policy.code, "invalid_request");
+        assert!(!policy.retry_same);
         assert!(policy.fallback);
     }
 
@@ -1275,5 +1337,67 @@ mod tests {
         assert_eq!(a.code, "invalid_request");
         assert!(!a.retry_same);
         assert!(!a.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_empty_output() {
+        let policy = parse_cli_failure_policy("");
+        assert_eq!(policy, CliFailurePolicy::default());
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_marker_only_no_fields() {
+        let policy = parse_cli_failure_policy("[athena_cli_contract]");
+        assert_eq!(policy, CliFailurePolicy::default());
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_marker_at_end_no_newline() {
+        let policy = parse_cli_failure_policy(
+            "error output line 1\nerror output line 2\n[athena_cli_contract] code=timeout retry_same=true fallback=true",
+        );
+        assert_eq!(policy.code, "timeout");
+        assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_first_marker_wins() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] code=first retry_same=true fallback=false\n\
+             [athena_cli_contract] code=second retry_same=false fallback=true",
+        );
+        assert_eq!(policy.code, "first");
+        assert!(policy.retry_same);
+        assert!(!policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_first_value_per_key_wins() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] code=first code=second retry_same=true retry_same=false fallback=false fallback=true",
+        );
+        assert_eq!(policy.code, "first");
+        assert!(policy.retry_same);
+        assert!(!policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_ignores_empty_key_or_value() {
+        let policy =
+            parse_cli_failure_policy("[athena_cli_contract] =orphan_value key_only= code=valid");
+        assert_eq!(policy.code, "valid");
+        assert!(!policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_bool_case_insensitive() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] code=test retry_same=TRUE fallback=False",
+        );
+        assert_eq!(policy.code, "test");
+        assert!(policy.retry_same);
+        assert!(!policy.fallback);
     }
 }
