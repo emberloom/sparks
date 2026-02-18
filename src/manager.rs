@@ -768,85 +768,109 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
 
         // Parse classification
         if let Some(json) = llm::extract_json(&response) {
-            let task_type = json["type"].as_str().unwrap_or("simple");
-
-            if task_type == "direct" {
-                // Parse direct execution steps
-                let dt = self.direct_tools.read().await;
-                if let Some(steps) = Self::parse_direct_steps_from(&dt, &json) {
-                    tracing::info!(steps = steps.len(), "Classified as direct execution");
-                    return Ok(Classification::Direct { steps });
+            match json["type"].as_str().unwrap_or("simple") {
+                "direct" => {
+                    let dt = self.direct_tools.read().await;
+                    return Ok(Self::parse_direct(&dt, &json, user_input));
                 }
-                // If direct parsing failed, fall through to complex
-                tracing::warn!("Direct classification had invalid steps, falling back to complex");
-                return Ok(Classification::Complex {
-                    ghost_name: "coder".to_string(),
-                    goal: user_input.to_string(),
-                    context: "Classifier attempted direct execution but tool validation failed."
-                        .to_string(),
-                });
-            }
-
-            if task_type == "complex" {
-                let ghost_name = json["ghost"]
-                    .as_str()
-                    .or_else(|| json["agent"].as_str()) // backward compat
-                    .unwrap_or("scout")
-                    .to_string();
-                let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
-                let context = json["context"].as_str().unwrap_or("").to_string();
-                return Ok(Classification::Complex {
-                    ghost_name,
-                    goal,
-                    context,
-                });
-            }
-
-            // Catch orchestrator outputting ghost delegation without "type": "complex"
-            if json.get("ghost").is_some() && json.get("goal").is_some() {
-                tracing::warn!("Orchestrator sent ghost delegation without type:complex, fixing");
-                let ghost_name = json["ghost"].as_str().unwrap_or("self-dev").to_string();
-                let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
-                let context = json["context"].as_str().unwrap_or("").to_string();
-                return Ok(Classification::Complex {
-                    ghost_name,
-                    goal,
-                    context,
-                });
-            }
-            if let Some(answer) = json["answer"].as_str() {
-                // Safety net: if the "simple" answer contains tool-call JSON,
-                // the orchestrator is confused — re-classify as complex
-                if answer.contains("\"tool\"") && answer.contains("\"params\"") {
-                    tracing::warn!(
-                        "Orchestrator leaked tool JSON in simple answer, re-classifying as complex"
-                    );
-                    return Ok(Classification::Complex {
-                        ghost_name: "coder".to_string(),
-                        goal: user_input.to_string(),
-                        context: "The orchestrator attempted to use tools directly. Delegate this task properly.".to_string(),
-                    });
+                "complex" => return Ok(Self::parse_complex(&json, user_input)),
+                _ => {
+                    if let Some(classification) = Self::parse_simple(&json, user_input) {
+                        return Ok(classification);
+                    }
                 }
-                return Ok(Classification::Simple(answer.to_string()));
             }
         }
 
         // Fallback: if raw response contains tool-call JSON, classify as complex
-        if response.contains("\"tool\"") && response.contains("\"params\"") {
+        if Self::contains_tool_payload(&response) {
             tracing::warn!(
                 "Orchestrator raw response contains tool JSON, re-classifying as complex"
             );
-            return Ok(Classification::Complex {
-                ghost_name: "coder".to_string(),
-                goal: user_input.to_string(),
-                context:
-                    "The orchestrator attempted to use tools directly. Delegate this task properly."
-                        .to_string(),
-            });
+            return Ok(Self::tool_payload_fallback(user_input));
         }
 
         // Fallback: treat the raw response as a simple answer
         Ok(Classification::Simple(response))
+    }
+
+    fn parse_direct(
+        direct_tools: &HashMap<String, DynamicTool>,
+        json: &serde_json::Value,
+        user_input: &str,
+    ) -> Classification {
+        if let Some(steps) = Self::parse_direct_steps_from(direct_tools, json) {
+            tracing::info!(steps = steps.len(), "Classified as direct execution");
+            return Classification::Direct { steps };
+        }
+
+        tracing::warn!("Direct classification had invalid steps, falling back to complex");
+        Self::invalid_direct_fallback(user_input)
+    }
+
+    fn parse_complex(json: &serde_json::Value, user_input: &str) -> Classification {
+        let ghost_name = json["ghost"]
+            .as_str()
+            .or_else(|| json["agent"].as_str()) // backward compat
+            .unwrap_or("scout")
+            .to_string();
+        let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
+        let context = json["context"].as_str().unwrap_or("").to_string();
+        Classification::Complex {
+            ghost_name,
+            goal,
+            context,
+        }
+    }
+
+    fn parse_simple(json: &serde_json::Value, user_input: &str) -> Option<Classification> {
+        // Catch orchestrator outputting ghost delegation without "type": "complex"
+        if json.get("ghost").is_some() && json.get("goal").is_some() {
+            tracing::warn!("Orchestrator sent ghost delegation without type:complex, fixing");
+            let ghost_name = json["ghost"].as_str().unwrap_or("self-dev").to_string();
+            let goal = json["goal"].as_str().unwrap_or(user_input).to_string();
+            let context = json["context"].as_str().unwrap_or("").to_string();
+            return Some(Classification::Complex {
+                ghost_name,
+                goal,
+                context,
+            });
+        }
+
+        let answer = json["answer"].as_str()?;
+        // Safety net: if the "simple" answer contains tool-call JSON,
+        // the orchestrator is confused — re-classify as complex
+        if Self::contains_tool_payload(answer) {
+            tracing::warn!(
+                "Orchestrator leaked tool JSON in simple answer, re-classifying as complex"
+            );
+            return Some(Self::tool_payload_fallback(user_input));
+        }
+
+        Some(Classification::Simple(answer.to_string()))
+    }
+
+    fn contains_tool_payload(content: &str) -> bool {
+        content.contains("\"tool\"") && content.contains("\"params\"")
+    }
+
+    fn invalid_direct_fallback(user_input: &str) -> Classification {
+        Classification::Complex {
+            ghost_name: "coder".to_string(),
+            goal: user_input.to_string(),
+            context: "Classifier attempted direct execution but tool validation failed."
+                .to_string(),
+        }
+    }
+
+    fn tool_payload_fallback(user_input: &str) -> Classification {
+        Classification::Complex {
+            ghost_name: "coder".to_string(),
+            goal: user_input.to_string(),
+            context:
+                "The orchestrator attempted to use tools directly. Delegate this task properly."
+                    .to_string(),
+        }
     }
 
     /// Parse direct execution steps from classifier JSON.
@@ -1078,4 +1102,116 @@ enum Classification {
         goal: String,
         context: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dynamic_tools::{DynamicToolDefinition, ExecutionMode};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn test_direct_tools() -> HashMap<String, DynamicTool> {
+        let mut tools = HashMap::new();
+        let git = DynamicTool::new(
+            DynamicToolDefinition {
+                name: "git".to_string(),
+                description: "Git CLI".to_string(),
+                parameters: vec![],
+                needs_confirmation: true,
+                command: "git {{subcommand}}".to_string(),
+                execution: ExecutionMode::Host,
+                allowed_commands: vec!["git".to_string()],
+                blocked_patterns: vec![],
+                timeout_secs: Some(30),
+            },
+            Some(".".to_string()),
+        );
+        tools.insert("git".to_string(), git);
+        tools
+    }
+
+    #[test]
+    fn parse_direct_envelope_valid() {
+        let json = json!({
+            "type": "direct",
+            "tool": "git",
+            "params": {"subcommand": "status"},
+        });
+
+        let classification = Manager::parse_direct(&test_direct_tools(), &json, "git status");
+        match classification {
+            Classification::Direct { steps } => {
+                assert_eq!(steps.len(), 1);
+                assert_eq!(steps[0].tool, "git");
+                assert_eq!(steps[0].params, json!({"subcommand": "status"}));
+            }
+            _ => panic!("expected direct classification"),
+        }
+    }
+
+    #[test]
+    fn parse_complex_envelope_valid() {
+        let json = json!({
+            "type": "complex",
+            "ghost": "coder",
+            "goal": "refactor manager",
+            "context": "from ticket",
+        });
+
+        let classification = Manager::parse_complex(&json, "fallback goal");
+        match classification {
+            Classification::Complex {
+                ghost_name,
+                goal,
+                context,
+            } => {
+                assert_eq!(ghost_name, "coder");
+                assert_eq!(goal, "refactor manager");
+                assert_eq!(context, "from ticket");
+            }
+            _ => panic!("expected complex classification"),
+        }
+    }
+
+    #[test]
+    fn parse_simple_envelope_valid() {
+        let json = json!({
+            "type": "simple",
+            "answer": "Hello there.",
+        });
+
+        let classification = Manager::parse_simple(&json, "ignored");
+        match classification {
+            Some(Classification::Simple(answer)) => assert_eq!(answer, "Hello there."),
+            _ => panic!("expected simple classification"),
+        }
+    }
+
+    #[test]
+    fn parse_direct_unknown_tool_falls_back_to_complex() {
+        let json = json!({
+            "type": "direct",
+            "tool": "unknown_tool",
+            "params": {"anything": "value"},
+        });
+        let user_input = "run unknown tool";
+
+        let classification = Manager::parse_direct(&test_direct_tools(), &json, user_input);
+        match classification {
+            Classification::Complex {
+                ghost_name,
+                goal,
+                context,
+            } => {
+                assert_eq!(ghost_name, "coder");
+                assert_eq!(goal, user_input);
+                assert_eq!(
+                    context,
+                    "Classifier attempted direct execution but tool validation failed."
+                );
+            }
+            _ => panic!("expected complex fallback classification"),
+        }
+    }
 }
