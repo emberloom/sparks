@@ -214,6 +214,16 @@ Priority fixes currently focused on:
   - mitigation: nightly full real-gate optimizer workflow added on self-hosted runner
   - next: move from manual/self-hosted-only dependence toward broader always-on gating where possible
 
+## Parsing Hardening Status (Canonical)
+
+Last updated: 2026-02-18  
+Nightly updater target: `docs/parsing-hardening-plan.md` (`## Status (Canonical)`).
+
+- [x] Phase 1 (Complete): CLI execution contract parsing hardened with deterministic tags + tests.
+- [ ] Phase 2 (In progress): manager direct-step fallback parsing hardening and malformed-input test coverage.
+- [ ] Phase 3 (In progress): replace manager/strategy heuristic parsing with structured markers.
+- [ ] Phase 4 (In progress): remove legacy heuristic parsing paths after marker coverage is complete.
+
 ## Next Execution Sequence
 
 1. Expand mutation operators beyond dispatch-context prompts (policy/tool/skill-level variants).
