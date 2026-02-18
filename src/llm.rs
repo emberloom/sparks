@@ -1224,28 +1224,30 @@ fn try_parse_json(text: &str) -> Option<Value> {
     serde_json::from_str::<Value>(&sanitized).ok()
 }
 
-/// Extract JSON from LLM text output.
-/// Handles: raw JSON, ```json blocks, JSON embedded in prose,
-/// and common LLM JSON errors (invalid escapes, trailing commas).
-pub fn extract_json(text: &str) -> Option<Value> {
-    // Try parsing the whole thing first
-    if let Some(v) = try_parse_json(text.trim()) {
-        return Some(v);
-    }
+fn try_extract_raw_json(text: &str) -> Option<Value> {
+    try_parse_json(text.trim())
+}
 
-    // Try extracting from ```json ... ``` blocks
-    if let Some(start) = text.find("```json") {
-        let after = &text[start + 7..];
+fn try_extract_json_fenced_blocks(text: &str) -> Option<Value> {
+    let mut cursor = text;
+    while let Some(start) = cursor.find("```json") {
+        let after = &cursor[start + 7..];
         if let Some(end) = after.find("```") {
             if let Some(v) = try_parse_json(after[..end].trim()) {
                 return Some(v);
             }
+            cursor = &after[end + 3..];
+            continue;
         }
+        break;
     }
+    None
+}
 
-    // Try extracting from ``` ... ``` blocks (no json tag)
-    if let Some(start) = text.find("```") {
-        let after = &text[start + 3..];
+fn try_extract_generic_fenced_blocks(text: &str) -> Option<Value> {
+    let mut cursor = text;
+    while let Some(start) = cursor.find("```") {
+        let after = &cursor[start + 3..];
         if let Some(end) = after.find("```") {
             let block = after[..end].trim();
             // Skip language tag if present (e.g., ```python)
@@ -1262,9 +1264,20 @@ pub fn extract_json(text: &str) -> Option<Value> {
             if let Some(v) = try_parse_json(block.trim()) {
                 return Some(v);
             }
+            cursor = &after[end + 3..];
+            continue;
         }
+        break;
     }
+    None
+}
 
+fn try_extract_fenced_json(text: &str) -> Option<Value> {
+    // Preserve precedence: explicit ```json blocks before generic fenced blocks.
+    try_extract_json_fenced_blocks(text).or_else(|| try_extract_generic_fenced_blocks(text))
+}
+
+fn try_extract_embedded_object_json(text: &str) -> Option<Value> {
     // Try finding first { ... } in the text
     let mut depth = 0i32;
     let mut start = None;
@@ -1291,8 +1304,16 @@ pub fn extract_json(text: &str) -> Option<Value> {
             _ => {}
         }
     }
-
     None
+}
+
+/// Extract JSON from LLM text output.
+/// Handles: raw JSON, ```json blocks, JSON embedded in prose,
+/// and common LLM JSON errors (invalid escapes, trailing commas).
+pub fn extract_json(text: &str) -> Option<Value> {
+    try_extract_raw_json(text)
+        .or_else(|| try_extract_fenced_json(text))
+        .or_else(|| try_extract_embedded_object_json(text))
 }
 
 #[cfg(test)]
@@ -1311,6 +1332,14 @@ mod tests {
         let text = "Here's the command:\n```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}}\n```";
         let v = extract_json(text).unwrap();
         assert_eq!(v["tool"], "shell");
+    }
+
+    #[test]
+    fn test_extract_json_multiple_fenced_blocks_prefers_first_valid_json() {
+        let text = "Try this first:\n```json\nnot valid json\n```\nThen this:\n```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}}\n```\nAnd maybe:\n```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"pwd\"}}\n```";
+        let v = extract_json(text).unwrap();
+        assert_eq!(v["tool"], "shell");
+        assert_eq!(v["params"]["command"], "ls");
     }
 
     #[test]
