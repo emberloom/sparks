@@ -1,0 +1,23 @@
+# Refactor/tidy queue for unattended 8h loop.
+# Keep each ticket bounded, test-backed, and behavior-preserving.
+
+In src/strategy/code.rs harden parse_cli_failure_policy so it finds the [athena_cli_contract] marker anywhere in output (not only first line), parses known key/value fields deterministically, and add/extend unit tests for marker-first, marker-middle, and malformed-token cases. Run cargo test parse_cli_failure_policy -- --nocapture.
+
+In src/tools.rs make the nested Claude session early-return path emit a structured [athena_cli_contract] marker with code=session_conflict (instead of plain prose only), preserving fallback=true behavior. Add/update tests that assert this marker is present for that path.
+
+In src/manager.rs extract classification parsing into focused helpers (e.g., parse_direct, parse_complex, parse_simple) to reduce branching in classify while keeping behavior unchanged. Add unit tests for valid direct/complex/simple envelopes and unknown direct tool fallback behavior.
+
+In src/strategy/react.rs and src/strategy/mod.rs tighten text fallback parsing so ambiguous prose cannot trigger tool execution unless a valid tool JSON envelope is parsed; add regression tests for prose-without-json and malformed-json cases.
+
+In scripts/eval_harness.py introduce a structured plan-quality scoring path that can score from explicit plan fields when available, while keeping legacy PLAN:/EXECUTION: fallback for compatibility. Add tests in scripts/test_eval_harness.py for both structured and fallback scoring.
+
+In src/main.rs and scripts/eval_harness.py unify dispatch task-id extraction behavior by adding shared edge-case tests (multiple task_id markers, malformed UUID, no marker) and keep extraction deterministic.
+
+In src/manager.rs reduce duplicate "tool JSON leaked in answer/raw response" heuristic checks by centralizing them into one helper with explicit reason tags, preserving current safety behavior. Add focused unit tests.
+
+In src/proactive.rs perform a tidy refactor to split one oversized function into smaller private helpers without behavior changes, and add a small test seam if possible for the extracted pure helper logic.
+
+In src/llm.rs tidy extract_json internals by splitting block-extraction attempts into small helpers (raw, fenced, embedded-object) with no behavior change; keep existing tests passing and add one test for multiple fenced blocks preferring first valid JSON.
+
+In docs/self-improvement-roadmap.md and docs/parsing-hardening-plan.md add a short status section tracking parsing hardening progress (phase complete/in-progress checklist) so nightly runs can update one canonical place.
+

@@ -210,6 +210,7 @@ Priority fixes currently focused on:
 - #4 fragile parsing:
   - mitigation: tournament now parses key-value outputs robustly, with regression tests for parsing paths
   - next: replace remaining heuristic contracts with structured markers in manager/strategy loops
+  - implementation plan: `docs/parsing-hardening-plan.md`
 - #6 evals not always-on:
   - mitigation: nightly full real-gate optimizer workflow added on self-hosted runner
   - next: move from manual/self-hosted-only dependence toward broader always-on gating where possible
