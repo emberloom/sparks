@@ -529,39 +529,10 @@ pub fn maybe_schedule_reentry(
             return; // need at least one exchange
         }
 
-        // Summarize older turns, keep last 6 in full
-        let (summary_section, recent_section) = if recent.len() > 8 {
-            let split = recent.len() - 6;
-            let old_lines: Vec<String> = recent[..split]
-                .iter()
-                .map(|(role, content)| format!("[{}] {}", role, truncate(content, 120)))
-                .collect();
-            let recent_lines: Vec<String> = recent[split..]
-                .iter()
-                .map(|(role, content)| format!("{}: {}", role, content))
-                .collect();
-            (
-                format!(
-                    "Earlier in the conversation (summarized):\n{}\n\n",
-                    old_lines.join("\n")
-                ),
-                recent_lines.join("\n"),
-            )
-        } else {
-            let lines: Vec<String> = recent
-                .iter()
-                .map(|(role, content)| format!("{}: {}", role, content))
-                .collect();
-            (String::new(), lines.join("\n"))
-        };
+        let (summary_section, recent_section) = build_reentry_conversation_sections(&recent);
 
         // Extract topics from recent user messages for memory search
-        let user_topics: String = recent
-            .iter()
-            .filter(|(role, _)| role == "user")
-            .map(|(_, content)| content.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let user_topics = collect_reentry_user_topics(&recent);
 
         // Search related memories
         let memories = memory
@@ -578,7 +549,7 @@ pub fn maybe_schedule_reentry(
         };
 
         // Extract user_id from session_key for profile lookup
-        let user_id = session_key.splitn(3, ':').nth(1).unwrap_or("unknown");
+        let user_id = user_id_from_session_key(&session_key);
         let user_profile = memory.get_user_profile(user_id).unwrap_or_default();
         let profile_section = if user_profile.is_empty() {
             String::new()
@@ -590,27 +561,12 @@ pub fn maybe_schedule_reentry(
             format!("\n\nAbout this person:\n{}", items.join("\n"))
         };
 
-        // Build the persona preamble
-        let persona = persona_soul
-            .as_deref()
-            .map(|s| format!("{}\n\n", s))
-            .unwrap_or_default();
-
-        let prompt = format!(
-            r#"{persona}You had this conversation with the user a while ago:
-
-{summary_section}Recent messages:
-{recent_section}{memory_section}{profile_section}
-
-Time has passed since this conversation ended. Think about whether there's something genuinely valuable you could follow up on:
-- An unfinished thread worth revisiting
-- A solution or idea that came to mind since then
-- A relevant connection to something you know about them
-- A helpful resource or approach they might not have considered
-
-Write a natural, brief follow-up message (1-3 sentences) as if you're casually reaching out. Be specific — reference the actual topic. Don't be generic or vague.
-
-If there's genuinely nothing worth following up on, respond with exactly: NO_FOLLOWUP"#,
+        let prompt = build_reentry_prompt(
+            persona_soul.as_deref(),
+            &summary_section,
+            &recent_section,
+            &memory_section,
+            &profile_section,
         );
 
         let lf_trace = langfuse.as_ref().map(|lf| {
@@ -637,21 +593,8 @@ If there's genuinely nothing worth following up on, respond with exactly: NO_FOL
                 }
 
                 // Quality gate: reject refusals, too-short, or generic responses
-                if is_refusal(trimmed) {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: nothing to follow up on",
-                    );
-                    if let Some(t) = lf_trace {
-                        t.end(Some("suppressed"));
-                    }
-                    return;
-                }
-                if trimmed.len() < 30 {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: response too short, skipping",
-                    );
+                if let Some(reason) = reentry_suppression_reason(trimmed) {
+                    observer.log(ObserverCategory::Heartbeat, reason);
                     if let Some(t) = lf_trace {
                         t.end(Some("suppressed"));
                     }
@@ -688,6 +631,85 @@ If there's genuinely nothing worth following up on, respond with exactly: NO_FOL
             }
         }
     });
+}
+
+fn build_reentry_conversation_sections(recent: &[(String, String)]) -> (String, String) {
+    // Summarize older turns, keep last 6 in full.
+    if recent.len() > 8 {
+        let split = recent.len() - 6;
+        let old_lines: Vec<String> = recent[..split]
+            .iter()
+            .map(|(role, content)| format!("[{}] {}", role, truncate(content, 120)))
+            .collect();
+        let recent_lines: Vec<String> = recent[split..]
+            .iter()
+            .map(|(role, content)| format!("{}: {}", role, content))
+            .collect();
+        (
+            format!(
+                "Earlier in the conversation (summarized):\n{}\n\n",
+                old_lines.join("\n")
+            ),
+            recent_lines.join("\n"),
+        )
+    } else {
+        let lines: Vec<String> = recent
+            .iter()
+            .map(|(role, content)| format!("{}: {}", role, content))
+            .collect();
+        (String::new(), lines.join("\n"))
+    }
+}
+
+fn collect_reentry_user_topics(recent: &[(String, String)]) -> String {
+    recent
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn user_id_from_session_key(session_key: &str) -> &str {
+    session_key.splitn(3, ':').nth(1).unwrap_or("unknown")
+}
+
+fn build_reentry_prompt(
+    persona_soul: Option<&str>,
+    summary_section: &str,
+    recent_section: &str,
+    memory_section: &str,
+    profile_section: &str,
+) -> String {
+    let persona = persona_soul
+        .map(|s| format!("{}\n\n", s))
+        .unwrap_or_default();
+    format!(
+        r#"{persona}You had this conversation with the user a while ago:
+
+{summary_section}Recent messages:
+{recent_section}{memory_section}{profile_section}
+
+Time has passed since this conversation ended. Think about whether there's something genuinely valuable you could follow up on:
+- An unfinished thread worth revisiting
+- A solution or idea that came to mind since then
+- A relevant connection to something you know about them
+- A helpful resource or approach they might not have considered
+
+Write a natural, brief follow-up message (1-3 sentences) as if you're casually reaching out. Be specific — reference the actual topic. Don't be generic or vague.
+
+If there's genuinely nothing worth following up on, respond with exactly: NO_FOLLOWUP"#,
+    )
+}
+
+fn reentry_suppression_reason(response: &str) -> Option<&'static str> {
+    if is_refusal(response) {
+        Some("Re-entry: nothing to follow up on")
+    } else if response.len() < 30 {
+        Some("Re-entry: response too short, skipping")
+    } else {
+        None
+    }
 }
 
 /// Check if an LLM response is a refusal / "nothing to say" variant.
@@ -1057,5 +1079,90 @@ fn truncate(s: &str, max: usize) -> &str {
             end -= 1;
         }
         &s[..end]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_reentry_conversation_sections, collect_reentry_user_topics,
+        reentry_suppression_reason,
+    };
+
+    fn turn(role: &str, content: &str) -> (String, String) {
+        (role.to_string(), content.to_string())
+    }
+
+    #[test]
+    fn reentry_sections_keep_short_conversations_unsummarized() {
+        let recent = vec![
+            turn("user", "hi"),
+            turn("assistant", "hello"),
+            turn("user", "can we retry deployment?"),
+            turn("assistant", "yes"),
+        ];
+
+        let (summary, recent_section) = build_reentry_conversation_sections(&recent);
+
+        assert!(summary.is_empty());
+        assert_eq!(
+            recent_section,
+            "user: hi\nassistant: hello\nuser: can we retry deployment?\nassistant: yes"
+        );
+    }
+
+    #[test]
+    fn reentry_sections_summarize_older_turns_for_long_conversations() {
+        let long = "x".repeat(140);
+        let recent = vec![
+            turn("user", &long),
+            turn("assistant", "a1"),
+            turn("user", "u2"),
+            turn("assistant", "a2"),
+            turn("user", "u3"),
+            turn("assistant", "a3"),
+            turn("user", "u4"),
+            turn("assistant", "a4"),
+            turn("user", "u5"),
+        ];
+
+        let (summary, recent_section) = build_reentry_conversation_sections(&recent);
+
+        assert!(summary.starts_with("Earlier in the conversation (summarized):"));
+        assert!(summary.contains(&format!("[user] {}", "x".repeat(120))));
+        assert!(!summary.contains(&long));
+        assert_eq!(
+            recent_section,
+            "assistant: a2\nuser: u3\nassistant: a3\nuser: u4\nassistant: a4\nuser: u5"
+        );
+    }
+
+    #[test]
+    fn reentry_topics_only_include_user_messages() {
+        let recent = vec![
+            turn("assistant", "preface"),
+            turn("user", "rust lifetimes"),
+            turn("assistant", "ack"),
+            turn("user", "tokio tracing setup"),
+        ];
+
+        let topics = collect_reentry_user_topics(&recent);
+        assert_eq!(topics, "rust lifetimes tokio tracing setup");
+    }
+
+    #[test]
+    fn reentry_suppression_reason_matches_quality_gate() {
+        assert_eq!(
+            reentry_suppression_reason("NO_FOLLOWUP"),
+            Some("Re-entry: nothing to follow up on")
+        );
+        assert_eq!(
+            reentry_suppression_reason("too short"),
+            Some("Re-entry: response too short, skipping")
+        );
+        assert_eq!(
+            reentry_suppression_reason("this is a substantial follow up"),
+            None
+        );
     }
 }
