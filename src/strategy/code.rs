@@ -965,20 +965,24 @@ fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
 
 fn parse_cli_failure_policy(output: &str) -> CliFailurePolicy {
     let mut policy = CliFailurePolicy::default();
-    let Some(line) = output.lines().next() else {
+    let Some(marker_idx) = output.find(CLI_CONTRACT_PREFIX) else {
         return policy;
     };
-    if !line.starts_with(CLI_CONTRACT_PREFIX) {
+    let line_start = marker_idx + CLI_CONTRACT_PREFIX.len();
+    let Some(line) = output.get(line_start..) else {
         return policy;
-    }
-    for token in line.split_whitespace().skip(1) {
+    };
+    let line = line.lines().next().unwrap_or_default();
+    for token in line.split_ascii_whitespace() {
         let Some((k, v)) = token.split_once('=') else {
             continue;
         };
         match k {
-            "code" => policy.code = v.to_string(),
-            "retry_same" => policy.retry_same = v.eq_ignore_ascii_case("true"),
-            "fallback" => policy.fallback = v.eq_ignore_ascii_case("true"),
+            "code" if !v.is_empty() => policy.code = v.to_string(),
+            "retry_same" if v.eq_ignore_ascii_case("true") => policy.retry_same = true,
+            "retry_same" if v.eq_ignore_ascii_case("false") => policy.retry_same = false,
+            "fallback" if v.eq_ignore_ascii_case("true") => policy.fallback = true,
+            "fallback" if v.eq_ignore_ascii_case("false") => policy.fallback = false,
             _ => {}
         }
     }
@@ -1254,12 +1258,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_failure_policy_reads_contract_fields() {
+    fn parse_cli_failure_policy_reads_contract_fields_when_marker_is_first() {
         let policy = parse_cli_failure_policy(
             "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true",
         );
         assert_eq!(policy.code, "transient_upstream");
         assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_reads_contract_fields_when_marker_is_mid_output() {
+        let policy = parse_cli_failure_policy(
+            "tool stderr before contract\n[athena_cli_contract] tool=codex code=session_conflict retry_same=false fallback=true\ntrailing detail",
+        );
+        assert_eq!(policy.code, "session_conflict");
+        assert!(!policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_ignores_malformed_tokens() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code retry_same=maybe fallback=unknown code=transient_upstream",
+        );
+        assert_eq!(policy.code, "transient_upstream");
+        assert!(!policy.retry_same);
         assert!(policy.fallback);
     }
 
