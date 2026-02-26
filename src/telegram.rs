@@ -1690,15 +1690,7 @@ mod tests {
 async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
 
-    // C2: Auth check using allow_all
-    if !is_authorized(chat_id.0, &state.config) {
-        bot.send_message(chat_id, "<i>Unauthorized.</i>")
-            .parse_mode(ParseMode::Html)
-            .await?;
-        return Ok(());
-    }
-
-    let Some(text) = extract_message_text(&bot, &msg, chat_id, &state.config).await? else {
+    let Some(text) = preflight_message(&bot, &msg, chat_id, &state).await? else {
         return Ok(());
     };
 
@@ -1729,6 +1721,56 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         "<i>Status: Starting...</i>",
     )
     .await
+}
+
+async fn preflight_message(
+    bot: &Bot,
+    msg: &Message,
+    chat_id: ChatId,
+    state: &TelegramState,
+) -> ResponseResult<Option<String>> {
+    if !ensure_authorized(bot, chat_id, state).await? {
+        return Ok(None);
+    }
+
+    let Some(text) = extract_message_text(bot, msg, chat_id, &state.config).await? else {
+        return Ok(None);
+    };
+
+    if handle_slash_commands(bot, msg, chat_id, &text, state).await? {
+        return Ok(None);
+    }
+
+    if !check_rate_limit(state, bot, chat_id).await? {
+        return Ok(None);
+    }
+
+    Ok(Some(text))
+}
+
+async fn ensure_authorized(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &TelegramState,
+) -> ResponseResult<bool> {
+    // C2: Auth check using allow_all
+    if !is_authorized(chat_id.0, &state.config) {
+        bot.send_message(chat_id, "<i>Unauthorized.</i>")
+            .parse_mode(ParseMode::Html)
+            .await?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+async fn send_working_status(bot: &Bot, chat_id: ChatId) -> ResponseResult<Message> {
+    tracing::debug!("Sending Working... status message");
+    let status_msg = bot
+        .send_message(chat_id, "<i>Working...</i>")
+        .parse_mode(ParseMode::Html)
+        .await?;
+    tracing::debug!(msg_id = %status_msg.id, "Status message sent");
+    Ok(status_msg)
 }
 
 // ── Callback handler ─────────────────────────────────────────────────

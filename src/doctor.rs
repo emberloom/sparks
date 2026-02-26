@@ -938,25 +938,43 @@ fn print_report(
     }
 }
 
-pub async fn run_funnel_health(config: &Config, skip_llm: bool) -> anyhow::Result<CheckStatus> {
+async fn collect_funnel_inputs(
+    config: &Config,
+    skip_llm: bool,
+) -> anyhow::Result<(DoctorSnapshot, LlmHealth)> {
     let snap = collect_snapshot(config)?;
     let llm = evaluate_llm_health(config, skip_llm).await;
+    Ok((snap, llm))
+}
 
-    let reports = vec![
-        build_funnel1(config, &snap, &llm),
-        build_funnel2(config, &snap, &llm),
-        build_funnel3(config, &snap, &llm),
-        build_funnel4(config, &snap, &llm).await,
-    ];
+async fn build_funnel_reports(
+    config: &Config,
+    snap: &DoctorSnapshot,
+    llm: &LlmHealth,
+) -> Vec<FunnelReport> {
+    vec![
+        build_funnel1(config, snap, llm),
+        build_funnel2(config, snap, llm),
+        build_funnel3(config, snap, llm),
+        build_funnel4(config, snap, llm).await,
+    ]
+}
 
+fn render_funnel_report(
+    snap: &DoctorSnapshot,
+    reports: &[FunnelReport],
+    overall: CheckStatus,
+    fail_count: usize,
+    warn_count: usize,
+    fixes: &[String],
+) {
+    print_report(&snap.db_path, reports, overall, fail_count, warn_count, fixes);
+}
+
+pub async fn run_funnel_health(config: &Config, skip_llm: bool) -> anyhow::Result<CheckStatus> {
+    let (snap, llm) = collect_funnel_inputs(config, skip_llm).await?;
+    let reports = build_funnel_reports(config, &snap, &llm).await;
     let (overall, fail_count, warn_count, fixes) = summarize_reports(&reports);
-    print_report(
-        &snap.db_path,
-        &reports,
-        overall,
-        fail_count,
-        warn_count,
-        &fixes,
-    );
+    render_funnel_report(&snap, &reports, overall, fail_count, warn_count, &fixes);
     Ok(overall)
 }

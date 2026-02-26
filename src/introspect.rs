@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use sysinfo::{Pid, System};
 
 use crate::knobs::SharedKnobs;
@@ -152,6 +153,30 @@ fn compute_error_rate_1h() -> f64 {
     }
 }
 
+fn has_recent_health_fix(
+    memory: &MemoryStore,
+    alert_signature: &str,
+    max_age_secs: u64,
+) -> bool {
+    let query = format!("health_fix {}", alert_signature);
+    let Ok(results) = memory.search(&query) else {
+        return false;
+    };
+    let now = Utc::now();
+    results.iter().any(|m| {
+        if m.category != "health_fix" || !m.content.contains(alert_signature) {
+            return false;
+        }
+        let Ok(created) = NaiveDateTime::parse_from_str(&m.created_at, "%Y-%m-%d %H:%M:%S")
+        else {
+            return false;
+        };
+        let created = Utc.from_utc_datetime(&created);
+        let age_secs = now.signed_duration_since(created).num_seconds();
+        age_secs >= 0 && (age_secs as u64) <= max_age_secs
+    })
+}
+
 /// Anomaly thresholds for auto-dispatching health alerts.
 const ANOMALY_TOOL_FAILURE_RATE: f64 = 0.3;
 const ANOMALY_LLM_LATENCY_MS: u64 = 5000;
@@ -160,6 +185,8 @@ const ANOMALY_ERROR_RATE: f64 = 0.2;
 const ANOMALY_MIN_UPTIME_SECS: u64 = 300;
 /// Cooldown between anomaly diagnostic dispatches to avoid queue floods.
 const ANOMALY_DISPATCH_COOLDOWN_SECS: u64 = 900;
+/// Suppress repeat anomaly dispatches after a recent fix.
+const ANOMALY_SUPPRESS_AFTER_FIX_SECS: u64 = 6 * 3600;
 
 /// Spawn the periodic metrics collector task.
 pub fn spawn_metrics_collector(
@@ -278,6 +305,7 @@ pub fn spawn_metrics_collector(
             // Anomaly detection — dispatch health alerts when thresholds are breached
             if uptime > ANOMALY_MIN_UPTIME_SECS {
                 let mut anomalies = Vec::new();
+                let mut anomaly_kinds = Vec::new();
 
                 if tool_failure_rate > ANOMALY_TOOL_FAILURE_RATE {
                     anomalies.push(format!(
@@ -285,12 +313,14 @@ pub fn spawn_metrics_collector(
                         tool_failure_rate * 100.0,
                         ANOMALY_TOOL_FAILURE_RATE * 100.0
                     ));
+                    anomaly_kinds.push("tool_failure_rate");
                 }
                 if llm_latency > ANOMALY_LLM_LATENCY_MS {
                     anomalies.push(format!(
                         "LLM latency {}ms exceeds threshold {}ms",
                         llm_latency, ANOMALY_LLM_LATENCY_MS
                     ));
+                    anomaly_kinds.push("llm_latency");
                 }
                 if error_rate_1h > ANOMALY_ERROR_RATE {
                     anomalies.push(format!(
@@ -298,10 +328,17 @@ pub fn spawn_metrics_collector(
                         error_rate_1h * 100.0,
                         ANOMALY_ERROR_RATE * 100.0
                     ));
+                    anomaly_kinds.push("error_rate");
                 }
 
                 if !anomalies.is_empty() {
+                    let alert_signature = format!("alert_kinds={}", anomaly_kinds.join(","));
                     let alert_msg = anomalies.join("; ");
+                    let alert_memory = format!(
+                        "{} | {} | {}",
+                        alert_signature, alert_msg, metrics_summary
+                    );
+                    let _ = memory.store("health_alert", &alert_memory, None);
                     let now_epoch = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -309,6 +346,11 @@ pub fn spawn_metrics_collector(
                     let last_dispatch = LAST_ANOMALY_DISPATCH_EPOCH.load(Ordering::Relaxed);
                     let cooldown_remaining = ANOMALY_DISPATCH_COOLDOWN_SECS
                         .saturating_sub(now_epoch.saturating_sub(last_dispatch));
+                    let suppressed_by_fix = has_recent_health_fix(
+                        &memory,
+                        &alert_signature,
+                        ANOMALY_SUPPRESS_AFTER_FIX_SECS,
+                    );
 
                     // Langfuse anomaly span
                     let anomaly_span = lf_trace
@@ -326,7 +368,15 @@ pub fn spawn_metrics_collector(
                         format!("ANOMALY DETECTED: {}", alert_msg),
                     );
 
-                    if last_dispatch > 0 && cooldown_remaining > 0 {
+                    if suppressed_by_fix {
+                        observer.log(
+                            ObserverCategory::SelfMetrics,
+                            "Anomaly diagnostic suppressed by recent health_fix memory".to_string(),
+                        );
+                        if let Some(s) = dispatch_span {
+                            s.end(Some("suppressed by recent fix"));
+                        }
+                    } else if last_dispatch > 0 && cooldown_remaining > 0 {
                         observer.log(
                             ObserverCategory::SelfMetrics,
                             format!(
@@ -346,7 +396,10 @@ pub fn spawn_metrics_collector(
                              Suggest a fix or mitigation.",
                                 alert_msg
                             ),
-                            context: format!("Current metrics: {}", metrics_summary),
+                            context: format!(
+                                "Current metrics: {}\nhealth_alert_signature={}",
+                                metrics_summary, alert_signature
+                            ),
                             ghost: Some("scout".to_string()),
                             target: crate::pulse::PulseTarget::Broadcast,
                             lane: "self_improvement".to_string(),

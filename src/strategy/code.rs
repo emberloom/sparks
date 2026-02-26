@@ -56,6 +56,7 @@ const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
 const MAX_EXPLORE_STEPS: usize = 5;
 const MAX_VERIFY_STEPS: usize = 5;
+const MAX_SELF_HEAL_ATTEMPTS: usize = 2;
 const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,76 +189,133 @@ impl LoopStrategy for CodeStrategy {
             s.end(Some(&lf_truncate(&summary, 500)));
         }
 
-        // Phase 3b: SELF-HEAL — if test failures detected, attempt one corrective cycle
+        // Phase 3b: SELF-HEAL — if test failures detected, attempt corrective cycles
         if contract.test_generation {
-            if let Some(fix_contract) = crate::self_heal::attempt_test_fix(&summary, &contract.goal)
+            if let Some(fix_summary) = self
+                .run_self_heal(
+                    contract,
+                    tools,
+                    docker,
+                    llm,
+                    executor,
+                    confirmer,
+                    status_tx,
+                    trace,
+                    use_native,
+                    &summary,
+                )
+                .await?
             {
-                tracing::warn!("CodeStrategy: test failures detected, attempting self-heal");
-                send_status(status_tx, "Test failures detected — attempting fix...").await;
-                let heal_span =
-                    trace.map(|t| t.span("phase:self_heal", Some(&lf_truncate(&summary, 300))));
-
-                // Re-run EXECUTE with the corrective contract
-                let fix_exploration = ExplorationResult {
-                    plan: fix_contract.goal.clone(),
-                    context: fix_contract.context.clone(),
-                    files: String::new(),
-                };
-
-                match self
-                    .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
-                    .instrument(tracing::info_span!("self_heal_execute"))
-                    .await
-                {
-                    Ok(fix_result) => {
-                        // Re-verify after fix
-                        send_status(status_tx, "Re-verifying after fix...").await;
-                        let fix_summary = if use_native {
-                            self.verify_native(
-                                contract,
-                                tools,
-                                docker,
-                                llm,
-                                &fix_result,
-                                executor,
-                                confirmer,
-                                status_tx,
-                                trace,
-                            )
-                            .instrument(tracing::info_span!("self_heal_verify"))
-                            .await?
-                        } else {
-                            self.verify_text_fallback(
-                                contract,
-                                tools,
-                                docker,
-                                llm,
-                                &fix_result,
-                                executor,
-                                confirmer,
-                                status_tx,
-                                trace,
-                            )
-                            .instrument(tracing::info_span!("self_heal_verify"))
-                            .await?
-                        };
-                        tracing::info!("CodeStrategy: self-heal cycle complete");
-                        if let Some(s) = heal_span {
-                            s.end(Some("fixed"));
-                        }
-                        return Ok(fix_summary);
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
-                        if let Some(s) = heal_span {
-                            s.end(Some(&format!("failed: {}", e)));
-                        }
-                    }
-                }
+                return Ok(fix_summary);
             }
         }
 
         Ok(summary)
+    }
+
+}
+
+impl CodeStrategy {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_self_heal(
+        &self,
+        contract: &TaskContract,
+        tools: &ToolRegistry,
+        docker: &DockerSession,
+        llm: &dyn LlmProvider,
+        executor: &Executor,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        use_native: bool,
+        initial_summary: &str,
+    ) -> Result<Option<String>> {
+        let mut summary = initial_summary.to_string();
+        for attempt in 0..MAX_SELF_HEAL_ATTEMPTS {
+            let Some(fix_contract) =
+                crate::self_heal::attempt_test_fix(&summary, &contract.goal)
+            else {
+                // No test failures detected. If a previous attempt already
+                // applied a fix, return the current (now-passing) summary so
+                // the caller uses the post-fix result instead of the original.
+                if attempt > 0 {
+                    return Ok(Some(summary));
+                }
+                return Ok(None);
+            };
+
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = MAX_SELF_HEAL_ATTEMPTS,
+                "CodeStrategy: test failures detected, attempting self-heal"
+            );
+            send_status(status_tx, "Test failures detected — attempting fix...").await;
+            let heal_span =
+                trace.map(|t| t.span("phase:self_heal", Some(&lf_truncate(&summary, 300))));
+
+            let fix_exploration = ExplorationResult {
+                plan: fix_contract.goal.clone(),
+                context: fix_contract.context.clone(),
+                files: String::new(),
+            };
+
+            let fix_result = match self
+                .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
+                .instrument(tracing::info_span!("self_heal_execute"))
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
+                    if let Some(s) = heal_span {
+                        s.end(Some(&format!("failed: {}", e)));
+                    }
+                    return Ok(None);
+                }
+            };
+
+            send_status(status_tx, "Re-verifying after fix...").await;
+            summary = if use_native {
+                self.verify_native(
+                    contract,
+                    tools,
+                    docker,
+                    llm,
+                    &fix_result,
+                    executor,
+                    confirmer,
+                    status_tx,
+                    trace,
+                )
+                .instrument(tracing::info_span!("self_heal_verify"))
+                .await?
+            } else {
+                self.verify_text_fallback(
+                    contract,
+                    tools,
+                    docker,
+                    llm,
+                    &fix_result,
+                    executor,
+                    confirmer,
+                    status_tx,
+                    trace,
+                )
+                .instrument(tracing::info_span!("self_heal_verify"))
+                .await?
+            };
+            tracing::info!("CodeStrategy: self-heal cycle complete");
+            if let Some(s) = heal_span {
+                s.end(Some("fixed"));
+            }
+
+            if attempt + 1 >= MAX_SELF_HEAL_ATTEMPTS {
+                tracing::warn!("CodeStrategy: self-heal attempts exhausted");
+                return Ok(Some(summary));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -965,24 +1023,50 @@ fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
 
 fn parse_cli_failure_policy(output: &str) -> CliFailurePolicy {
     let mut policy = CliFailurePolicy::default();
-    let Some(line) = output.lines().next() else {
+    let Some(line) = output
+        .lines()
+        .find(|line| line.contains(CLI_CONTRACT_PREFIX))
+    else {
         return policy;
     };
-    if !line.starts_with(CLI_CONTRACT_PREFIX) {
+    let Some(start) = line.find(CLI_CONTRACT_PREFIX) else {
         return policy;
-    }
-    for token in line.split_whitespace().skip(1) {
+    };
+    let contract = &line[start..];
+    for token in contract.split_whitespace().skip(1) {
         let Some((k, v)) = token.split_once('=') else {
             continue;
         };
         match k {
-            "code" => policy.code = v.to_string(),
-            "retry_same" => policy.retry_same = v.eq_ignore_ascii_case("true"),
-            "fallback" => policy.fallback = v.eq_ignore_ascii_case("true"),
+            "code" => {
+                if !v.is_empty() {
+                    policy.code = v.to_string();
+                }
+            }
+            "retry_same" => {
+                if let Some(parsed) = parse_cli_contract_bool(v) {
+                    policy.retry_same = parsed;
+                }
+            }
+            "fallback" => {
+                if let Some(parsed) = parse_cli_contract_bool(v) {
+                    policy.fallback = parsed;
+                }
+            }
             _ => {}
         }
     }
     policy
+}
+
+fn parse_cli_contract_bool(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Build tool schemas filtered to only the tools allowed in a given phase.
@@ -1254,12 +1338,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_failure_policy_reads_contract_fields() {
+    fn parse_cli_failure_policy_reads_contract_fields_marker_first_line() {
         let policy = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true",
+            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true\nstderr noise",
         );
         assert_eq!(policy.code, "transient_upstream");
         assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_reads_contract_fields_marker_middle_line() {
+        let policy = parse_cli_failure_policy(
+            "warning: something\nstderr: [athena_cli_contract] tool=codex code=rate_limit retry_same=false fallback=false\nmore noise",
+        );
+        assert_eq!(policy.code, "rate_limit");
+        assert!(!policy.retry_same);
+        assert!(!policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_ignores_malformed_tokens() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=invalid_request retry_same=maybe fallback=TRUEE",
+        );
+        assert_eq!(policy.code, "invalid_request");
+        assert!(!policy.retry_same);
         assert!(policy.fallback);
     }
 

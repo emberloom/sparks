@@ -10,7 +10,7 @@ use crate::docker::DockerSession;
 use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
-use crate::llm::{self, ChatMessage, ChatResponse, LlmProvider, StreamEvent};
+use crate::llm::{ChatMessage, ChatResponse, LlmProvider, StreamEvent};
 use crate::tools::ToolRegistry;
 
 /// Channel for sending core events (status, stream chunks) to the frontend.
@@ -159,16 +159,9 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
             }
         } else {
             // Pure text response — check if it needs strategy fallback
-            if let Some(json) = llm::extract_json(&text_accum) {
-                if json
-                    .get("needs_strategy")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    let reason = json
-                        .get("reason")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
+            if let Some((needs_strategy, reason)) = parse_precheck_signal(&text_accum) {
+                if needs_strategy {
+                    let reason = reason.unwrap_or_else(|| "unknown".to_string());
                     tracing::info!(reason, "precheck: task needs strategy");
                     return Ok(None);
                 }
@@ -204,6 +197,20 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
     Ok(None)
 }
 
+fn parse_precheck_signal(text: &str) -> Option<(bool, Option<String>)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let needs_strategy = json.get("needs_strategy")?.as_bool()?;
+    let reason = json
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some((needs_strategy, reason))
+}
+
 /// Consume a streaming response for the precheck phase.
 async fn consume_precheck_stream(
     rx: &mut tokio::sync::mpsc::Receiver<StreamEvent>,
@@ -236,4 +243,32 @@ async fn consume_precheck_stream(
     }
 
     (text, tool_calls, usage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_precheck_signal;
+
+    #[test]
+    fn parse_precheck_signal_rejects_prose_without_json() {
+        let parsed = parse_precheck_signal("We should use strategy for this task.");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_precheck_signal_rejects_malformed_json() {
+        let parsed = parse_precheck_signal("{\"needs_strategy\": true,");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_precheck_signal_accepts_valid_json() {
+        let parsed = parse_precheck_signal(
+            r#"{"needs_strategy": true, "reason": "multi-file change"}"#,
+        );
+        assert!(parsed.is_some());
+        let (needs_strategy, reason) = parsed.unwrap();
+        assert!(needs_strategy);
+        assert_eq!(reason.unwrap(), "multi-file change");
+    }
 }

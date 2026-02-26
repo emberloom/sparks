@@ -4,6 +4,15 @@ Date: 2026-02-17
 Owner: Athena core
 Scope: Replace heuristic LLM/CLI parsing paths with structured contracts and deterministic fallbacks.
 
+## Status (2026-02-26)
+
+- [ ] Phase 0 — baseline telemetry counters + snapshot artifact
+- [~] Phase 1 — CLI contract parsing hardening (marker-anywhere + tests done; shared parser + param-validation markers pending)
+- [ ] Phase 2 — classifier contract schema + structured error codes
+- [~] Phase 3 — strategy text fallback normalization (strict JSON envelope done; repair turn + reason taxonomy pending)
+- [~] Phase 4 — eval harness structured plan scoring (JSON scoring + legacy fallback done; artifact-based scoring pending)
+- [ ] Phase 5 — strict parsing rollout + gates
+
 ## Why this is needed
 
 Current parsing still relies on brittle heuristics in high-leverage orchestration paths:
@@ -185,4 +194,3 @@ Mitigation:
 - ship phased with feature flags
 - keep one bounded repair retry
 - keep explicit telemetry on fallback usage and fail closed only after stability window
-

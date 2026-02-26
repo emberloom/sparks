@@ -38,6 +38,36 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn build_recent_memory_lines(memories: &[crate::memory::Memory], limit: usize) -> Vec<String> {
+    memories
+        .iter()
+        .take(limit)
+        .map(|m| format!("- [{}] {}", m.category, m.content))
+        .collect()
+}
+
+fn build_memory_scan_prompt(recent: &[String]) -> String {
+    format!(
+        r#"Review these recent memories and identify any interesting patterns, connections, or insights:
+
+{}
+
+If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. If nothing stands out, respond with exactly: NO_PATTERN"#,
+        recent.join("\n")
+    )
+}
+
+fn has_similar_failure(idea: &str, past_failures: &[crate::memory::Memory]) -> bool {
+    let lower_idea = idea.to_lowercase();
+    past_failures.iter().any(|m| {
+        let failure_lower = m.content.to_lowercase();
+        lower_idea
+            .split_whitespace()
+            .filter(|w| w.len() > 5)
+            .any(|word| failure_lower.contains(word))
+    })
+}
+
 /// Spawn the memory pattern scanner loop.
 pub fn spawn_memory_scanner(
     knobs: SharedKnobs,
@@ -108,21 +138,8 @@ pub fn spawn_memory_scanner(
                 continue;
             }
 
-            // Take last 50
-            let recent: Vec<String> = memories
-                .iter()
-                .take(50)
-                .map(|m| format!("- [{}] {}", m.category, m.content))
-                .collect();
-
-            let prompt = format!(
-                r#"Review these recent memories and identify any interesting patterns, connections, or insights:
-
-{}
-
-If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. If nothing stands out, respond with exactly: NO_PATTERN"#,
-                recent.join("\n")
-            );
+            let recent = build_recent_memory_lines(&memories, 50);
+            let prompt = build_memory_scan_prompt(&recent);
 
             let model_name = llm.provider_name().to_string();
             let gen = lf_trace
@@ -173,14 +190,7 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
                                 let past_failures = memory
                                     .search_hybrid("improvement_idea failed", None, 5)
                                     .unwrap_or_default();
-                                let lower_idea = cr.to_lowercase();
-                                let similar_failure = past_failures.iter().any(|m| {
-                                    let failure_lower = m.content.to_lowercase();
-                                    lower_idea
-                                        .split_whitespace()
-                                        .filter(|w| w.len() > 5)
-                                        .any(|word| failure_lower.contains(word))
-                                });
+                                let similar_failure = has_similar_failure(cr, &past_failures);
 
                                 if similar_failure {
                                     observer.log(
@@ -1046,6 +1056,47 @@ If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_recent_memory_lines, has_similar_failure};
+    use crate::memory::Memory;
+
+    fn memory(category: &str, content: &str) -> Memory {
+        Memory {
+            id: "m1".to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+            active: true,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_recent_memory_lines_limits_and_formats() {
+        let memories = vec![memory("one", "alpha"), memory("two", "beta")];
+        let lines = build_recent_memory_lines(&memories, 1);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "- [one] alpha");
+    }
+
+    #[test]
+    fn has_similar_failure_matches_shared_terms() {
+        let idea = "Improve caching of memory scanner";
+        let failures = vec![memory(
+            "improvement_idea",
+            "previous improvement: caching memory scanner was rejected",
+        )];
+        assert!(has_similar_failure(idea, &failures));
+    }
+
+    #[test]
+    fn has_similar_failure_ignores_unrelated_failures() {
+        let idea = "Improve caching of memory scanner";
+        let failures = vec![memory("improvement_idea", "tweak prompt wording")];
+        assert!(!has_similar_failure(idea, &failures));
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

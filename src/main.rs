@@ -1276,9 +1276,15 @@ async fn resolve_repo_root() -> anyhow::Result<PathBuf> {
 }
 
 fn parse_dispatch_task_id(text: &str) -> Option<String> {
-    let re = regex::Regex::new(r"task_id=([0-9a-fA-F-]{36})").ok()?;
-    re.captures(text)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+    let re = regex::Regex::new(
+        r"task_id=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    )
+    .ok()?;
+    let match_id = re
+        .captures_iter(text)
+        .next()
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
+    match_id
 }
 
 fn parse_git_status_paths(status_out: &str) -> Vec<String> {
@@ -5275,6 +5281,27 @@ mod tests {
             parse_dispatch_task_id(s).as_deref(),
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
+    }
+
+    #[test]
+    fn parse_dispatch_task_id_picks_first_match() {
+        let s = "task_id=11111111-1111-1111-1111-111111111111 ... task_id=22222222-2222-2222-2222-222222222222";
+        assert_eq!(
+            parse_dispatch_task_id(s).as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_task_id_rejects_malformed_uuid() {
+        let s = "Dispatched task_id=not-a-uuid value.";
+        assert!(parse_dispatch_task_id(s).is_none());
+    }
+
+    #[test]
+    fn parse_dispatch_task_id_returns_none_when_missing() {
+        let s = "Dispatched autonomous task without id.";
+        assert!(parse_dispatch_task_id(s).is_none());
     }
 
     #[test]

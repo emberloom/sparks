@@ -1237,6 +1237,18 @@ fn format_cli_contract_error(
     )
 }
 
+fn claude_code_session_conflict_output() -> String {
+    format_cli_contract_error(
+        "claude_code",
+        "session_conflict",
+        false,
+        true,
+        None,
+        cli_timeout_secs(),
+        "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.",
+    )
+}
+
 /// Shared implementation for all coding CLI tools.
 /// Runs on the HOST (not in Docker) via tokio::process::Command.
 async fn run_cli_tool(
@@ -1397,7 +1409,7 @@ impl Tool for ClaudeCodeTool {
         if std::env::var_os("CLAUDECODE").is_some() {
             return Ok(ToolResult {
                 success: false,
-                output: "claude_code is unavailable inside an existing Claude Code session. Switch CLI tool to codex/opencode.".into(),
+                output: claude_code_session_conflict_output(),
             });
         }
         let prompt = build_cli_prompt(params)?;
@@ -2595,6 +2607,15 @@ mod tests {
         assert!(out.contains("[athena_cli_contract]"));
         assert!(out.contains("tool=codex"));
         assert!(out.contains("code=cli_timeout"));
+        assert!(out.contains("fallback=true"));
+    }
+
+    #[test]
+    fn test_claude_code_session_conflict_contract_marker() {
+        let out = claude_code_session_conflict_output();
+        assert!(out.contains("[athena_cli_contract]"));
+        assert!(out.contains("tool=claude_code"));
+        assert!(out.contains("code=session_conflict"));
         assert!(out.contains("fallback=true"));
     }
 

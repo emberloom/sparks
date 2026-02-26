@@ -1,12 +1,12 @@
 {
   "summary": {
-    "files": 34,
-    "total_loc": 27013,
-    "functions": 874,
-    "fn_over_80": 51,
-    "fn_over_120": 30,
+    "files": 35,
+    "total_loc": 29563,
+    "functions": 987,
+    "fn_over_80": 56,
+    "fn_over_120": 34,
     "files_over_1000_loc": 11,
-    "max_file_loc": 5385,
+    "max_file_loc": 5481,
     "max_file_path": "src/main.rs",
     "max_fn_len": 835,
     "max_fn_name": "bench_memory_retrieval",
@@ -14,9 +14,9 @@
   },
   "by_file": {
     "src/config.rs": {
-      "loc": 1073,
-      "fn_count": 69,
-      "max_fn_len": 81,
+      "loc": 1173,
+      "fn_count": 74,
+      "max_fn_len": 92,
       "fn_over_80": 1,
       "fn_over_120": 0
     },
@@ -28,9 +28,9 @@
       "fn_over_120": 0
     },
     "src/core.rs": {
-      "loc": 1215,
-      "fn_count": 41,
-      "max_fn_len": 80,
+      "loc": 1274,
+      "fn_count": 45,
+      "max_fn_len": 72,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
@@ -49,8 +49,8 @@
       "fn_over_120": 0
     },
     "src/doctor.rs": {
-      "loc": 962,
-      "fn_count": 38,
+      "loc": 980,
+      "fn_count": 41,
       "max_fn_len": 75,
       "fn_over_80": 0,
       "fn_over_120": 0
@@ -98,9 +98,9 @@
       "fn_over_120": 1
     },
     "src/introspect.rs": {
-      "loc": 401,
-      "fn_count": 10,
-      "max_fn_len": 215,
+      "loc": 454,
+      "fn_count": 11,
+      "max_fn_len": 241,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
@@ -126,22 +126,22 @@
       "fn_over_120": 0
     },
     "src/llm.rs": {
-      "loc": 1627,
-      "fn_count": 40,
-      "max_fn_len": 398,
-      "fn_over_80": 3,
-      "fn_over_120": 3
+      "loc": 2876,
+      "fn_count": 75,
+      "max_fn_len": 395,
+      "fn_over_80": 7,
+      "fn_over_120": 7
     },
     "src/main.rs": {
-      "loc": 5385,
-      "fn_count": 127,
+      "loc": 5481,
+      "fn_count": 131,
       "max_fn_len": 350,
       "fn_over_80": 11,
       "fn_over_120": 7
     },
     "src/manager.rs": {
-      "loc": 1081,
-      "fn_count": 14,
+      "loc": 1268,
+      "fn_count": 27,
       "max_fn_len": 310,
       "fn_over_80": 5,
       "fn_over_120": 3
@@ -167,9 +167,16 @@
       "fn_over_80": 0,
       "fn_over_120": 0
     },
+    "src/ouath.rs": {
+      "loc": 503,
+      "fn_count": 25,
+      "max_fn_len": 76,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
     "src/proactive.rs": {
-      "loc": 1061,
-      "fn_count": 12,
+      "loc": 1112,
+      "fn_count": 19,
       "max_fn_len": 218,
       "fn_over_80": 5,
       "fn_over_120": 4
@@ -210,29 +217,29 @@
       "fn_over_120": 0
     },
     "src/strategy/code.rs": {
-      "loc": 1279,
-      "fn_count": 21,
+      "loc": 1383,
+      "fn_count": 25,
       "max_fn_len": 233,
-      "fn_over_80": 5,
+      "fn_over_80": 6,
       "fn_over_120": 4
     },
     "src/strategy/mod.rs": {
-      "loc": 239,
-      "fn_count": 3,
-      "max_fn_len": 141,
+      "loc": 274,
+      "fn_count": 6,
+      "max_fn_len": 134,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
     "src/strategy/react.rs": {
-      "loc": 470,
-      "fn_count": 7,
+      "loc": 515,
+      "fn_count": 11,
       "max_fn_len": 214,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
     "src/telegram.rs": {
-      "loc": 1356,
-      "fn_count": 42,
+      "loc": 1385,
+      "fn_count": 45,
       "max_fn_len": 147,
       "fn_over_80": 2,
       "fn_over_120": 1
@@ -245,8 +252,8 @@
       "fn_over_120": 0
     },
     "src/tools.rs": {
-      "loc": 2723,
-      "fn_count": 177,
+      "loc": 2744,
+      "fn_count": 179,
       "max_fn_len": 103,
       "fn_over_80": 3,
       "fn_over_120": 0

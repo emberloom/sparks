@@ -2470,43 +2470,43 @@ fn try_parse_json(text: &str) -> Option<Value> {
 /// Handles: raw JSON, ```json blocks, JSON embedded in prose,
 /// and common LLM JSON errors (invalid escapes, trailing commas).
 pub fn extract_json(text: &str) -> Option<Value> {
-    // Try parsing the whole thing first
-    if let Some(v) = try_parse_json(text.trim()) {
-        return Some(v);
-    }
+    extract_json_raw(text)
+        .or_else(|| extract_json_fenced(text))
+        .or_else(|| extract_json_embedded(text))
+}
 
-    // Try extracting from ```json ... ``` blocks
-    if let Some(start) = text.find("```json") {
-        let after = &text[start + 7..];
-        if let Some(end) = after.find("```") {
-            if let Some(v) = try_parse_json(after[..end].trim()) {
-                return Some(v);
-            }
-        }
-    }
+fn extract_json_raw(text: &str) -> Option<Value> {
+    try_parse_json(text.trim())
+}
 
-    // Try extracting from ``` ... ``` blocks (no json tag)
-    if let Some(start) = text.find("```") {
-        let after = &text[start + 3..];
-        if let Some(end) = after.find("```") {
-            let block = after[..end].trim();
-            // Skip language tag if present (e.g., ```python)
-            let block = if let Some(nl) = block.find('\n') {
-                let first_line = &block[..nl];
-                if !first_line.contains('{') {
-                    &block[nl + 1..]
-                } else {
-                    block
-                }
+fn extract_json_fenced(text: &str) -> Option<Value> {
+    let mut idx = 0usize;
+    while let Some(start) = text[idx..].find("```") {
+        let fence_start = idx + start;
+        let after = &text[fence_start + 3..];
+        let Some(end) = after.find("```") else {
+            break;
+        };
+        let block = after[..end].trim();
+        let block = if let Some(nl) = block.find('\n') {
+            let first_line = &block[..nl];
+            if !first_line.contains('{') && !first_line.contains('[') {
+                &block[nl + 1..]
             } else {
                 block
-            };
-            if let Some(v) = try_parse_json(block.trim()) {
-                return Some(v);
             }
+        } else {
+            block
+        };
+        if let Some(v) = try_parse_json(block.trim()) {
+            return Some(v);
         }
+        idx = fence_start + 3 + end + 3;
     }
+    None
+}
 
+fn extract_json_embedded(text: &str) -> Option<Value> {
     // Try finding first { ... } in the text
     let mut depth = 0i32;
     let mut start = None;
@@ -2553,6 +2553,13 @@ mod tests {
         let text = "Here's the command:\n```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}}\n```";
         let v = extract_json(text).unwrap();
         assert_eq!(v["tool"], "shell");
+    }
+
+    #[test]
+    fn test_extract_json_multiple_fenced_blocks_prefers_first_valid() {
+        let text = "```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"ls\"}}\n```\n```json\n{\"tool\": \"shell\", \"params\": {\"command\": \"pwd\"}}\n```";
+        let v = extract_json(text).unwrap();
+        assert_eq!(v["params"]["command"], "ls");
     }
 
     #[test]
