@@ -522,13 +522,23 @@ impl MemoryStore {
         schedule_data: &str,
         ghost: Option<&str>,
         prompt: &str,
+        target: &str,
         next_run: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO scheduled_jobs (id, name, schedule_type, schedule_data, ghost, prompt, next_run)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![id, name, schedule_type, schedule_data, ghost, prompt, next_run],
+            "INSERT INTO scheduled_jobs (id, name, schedule_type, schedule_data, ghost, prompt, target, next_run)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                id,
+                name,
+                schedule_type,
+                schedule_data,
+                ghost,
+                prompt,
+                target,
+                next_run
+            ],
         )?;
         Ok(())
     }
@@ -673,6 +683,13 @@ impl MemoryStore {
         Ok(deleted > 0)
     }
 
+    pub fn delete_scheduled_jobs_by_name(&self, name: &str) -> Result<usize> {
+        let conn = self.conn()?;
+        let deleted =
+            conn.execute("DELETE FROM scheduled_jobs WHERE name = ?1", rusqlite::params![name])?;
+        Ok(deleted as usize)
+    }
+
     pub fn toggle_scheduled_job(&self, id: &str, enabled: bool) -> Result<bool> {
         let conn = self.conn()?;
         let updated = conn.execute(
@@ -680,6 +697,26 @@ impl MemoryStore {
             rusqlite::params![enabled as i32, id],
         )?;
         Ok(updated > 0)
+    }
+
+    pub fn enable_scheduled_job(&self, id: &str) -> Result<bool> {
+        self.toggle_scheduled_job(id, true)
+    }
+
+    pub fn disable_scheduled_job(&self, id: &str) -> Result<bool> {
+        self.toggle_scheduled_job(id, false)
+    }
+
+    pub fn cleanup_stale_disabled_oneshots(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM scheduled_jobs
+             WHERE schedule_type = 'oneshot'
+               AND enabled = 0
+               AND datetime(COALESCE(last_run, created_at)) <= datetime('now', '-24 hours')",
+            [],
+        )?;
+        Ok(deleted as usize)
     }
 
     // --- Relationship tracking ---

@@ -23,5 +23,4 @@ Include:
 ## Secret Handling
 
 - keep credentials out of `config.toml`
-- prefer environment variables or local secret managers
-- see `docs/secrets-vaultwarden.md`
+- prefer environment variables or a gitignored `.env` file

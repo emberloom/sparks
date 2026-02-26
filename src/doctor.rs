@@ -178,35 +178,7 @@ fn collect_installed_cli_tools() -> Vec<String> {
 }
 
 fn collect_inline_secret_labels(config: &Config) -> Vec<String> {
-    [
-        ("github.token", config.github.token.is_some()),
-        ("telegram.token", config.telegram.token.is_some()),
-        (
-            "telegram.stt_api_key",
-            config.telegram.stt_api_key.is_some(),
-        ),
-        (
-            "openrouter.api_key",
-            config
-                .openrouter
-                .as_ref()
-                .and_then(|c| c.api_key.as_ref())
-                .is_some(),
-        ),
-        (
-            "zen.api_key",
-            config
-                .zen
-                .as_ref()
-                .and_then(|c| c.api_key.as_ref())
-                .is_some(),
-        ),
-        ("langfuse.public_key", config.langfuse.public_key.is_some()),
-        ("langfuse.secret_key", config.langfuse.secret_key.is_some()),
-    ]
-    .into_iter()
-    .filter_map(|(label, present)| present.then_some(label.to_string()))
-    .collect::<Vec<_>>()
+    config.inline_secret_labels().to_vec()
 }
 
 fn llm_check(status: &LlmHealth) -> CheckItem {
@@ -272,7 +244,8 @@ fn credentials_hygiene_check(snap: &DoctorSnapshot) -> CheckItem {
             )
         },
         fix: (!snap.inline_secret_labels.is_empty()).then(|| {
-            "Move secrets out of config.toml into env vars or a local secret manager (Vaultwarden/Bitwarden CLI).".to_string()
+            "Move secrets out of config.toml into env vars or a .env file (gitignored)."
+                .to_string()
         }),
     }
 }

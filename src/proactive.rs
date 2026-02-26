@@ -1,14 +1,17 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::core::SessionContext;
+use chrono::Utc;
+use uuid::Uuid;
+
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
-use crate::pulse::{Pulse, PulseBus, PulseSource, PulseTarget, Urgency};
+use crate::pulse::{Pulse, PulseBus, PulseSource, Urgency};
 use crate::randomness;
+use crate::scheduler::Schedule;
 
 /// Tracks the timestamp of the last user interaction (epoch seconds).
 pub struct ActivityTracker {
@@ -474,12 +477,9 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
 pub fn maybe_schedule_reentry(
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
-    llm: Arc<dyn LlmProvider>,
     memory: Arc<MemoryStore>,
     session_key: String,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     // Read knobs for probability gate
     let (spontaneity, enabled, all, delay_secs, jitter) = {
@@ -505,6 +505,9 @@ pub fn maybe_schedule_reentry(
     tokio::spawn(async move {
         let delay = randomness::jitter_interval(delay_secs, jitter);
         let delay_min = delay.as_secs() / 60;
+        let fire_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .unwrap_or_else(|_| chrono::Duration::seconds(delay_secs as i64));
         observer.log(
             ObserverCategory::Heartbeat,
             format!(
@@ -512,16 +515,6 @@ pub fn maybe_schedule_reentry(
                 delay_min, session_key
             ),
         );
-
-        tokio::time::sleep(delay).await;
-
-        // Re-check knobs after delay
-        {
-            let k = knobs.read().unwrap();
-            if !k.all_proactive || !k.conversation_reentry_enabled {
-                return;
-            }
-        }
 
         // Load conversation context (15 turns)
         let recent = memory.recent_turns(&session_key, 15).unwrap_or_default();
@@ -613,79 +606,28 @@ Write a natural, brief follow-up message (1-3 sentences) as if you're casually r
 If there's genuinely nothing worth following up on, respond with exactly: NO_FOLLOWUP"#,
         );
 
-        let lf_trace = langfuse.as_ref().map(|lf| {
-            ActiveTrace::start(
-                lf.clone(),
-                "funnel3:reentry",
-                None,
-                None,
-                None,
-                vec!["funnel3", "reentry"],
-            )
-        });
-        let model_name = llm.provider_name().to_string();
-        let gen = lf_trace
-            .as_ref()
-            .map(|t| t.generation("compose_reentry", &model_name, None));
+        let schedule = Schedule::OneShot { at: fire_at };
+        let (stype, sdata) = schedule.to_db();
+        let next_run = schedule.next_run().map(|t| t.to_rfc3339());
+        let job_name = format!("reentry:{}", session_key);
+        let target = format!("session:{}", session_key);
 
-        let messages = vec![Message::user(&prompt)];
-        match llm.chat(&messages).await {
-            Ok(response) => {
-                let trimmed = response.trim();
-                if let Some(g) = gen {
-                    g.end(Some(&truncate(trimmed, 500)), 0, 0);
-                }
+        if let Err(e) = memory.delete_scheduled_jobs_by_name(&job_name) {
+            tracing::warn!("Failed to dedup re-entry job {}: {}", job_name, e);
+        }
 
-                // Quality gate: reject refusals, too-short, or generic responses
-                if is_refusal(trimmed) {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: nothing to follow up on",
-                    );
-                    if let Some(t) = lf_trace {
-                        t.end(Some("suppressed"));
-                    }
-                    return;
-                }
-                if trimmed.len() < 30 {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: response too short, skipping",
-                    );
-                    if let Some(t) = lf_trace {
-                        t.end(Some("suppressed"));
-                    }
-                    return;
-                }
-
-                observer.log(
-                    ObserverCategory::Heartbeat,
-                    format!("Re-entry generated: \"{}\"", truncate(trimmed, 80)),
-                );
-
-                let _ = memory.store("reentry", trimmed, None);
-
-                let target = parse_session_target(&session_key);
-                let pulse = Pulse::new(
-                    PulseSource::ConversationReentry,
-                    Urgency::Medium, // Medium = always delivers unless quiet hours
-                    trimmed.to_string(),
-                )
-                .with_target(target);
-                pulse_bus.send(pulse);
-                if let Some(t) = lf_trace {
-                    t.end(Some("pulse_sent"));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Conversation re-entry LLM call failed: {}", e);
-                if let Some(g) = gen {
-                    g.end(Some(&format!("error: {}", e)), 0, 0);
-                }
-                if let Some(t) = lf_trace {
-                    t.end(Some(&format!("error: {}", e)));
-                }
-            }
+        let job_id = Uuid::new_v4().to_string();
+        if let Err(e) = memory.create_scheduled_job(
+            &job_id,
+            &job_name,
+            &stype,
+            &sdata,
+            None,
+            &prompt,
+            &target,
+            next_run.as_deref(),
+        ) {
+            tracing::warn!("Failed to persist re-entry job {}: {}", job_name, e);
         }
     });
 }
@@ -732,20 +674,6 @@ pub fn is_refusal(text: &str) -> bool {
     }
 
     false
-}
-
-/// Parse a session key "platform:user_id:chat_id" into a targeted PulseTarget.
-fn parse_session_target(session_key: &str) -> PulseTarget {
-    let parts: Vec<&str> = session_key.splitn(3, ':').collect();
-    if parts.len() == 3 {
-        PulseTarget::Session(SessionContext {
-            platform: parts[0].to_string(),
-            user_id: parts[1].to_string(),
-            chat_id: parts[2].to_string(),
-        })
-    } else {
-        PulseTarget::Broadcast
-    }
 }
 
 /// Spawn the code structure indexer loop.
