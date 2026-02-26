@@ -3599,8 +3599,8 @@ fn run_feature_verify(
     }
 
     for check in selected_checks {
-        let output = std::process::Command::new("zsh")
-            .arg("-lc")
+        let output = std::process::Command::new("sh")
+            .arg("-c")
             .arg(&check.command)
             .output();
         let (status, exit_code, stdout_tail, stderr_tail) = match output {
