@@ -34,6 +34,12 @@ pub struct SystemMetrics {
     pub memory_count: u64,
     /// Database file size in bytes.
     pub db_size_bytes: u64,
+    /// Total accumulated LLM cost in USD.
+    pub total_cost_usd: f64,
+    /// Total input tokens consumed.
+    pub total_input_tokens: u64,
+    /// Total output tokens consumed.
+    pub total_output_tokens: u64,
 }
 
 impl Default for SystemMetrics {
@@ -49,6 +55,9 @@ impl Default for SystemMetrics {
             llm_latency_avg_ms: 0,
             memory_count: 0,
             db_size_bytes: 0,
+            total_cost_usd: 0.0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
         }
     }
 }
@@ -58,7 +67,8 @@ impl SystemMetrics {
     pub fn summary(&self) -> String {
         format!(
             "System: RSS={:.1}MB CPU={:.1}% containers={} tasks={} uptime={}s \
-             error_rate={:.2} tool_fail={:.2} llm_latency={}ms memories={} db={:.1}MB",
+             error_rate={:.2} tool_fail={:.2} llm_latency={}ms memories={} db={:.1}MB \
+             cost=${:.4} tokens={}in/{}out",
             self.rss_bytes as f64 / 1_048_576.0,
             self.cpu_percent,
             self.active_containers,
@@ -69,6 +79,9 @@ impl SystemMetrics {
             self.llm_latency_avg_ms,
             self.memory_count,
             self.db_size_bytes as f64 / 1_048_576.0,
+            self.total_cost_usd,
+            self.total_input_tokens,
+            self.total_output_tokens,
         )
     }
 }
@@ -271,6 +284,7 @@ pub fn spawn_metrics_collector(
 
             let uptime = start_time.elapsed().as_secs();
 
+            let (total_input_tokens, total_output_tokens) = crate::llm::total_tokens();
             let new_metrics = SystemMetrics {
                 rss_bytes: rss,
                 cpu_percent: cpu,
@@ -282,6 +296,9 @@ pub fn spawn_metrics_collector(
                 llm_latency_avg_ms: llm_latency,
                 memory_count,
                 db_size_bytes: db_size,
+                total_cost_usd: crate::llm::total_cost_usd(),
+                total_input_tokens,
+                total_output_tokens,
             };
 
             let metrics_summary = new_metrics.summary();

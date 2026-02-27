@@ -525,6 +525,15 @@ pub fn print_snapshot(snapshot: &KpiSnapshot) {
         Some(v) => println!("mean_time_to_fix={:.1}h", v / 3600.0),
         None => println!("mean_time_to_fix=n/a"),
     }
+    // Cost tracking
+    let cost = crate::llm::total_cost_usd();
+    let (input_tok, output_tok) = crate::llm::total_tokens();
+    if cost > 0.0 || input_tok > 0 {
+        println!(
+            "session_cost=${:.4} tokens={}in/{}out",
+            cost, input_tok, output_tok
+        );
+    }
 }
 
 pub fn print_history(rows: &[KpiSnapshot]) {

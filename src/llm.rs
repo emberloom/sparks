@@ -22,6 +22,131 @@ pub struct TokenUsage {
     pub completion_tokens: u64,
 }
 
+impl TokenUsage {
+    /// Calculate cost in USD for this usage given per-million-token pricing.
+    pub fn cost_usd(&self, input_price_per_m: f64, output_price_per_m: f64) -> f64 {
+        (self.prompt_tokens as f64 * input_price_per_m
+            + self.completion_tokens as f64 * output_price_per_m)
+            / 1_000_000.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model cost tracking
+// ---------------------------------------------------------------------------
+
+/// Per-model pricing (USD per 1M tokens).
+#[derive(Debug, Clone)]
+pub struct ModelPricing {
+    pub input_per_m: f64,
+    pub output_per_m: f64,
+}
+
+/// Global cost accumulator — updated atomically by LLM providers.
+pub static TOTAL_COST_MILLICENTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static TOTAL_INPUT_TOKENS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static TOTAL_OUTPUT_TOKENS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Record cost from a single API call (thread-safe).
+pub fn record_cost(usage: &TokenUsage, pricing: &ModelPricing) {
+    TOTAL_INPUT_TOKENS.fetch_add(usage.prompt_tokens, std::sync::atomic::Ordering::Relaxed);
+    TOTAL_OUTPUT_TOKENS.fetch_add(
+        usage.completion_tokens,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // Store cost as millicents (1 USD = 100_000 millicents) to avoid floats
+    let cost_millicents =
+        (usage.cost_usd(pricing.input_per_m, pricing.output_per_m) * 100_000.0) as u64;
+    TOTAL_COST_MILLICENTS.fetch_add(cost_millicents, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Get total accumulated cost in USD.
+pub fn total_cost_usd() -> f64 {
+    TOTAL_COST_MILLICENTS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 100_000.0
+}
+
+/// Get total accumulated tokens.
+pub fn total_tokens() -> (u64, u64) {
+    (
+        TOTAL_INPUT_TOKENS.load(std::sync::atomic::Ordering::Relaxed),
+        TOTAL_OUTPUT_TOKENS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Lookup approximate pricing for well-known models.
+/// Returns None for unknown models (cost tracking skipped).
+pub fn model_pricing(model: &str) -> Option<ModelPricing> {
+    let m = model.to_lowercase();
+    // OpenAI models
+    if m.contains("gpt-4o") {
+        return Some(ModelPricing {
+            input_per_m: 2.50,
+            output_per_m: 10.00,
+        });
+    }
+    if m.contains("gpt-4") && !m.contains("mini") {
+        return Some(ModelPricing {
+            input_per_m: 30.00,
+            output_per_m: 60.00,
+        });
+    }
+    if m.contains("gpt-3.5") || m.contains("gpt-4o-mini") || m.contains("codex-mini") {
+        return Some(ModelPricing {
+            input_per_m: 0.15,
+            output_per_m: 0.60,
+        });
+    }
+    if m.contains("gpt-5") || m.contains("codex") {
+        return Some(ModelPricing {
+            input_per_m: 2.00,
+            output_per_m: 8.00,
+        });
+    }
+    // Google models
+    if m.contains("gemini-2.5-flash") {
+        return Some(ModelPricing {
+            input_per_m: 0.15,
+            output_per_m: 0.60,
+        });
+    }
+    if m.contains("gemini-2.5-pro") || m.contains("gemini-pro") {
+        return Some(ModelPricing {
+            input_per_m: 1.25,
+            output_per_m: 5.00,
+        });
+    }
+    // Claude models
+    if m.contains("claude-3-opus") || m.contains("claude-opus") {
+        return Some(ModelPricing {
+            input_per_m: 15.00,
+            output_per_m: 75.00,
+        });
+    }
+    if m.contains("claude-3-sonnet") || m.contains("claude-sonnet") {
+        return Some(ModelPricing {
+            input_per_m: 3.00,
+            output_per_m: 15.00,
+        });
+    }
+    if m.contains("claude-3-haiku") || m.contains("claude-haiku") {
+        return Some(ModelPricing {
+            input_per_m: 0.25,
+            output_per_m: 1.25,
+        });
+    }
+    // Ollama / local models — free
+    if m.contains("qwen") || m.contains("llama") || m.contains("mistral") || m.contains("phi") {
+        return Some(ModelPricing {
+            input_per_m: 0.0,
+            output_per_m: 0.0,
+        });
+    }
+    None
+}
+
 /// Tracks cumulative token budget across an agentic loop.
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -476,6 +601,12 @@ impl OuathClient {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
         });
+        // Record cost if pricing is known
+        if let Some(ref u) = usage {
+            if let Some(pricing) = model_pricing(&self.effective_model()) {
+                record_cost(u, &pricing);
+            }
+        }
 
         let Some(choice) = chat_resp.choices.into_iter().next() else {
             return Err(AthenaError::Llm(
@@ -2133,6 +2264,12 @@ impl LlmProvider for OpenAiCompatibleClient {
             prompt_tokens: prompt_tok,
             completion_tokens: completion_tok,
         });
+        // Record cost if pricing is known
+        if let Some(ref u) = usage {
+            if let Some(pricing) = model_pricing(&resolved_model) {
+                record_cost(u, &pricing);
+            }
+        }
 
         // Parse tool_calls if present
         if let Some(api_calls) = choice.message.tool_calls {
