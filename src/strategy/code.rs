@@ -82,6 +82,120 @@ struct ExplorationResult {
     files: String,
 }
 
+/// Build a ripple-effect warning from exploration file list.
+fn build_ripple_section(files: &str) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let file_names: Vec<&str> = files
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_start_matches("- ");
+            if trimmed.ends_with(".rs")
+                || trimmed.ends_with(".py")
+                || trimmed.ends_with(".ts")
+                || trimmed.ends_with(".go")
+                || trimmed.contains("src/")
+            {
+                Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
+            } else {
+                None
+            }
+        })
+        .take(10)
+        .collect();
+    if file_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
+             Check for breaking changes to public APIs.",
+            file_names.join(", ")
+        )
+    }
+}
+
+/// Build the full execution prompt from exploration results, contract, and ripple analysis.
+fn build_execution_prompt(
+    exploration: &ExplorationResult,
+    contract: &TaskContract,
+    ripple_section: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if !exploration.context.is_empty() {
+        parts.push(format!("CODEBASE CONTEXT:\n{}", exploration.context));
+    }
+    parts.push(format!("TASK:\n{}", exploration.plan));
+    if !contract.constraints.is_empty() {
+        parts.push(format!(
+            "CONSTRAINTS:\n{}",
+            contract
+                .constraints
+                .iter()
+                .map(|c| format!("- {}", c))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !ripple_section.is_empty() {
+        parts.push(ripple_section.to_string());
+    }
+    parts.join("\n\n")
+}
+
+/// Attempt a prompt-rewrite retry when the coding tool fails on the last candidate.
+async fn retry_with_prompt_rewrite(
+    tool_name: &str,
+    tool: &dyn crate::tools::Tool,
+    docker: &DockerSession,
+    llm: &dyn LlmProvider,
+    full_prompt: &str,
+    context: &str,
+    files: &str,
+    error_output: &str,
+    failures: &mut Vec<String>,
+) -> Result<Option<String>> {
+    tracing::warn!(
+        tool = tool_name,
+        "EXECUTE: coding tool failed, attempting retry"
+    );
+    let retry_messages = vec![
+        Message::system(
+            "You are helping with a coding task. The coding tool failed. \
+             Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
+        ),
+        Message::user(&format!(
+            "Original prompt:\n{}\n\nError output:\n{}\n\n\
+             Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
+            full_prompt, error_output
+        )),
+    ];
+
+    let revised_prompt = llm.chat(&retry_messages).await?;
+    let retry_params = serde_json::json!({
+        "prompt": revised_prompt,
+        "context": format!("{}\n\nPrevious attempt failed with:\n{}", context, error_output),
+        "files": files,
+    });
+
+    tracing::info!(tool = tool_name, "EXECUTE: retrying with revised prompt");
+    match tool.execute(docker, &retry_params).await {
+        Ok(retry_result) if retry_result.success => Ok(Some(retry_result.output)),
+        Ok(retry_result) => {
+            failures.push(format!(
+                "{} (retry): {}",
+                tool_name,
+                lf_truncate(&retry_result.output, 250)
+            ));
+            Ok(None)
+        }
+        Err(e) => {
+            failures.push(format!("{} (retry): {}", tool_name, e));
+            Ok(None)
+        }
+    }
+}
+
 pub struct CodeStrategy;
 
 #[async_trait]
@@ -598,67 +712,9 @@ impl CodeStrategy {
             ));
         }
 
-        // Ripple effect: analyze files from exploration to warn about dependents
-        let ripple_section = if !exploration.files.is_empty() {
-            // Extract file paths from the exploration summary
-            let file_names: Vec<&str> = exploration
-                .files
-                .lines()
-                .filter_map(|line| {
-                    let trimmed = line.trim().trim_start_matches("- ");
-                    if trimmed.ends_with(".rs")
-                        || trimmed.ends_with(".py")
-                        || trimmed.ends_with(".ts")
-                        || trimmed.ends_with(".go")
-                        || trimmed.contains("src/")
-                    {
-                        // Extract just the filename/path portion
-                        Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
-                    } else {
-                        None
-                    }
-                })
-                .take(10)
-                .collect();
+        let ripple_section = build_ripple_section(&exploration.files);
 
-            if file_names.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
-                     Check for breaking changes to public APIs.",
-                    file_names.join(", ")
-                )
-            }
-        } else {
-            String::new()
-        };
-
-        let mut prompt_parts = Vec::new();
-
-        if !exploration.context.is_empty() {
-            prompt_parts.push(format!("CODEBASE CONTEXT:\n{}", exploration.context));
-        }
-
-        prompt_parts.push(format!("TASK:\n{}", exploration.plan));
-
-        if !contract.constraints.is_empty() {
-            prompt_parts.push(format!(
-                "CONSTRAINTS:\n{}",
-                contract
-                    .constraints
-                    .iter()
-                    .map(|c| format!("- {}", c))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
-
-        if !ripple_section.is_empty() {
-            prompt_parts.push(ripple_section);
-        }
-
-        let full_prompt = prompt_parts.join("\n\n");
+        let full_prompt = build_execution_prompt(exploration, contract, &ripple_section);
         let mut failures: Vec<String> = Vec::new();
 
         for (idx, &tool_name) in candidates.iter().enumerate() {
@@ -751,45 +807,13 @@ impl CodeStrategy {
                 )));
             }
 
-            // On the last candidate, try one prompt rewrite retry before failing.
             if allow_retry_rewrite && policy.fallback && idx + 1 == candidates.len() {
-                tracing::warn!(
-                    tool = tool_name,
-                    "EXECUTE: coding tool failed, attempting retry"
-                );
-                let retry_messages = vec![
-                    Message::system(
-                        "You are helping with a coding task. The coding tool failed. \
-                         Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
-                    ),
-                    Message::user(&format!(
-                        "Original prompt:\n{}\n\nError output:\n{}\n\n\
-                         Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
-                        full_prompt, result.output
-                    )),
-                ];
-
-                let revised_prompt = llm.chat(&retry_messages).await?;
-                let retry_params = serde_json::json!({
-                    "prompt": revised_prompt,
-                    "context": format!(
-                        "{}\n\nPrevious attempt failed with:\n{}",
-                        contract.context, result.output
-                    ),
-                    "files": exploration.files,
-                });
-
-                tracing::info!(tool = tool_name, "EXECUTE: retrying with revised prompt");
-                match tool.execute(docker, &retry_params).await {
-                    Ok(retry_result) if retry_result.success => return Ok(retry_result.output),
-                    Ok(retry_result) => {
-                        failures.push(format!(
-                            "{} (retry): {}",
-                            tool_name,
-                            lf_truncate(&retry_result.output, 250)
-                        ));
-                    }
-                    Err(e) => failures.push(format!("{} (retry): {}", tool_name, e)),
+                if let Some(output) = retry_with_prompt_rewrite(
+                    tool_name, tool, docker, llm, &full_prompt,
+                    &contract.context, &exploration.files, &result.output,
+                    &mut failures,
+                ).await? {
+                    return Ok(output);
                 }
             }
         }
