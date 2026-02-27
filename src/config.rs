@@ -45,6 +45,8 @@ pub struct Config {
     #[serde(default)]
     pub github: GithubConfig,
     #[serde(default)]
+    pub ticket_intake: TicketIntakeConfig,
+    #[serde(default)]
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
@@ -551,6 +553,48 @@ impl std::fmt::Debug for GithubConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_intake_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default)]
+    pub sources: Vec<TicketIntakeSourceConfig>,
+}
+
+impl Default for TicketIntakeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_ticket_intake_interval(),
+            sources: Vec::new(),
+        }
+    }
+}
+
+fn default_ticket_intake_interval() -> u64 {
+    300
+}
+
+fn default_ticket_intake_label() -> Option<String> {
+    Some("athena".to_string())
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeSourceConfig {
+    pub provider: String,
+    pub repo: String,
+    #[serde(default = "default_ticket_intake_label")]
+    pub filter_label: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub email_env: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
     #[serde(default = "default_ollama_url")]
     pub url: String,
@@ -787,6 +831,7 @@ impl Default for Config {
             proactive: ProactiveConfig::default(),
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
+            ticket_intake: TicketIntakeConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
             inline_secret_labels: Vec::new(),

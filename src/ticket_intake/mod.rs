@@ -1,0 +1,132 @@
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+use crate::core::AutonomousTask;
+use crate::knobs::SharedKnobs;
+use crate::observer::{ObserverCategory, ObserverHandle};
+use crate::randomness;
+
+pub mod github;
+pub mod gitlab;
+pub mod jira;
+pub mod linear;
+pub mod provider;
+pub mod store;
+
+pub use provider::{ExternalTicket, TicketProvider};
+pub use store::TicketIntakeStore;
+
+pub fn spawn_ticket_intake(
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    auto_tx: mpsc::Sender<AutonomousTask>,
+    providers: Vec<Box<dyn TicketProvider>>,
+    store: Arc<TicketIntakeStore>,
+) {
+    if providers.is_empty() {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            "Ticket intake not started: no providers configured",
+        );
+        return;
+    }
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        loop {
+            let (enabled, interval) = {
+                let k = knobs.read().unwrap();
+                (k.ticket_intake_enabled, k.ticket_intake_interval_secs)
+            };
+
+            if !enabled {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+
+            let sleep_dur = randomness::jitter_interval(interval, 0.15);
+            tokio::time::sleep(sleep_dur).await;
+
+            {
+                let k = knobs.read().unwrap();
+                if !k.ticket_intake_enabled {
+                    continue;
+                }
+            }
+
+            for provider in providers.iter() {
+                let name = provider.name();
+                let tickets = match provider.poll().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        observer.log(
+                            ObserverCategory::TicketIntake,
+                            format!("{} poll failed: {}", name, e),
+                        );
+                        continue;
+                    }
+                };
+
+                if tickets.is_empty() {
+                    continue;
+                }
+
+                let mut dispatched = 0usize;
+                let mut skipped = 0usize;
+
+                for ticket in tickets {
+                    let dedup_key = ticket.dedup_key();
+                    match store.is_seen(&dedup_key) {
+                        Ok(true) => {
+                            skipped += 1;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            observer.log(
+                                ObserverCategory::TicketIntake,
+                                format!("{}: dedup lookup failed: {}", name, e),
+                            );
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = store.mark_seen(
+                        &dedup_key,
+                        &ticket.provider,
+                        &ticket.external_id,
+                        &ticket.title,
+                    ) {
+                        observer.log(
+                            ObserverCategory::TicketIntake,
+                            format!("{}: failed to mark seen: {}", name, e),
+                        );
+                        continue;
+                    }
+
+                    let task = ticket.to_autonomous_task();
+                    match auto_tx.send(task).await {
+                        Ok(_) => dispatched += 1,
+                        Err(e) => {
+                            observer.log(
+                                ObserverCategory::TicketIntake,
+                                format!("{}: dispatch failed: {}", name, e),
+                            );
+                        }
+                    }
+                }
+
+                if dispatched > 0 || skipped > 0 {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "{}: dispatched {}, skipped {}",
+                            name, dispatched, skipped
+                        ),
+                    );
+                }
+            }
+        }
+    });
+}

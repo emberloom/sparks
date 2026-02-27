@@ -31,6 +31,7 @@ mod self_heal;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+mod ticket_intake;
 mod tool_usage;
 mod tools;
 

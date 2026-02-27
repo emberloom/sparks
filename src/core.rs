@@ -21,6 +21,7 @@ use crate::profiles;
 use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
+use crate::ticket_intake::{self, TicketIntakeStore};
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
@@ -483,6 +484,24 @@ fn spawn_housekeeping_loops(
         auto_tx.clone(),
         langfuse.clone(),
     );
+
+    let providers = build_ticket_intake_providers(config, &observer);
+    if !providers.is_empty() {
+        match create_ticket_intake_store(config) {
+            Ok(store) => {
+                ticket_intake::spawn_ticket_intake(
+                    knobs,
+                    observer,
+                    auto_tx,
+                    providers,
+                    store,
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Ticket intake store unavailable: {}", e);
+            }
+        }
+    }
 }
 
 fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: ObserverHandle) {
@@ -1219,6 +1238,203 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(TaskOutcomeStore::new(conn)))
+}
+
+fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>> {
+    let db_path = config.db_path().map_err(|e| {
+        crate::error::AthenaError::Config(format!(
+            "Failed to resolve DB path for ticket intake store: {}",
+            e
+        ))
+    })?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    Ok(Arc::new(TicketIntakeStore::new(conn)))
+}
+
+fn build_ticket_intake_providers(
+    config: &Config,
+    observer: &ObserverHandle,
+) -> Vec<Box<dyn ticket_intake::TicketProvider>> {
+    if config.ticket_intake.sources.is_empty() {
+        return Vec::new();
+    }
+
+    let mut providers: Vec<Box<dyn ticket_intake::TicketProvider>> = Vec::new();
+
+    let read_env = |key: &str| -> Option<String> {
+        std::env::var(key).ok().and_then(|v| {
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        })
+    };
+
+    let clean_opt = |value: &Option<String>| -> Option<String> {
+        value.as_ref().and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    };
+
+    for source in &config.ticket_intake.sources {
+        let provider = source.provider.trim().to_lowercase();
+        let repo = source.repo.trim().to_string();
+        if repo.is_empty() {
+            observer.log(
+                ObserverCategory::TicketIntake,
+                "Ticket intake source skipped: empty repo identifier",
+            );
+            continue;
+        }
+        let filter_label = source
+            .filter_label
+            .clone()
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "athena".to_string());
+
+        match provider.as_str() {
+            "github" => {
+                let token_env = clean_opt(&source.token_env)
+                    .unwrap_or_else(|| "GH_TOKEN".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake github:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://api.github.com".to_string());
+                providers.push(Box::new(ticket_intake::github::GitHubProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                    api_base,
+                )));
+            }
+            "gitlab" => {
+                let token_env = clean_opt(&source.token_env)
+                    .unwrap_or_else(|| "GITLAB_TOKEN".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake gitlab:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string());
+                providers.push(Box::new(ticket_intake::gitlab::GitLabProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                    api_base,
+                )));
+            }
+            "linear" => {
+                let token_env = clean_opt(&source.token_env)
+                    .unwrap_or_else(|| "LINEAR_API_KEY".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake linear:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                providers.push(Box::new(ticket_intake::linear::LinearProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                )));
+            }
+            "jira" => {
+                let token_env = clean_opt(&source.token_env)
+                    .unwrap_or_else(|| "JIRA_API_TOKEN".to_string());
+                let email_env = clean_opt(&source.email_env)
+                    .unwrap_or_else(|| "JIRA_EMAIL".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake jira:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let Some(email) = read_env(&email_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake jira:{} skipped: missing {}",
+                            repo, email_env
+                        ),
+                    );
+                    continue;
+                };
+                let Some(base_url) = clean_opt(&source.api_base) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake jira:{} skipped: missing api_base",
+                            repo
+                        ),
+                    );
+                    continue;
+                };
+                providers.push(Box::new(ticket_intake::jira::JiraProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    base_url,
+                    email,
+                    token,
+                )));
+            }
+            _ => {
+                observer.log(
+                    ObserverCategory::TicketIntake,
+                    format!(
+                        "Ticket intake source skipped: unknown provider '{}'",
+                        source.provider
+                    ),
+                );
+            }
+        }
+    }
+
+    if providers.is_empty() {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            "Ticket intake configured but no providers are active",
+        );
+    } else {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!("Ticket intake providers active: {}", providers.len()),
+        );
+    }
+
+    providers
 }
 
 fn expire_stale_started_tasks(outcome_store: &TaskOutcomeStore, observer: &ObserverHandle) {

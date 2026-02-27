@@ -15,6 +15,7 @@ pub enum PulseSource {
     MoodShift,
     ConversationReentry,
     AutonomousTask,
+    TicketIntake,
 }
 
 impl PulseSource {
@@ -27,6 +28,7 @@ impl PulseSource {
             Self::MoodShift => "mood_shift",
             Self::ConversationReentry => "conversation_reentry",
             Self::AutonomousTask => "autonomous_task",
+            Self::TicketIntake => "ticket_intake",
         }
     }
 }
