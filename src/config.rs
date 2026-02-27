@@ -48,6 +48,8 @@ pub struct Config {
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
+    #[serde(default)]
+    pub ci: CiConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -528,6 +530,48 @@ impl Default for LangfuseConfig {
     }
 }
 
+/// CI loop configuration — poll CI after ghost execution and iterate on failures.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CiConfig {
+    /// Enable the CI polling loop after ghost task completion.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Seconds between CI status polls (default: 30).
+    #[serde(default = "default_ci_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Maximum CI poll+fix cycles before giving up (default: 3).
+    #[serde(default = "default_ci_max_retries")]
+    pub max_retries: u32,
+    /// Auto-merge PR on CI success (only at low-risk autonomy tier). Default: false.
+    #[serde(default)]
+    pub auto_merge: bool,
+    /// Maximum time in seconds to wait for CI to complete per cycle (default: 600).
+    #[serde(default = "default_ci_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for CiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_ci_poll_interval(),
+            max_retries: default_ci_max_retries(),
+            auto_merge: false,
+            timeout_secs: default_ci_timeout(),
+        }
+    }
+}
+
+fn default_ci_poll_interval() -> u64 {
+    30
+}
+fn default_ci_max_retries() -> u32 {
+    3
+}
+fn default_ci_timeout() -> u64 {
+    600
+}
+
 fn default_metrics_interval() -> u64 {
     30
 }
@@ -798,6 +842,7 @@ impl Default for Config {
             github: GithubConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
+            ci: CiConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }

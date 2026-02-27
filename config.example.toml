@@ -120,6 +120,14 @@ planning_enabled = true
 planning_auto = true
 planning_timeout_secs = 900
 
+# CI loop — poll CI after ghost execution and iterate on failures
+[ci]
+enabled = false
+# poll_interval_secs = 30     # seconds between CI status polls
+# max_retries = 3             # max poll+fix cycles before giving up
+# auto_merge = false          # auto-merge on success (low-risk tier only)
+# timeout_secs = 600          # max wait per CI cycle
+
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var or .env
 

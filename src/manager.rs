@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{Config, GhostConfig};
+use crate::config::{CiConfig, Config, GhostConfig};
 use crate::confirm::Confirmer;
 use crate::core::SessionContext;
 use crate::dynamic_tools::{self, DynamicTool};
@@ -72,6 +72,8 @@ pub struct Manager {
     metrics: SharedMetrics,
     /// Langfuse observability client
     langfuse: SharedLangfuse,
+    /// CI loop configuration
+    ci_config: CiConfig,
 }
 
 impl Manager {
@@ -159,6 +161,7 @@ impl Manager {
             usage_store,
             metrics,
             langfuse,
+            ci_config: config.ci.clone(),
         }
     }
 
@@ -445,6 +448,7 @@ impl Manager {
 
                 let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
                 let is_self_dev = ghost_name == "coder" || goal.to_lowercase().contains("refactor");
+                let goal_for_ci = goal.clone();
                 let contract = TaskContract {
                     context,
                     goal,
@@ -492,7 +496,19 @@ impl Manager {
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;
 
-                result
+                // Run CI loop if enabled
+                if self.ci_config.enabled {
+                    self.run_ci_loop(
+                        &goal_for_ci,
+                        &result,
+                        &ghost_name,
+                        confirmer,
+                        status_tx,
+                    )
+                    .await?
+                } else {
+                    result
+                }
             }
         };
 
@@ -631,6 +647,244 @@ impl Manager {
         self.maybe_save_lesson(goal, &result).await;
 
         Ok(result)
+    }
+
+    /// Run the CI polling loop after ghost execution.
+    /// Pushes the branch, creates/updates a PR, polls CI status, and iterates on failures.
+    /// Returns an updated result summary including CI outcome.
+    async fn run_ci_loop(
+        &self,
+        goal: &str,
+        ghost_result: &str,
+        ghost_name: &str,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+    ) -> Result<String> {
+        if !self.ci_config.enabled {
+            return Ok(ghost_result.to_string());
+        }
+
+        let workspace = &self.host_workspace;
+        let max_retries = self.ci_config.max_retries;
+        let poll_interval = std::time::Duration::from_secs(self.ci_config.poll_interval_secs);
+        let timeout = std::time::Duration::from_secs(self.ci_config.timeout_secs);
+
+        // Push the branch
+        send_ci_status(status_tx, "CI loop: pushing branch...").await;
+        let branch = run_host_cmd(workspace, "git", &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let branch = branch.trim();
+        let push_result = run_host_cmd(workspace, "git", &["push", "-u", "origin", branch]).await;
+        if let Err(e) = &push_result {
+            tracing::warn!(error = %e, "CI loop: git push failed");
+            return Ok(format!("{}\n\n[CI loop] Push failed: {}", ghost_result, e));
+        }
+
+        // Create or find existing PR
+        send_ci_status(status_tx, "CI loop: creating/finding PR...").await;
+        let pr_url = match self.ensure_pr(workspace, branch, goal).await {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(error = %e, "CI loop: PR creation failed");
+                return Ok(format!(
+                    "{}\n\n[CI loop] PR creation failed: {}",
+                    ghost_result, e
+                ));
+            }
+        };
+
+        // Poll CI status with retries
+        let mut last_result = ghost_result.to_string();
+        for attempt in 0..max_retries {
+            send_ci_status(
+                status_tx,
+                &format!("CI loop: polling checks (attempt {}/{})...", attempt + 1, max_retries),
+            )
+            .await;
+
+            match self.poll_ci_status(workspace, &pr_url, poll_interval, timeout).await {
+                CiOutcome::Success => {
+                    tracing::info!("CI loop: all checks passed");
+                    send_ci_status(status_tx, "CI loop: all checks passed!").await;
+
+                    // Auto-merge if enabled
+                    if self.ci_config.auto_merge {
+                        send_ci_status(status_tx, "CI loop: auto-merging PR...").await;
+                        if let Err(e) = run_host_cmd(
+                            workspace,
+                            "gh",
+                            &["pr", "merge", &pr_url, "--squash", "--auto"],
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "CI loop: auto-merge failed");
+                        }
+                    }
+
+                    return Ok(format!(
+                        "{}\n\n[CI loop] All checks passed. PR: {}",
+                        last_result, pr_url
+                    ));
+                }
+                CiOutcome::Failure(logs) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        "CI loop: checks failed, attempting fix"
+                    );
+                    send_ci_status(status_tx, "CI loop: CI failed, attempting fix...").await;
+
+                    // Re-dispatch ghost with failure context
+                    let fix_goal = format!(
+                        "CI checks failed after your previous changes. Fix the failures and ensure tests pass.\n\
+                         Original goal: {}\n\n\
+                         CI failure logs:\n{}",
+                        goal,
+                        if logs.len() > 3000 { &logs[..3000] } else { &logs }
+                    );
+
+                    match Box::pin(
+                        self.execute_task(&fix_goal, "CI fix iteration", Some(ghost_name), confirmer),
+                    )
+                    .await
+                    {
+                        Ok(fix_result) => {
+                            last_result = fix_result;
+                            // Push the fix
+                            let _ =
+                                run_host_cmd(workspace, "git", &["push", "origin", branch]).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "CI loop: fix dispatch failed");
+                            return Ok(format!(
+                                "{}\n\n[CI loop] Fix attempt failed: {}. PR: {}",
+                                last_result, e, pr_url
+                            ));
+                        }
+                    }
+                }
+                CiOutcome::Timeout => {
+                    tracing::warn!("CI loop: timed out waiting for checks");
+                    return Ok(format!(
+                        "{}\n\n[CI loop] Timed out waiting for CI. PR: {}",
+                        last_result, pr_url
+                    ));
+                }
+                CiOutcome::Error(e) => {
+                    tracing::warn!(error = %e, "CI loop: error polling status");
+                    return Ok(format!(
+                        "{}\n\n[CI loop] Error polling CI: {}. PR: {}",
+                        last_result, e, pr_url
+                    ));
+                }
+            }
+        }
+
+        Ok(format!(
+            "{}\n\n[CI loop] Exhausted {} retries. PR: {}",
+            last_result, max_retries, pr_url
+        ))
+    }
+
+    /// Ensure a PR exists for the branch, creating one if needed.
+    async fn ensure_pr(&self, workspace: &str, branch: &str, goal: &str) -> Result<String> {
+        // Check for existing PR
+        let existing = run_host_cmd(
+            workspace,
+            "gh",
+            &["pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url"],
+        )
+        .await
+        .unwrap_or_default();
+        let existing = existing.trim();
+        if !existing.is_empty() && existing.starts_with("http") {
+            return Ok(existing.to_string());
+        }
+
+        // Create new PR
+        let title = if goal.len() > 70 {
+            format!("{}...", &goal[..goal.floor_char_boundary(67)])
+        } else {
+            goal.to_string()
+        };
+        let result = run_host_cmd(
+            workspace,
+            "gh",
+            &["pr", "create", "--title", &title, "--body", "Automated PR by Athena CI loop.", "--fill"],
+        )
+        .await?;
+        let url = result.trim().lines().last().unwrap_or("").to_string();
+        Ok(url)
+    }
+
+    /// Poll CI status until success, failure, or timeout.
+    async fn poll_ci_status(
+        &self,
+        workspace: &str,
+        pr_url: &str,
+        poll_interval: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> CiOutcome {
+        let start = std::time::Instant::now();
+
+        loop {
+            if start.elapsed() > timeout {
+                return CiOutcome::Timeout;
+            }
+
+            tokio::time::sleep(poll_interval).await;
+
+            let checks = match run_host_cmd(
+                workspace,
+                "gh",
+                &["pr", "checks", pr_url, "--json", "name,state,conclusion"],
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(e) => return CiOutcome::Error(e.to_string()),
+            };
+
+            let checks = checks.trim();
+            if checks.is_empty() {
+                continue; // No checks yet
+            }
+
+            // Parse check states
+            let parsed: std::result::Result<Vec<serde_json::Value>, _> =
+                serde_json::from_str(checks);
+            let items = match parsed {
+                Ok(items) if !items.is_empty() => items,
+                _ => continue,
+            };
+
+            let all_complete = items.iter().all(|c| {
+                let state = c["state"].as_str().unwrap_or("");
+                state == "SUCCESS" || state == "FAILURE" || state == "ERROR"
+                    || state == "NEUTRAL" || state == "SKIPPED"
+            });
+
+            if !all_complete {
+                continue;
+            }
+
+            let any_failed = items.iter().any(|c| {
+                let state = c["state"].as_str().unwrap_or("");
+                state == "FAILURE" || state == "ERROR"
+            });
+
+            if any_failed {
+                // Fetch failed run logs
+                let logs = run_host_cmd(
+                    workspace,
+                    "gh",
+                    &["pr", "checks", pr_url],
+                )
+                .await
+                .unwrap_or_else(|_| "Could not fetch CI logs".to_string());
+                return CiOutcome::Failure(logs);
+            }
+
+            return CiOutcome::Success;
+        }
     }
 
     #[tracing::instrument(skip(
@@ -1181,6 +1435,51 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Outcome of a CI polling cycle.
+enum CiOutcome {
+    Success,
+    Failure(String),
+    Timeout,
+    Error(String),
+}
+
+/// Run a command on the host and return stdout.
+async fn run_host_cmd(cwd: &str, program: &str, args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|e| AthenaError::Tool(format!("{} failed to start: {}", program, e)))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(AthenaError::Tool(format!(
+            "{} exited {}: {}{}",
+            program,
+            output.status,
+            stderr,
+            if !stdout.is_empty() {
+                format!("\n{}", stdout)
+            } else {
+                String::new()
+            }
+        )))
+    }
+}
+
+/// Send a CI status event.
+async fn send_ci_status(status_tx: Option<&StatusSender>, msg: &str) {
+    if let Some(tx) = status_tx {
+        let _ = tx
+            .send(crate::core::CoreEvent::Status(msg.to_string()))
+            .await;
+    }
 }
 
 enum Classification {
