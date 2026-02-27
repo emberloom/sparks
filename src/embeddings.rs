@@ -267,7 +267,12 @@ mod tests {
         for case in &cases {
             let q_emb = embedder.embed(case.query).unwrap();
             let hybrid = store.search_hybrid(case.query, Some(&q_emb), 5).unwrap();
-            let semantic = store.search_semantic(&q_emb, 5).unwrap();
+            let semantic: Vec<(String, f32)> = store
+                .search_semantic(&q_emb, 5)
+                .unwrap()
+                .into_iter()
+                .map(|(m, score)| (m.content, score))
+                .collect();
             results.push(evaluate_bench_query(case, &hybrid, &semantic, &memory_contents));
         }
 
@@ -789,6 +794,7 @@ mod tests {
         memory_contents: &[String],
     ) -> QueryResult {
         let top_scores: Vec<f32> = semantic_scores.iter().map(|(_, s)| *s).collect();
+        let top_first = top_scores.first().copied().unwrap_or(0.0);
         let all_indices: Vec<usize> = hybrid
             .iter()
             .filter_map(|m| memory_contents.iter().position(|c| c == &m.content))
@@ -800,18 +806,14 @@ mod tests {
 
         let compute_hit = |retrieved: &[usize]| -> bool {
             if case.expected.is_empty() {
-                return top_scores.first().copied().unwrap_or(0.0) <= 0.4;
+                return top_first <= 0.4;
             }
             retrieved.iter().any(|idx| case.expected.contains(idx))
         };
 
         let precision_at = |retrieved: &[usize], k: usize| -> f32 {
             if case.expected.is_empty() {
-                return if top_scores.first().copied().unwrap_or(0.0) <= 0.4 {
-                    1.0
-                } else {
-                    0.0
-                };
+                return if top_first <= 0.4 { 1.0 } else { 0.0 };
             }
             let hits = retrieved
                 .iter()
@@ -825,7 +827,7 @@ mod tests {
         let hit_5 = compute_hit(&retrieved_5);
 
         let rr = if case.expected.is_empty() {
-            if top_scores.first().copied().unwrap_or(0.0) > 0.4 { 0.0 } else { 1.0 }
+            if top_first > 0.4 { 0.0 } else { 1.0 }
         } else {
             let mut first_rank = 0usize;
             for (rank, idx) in retrieved_5.iter().enumerate() {
@@ -841,6 +843,10 @@ mod tests {
             .filter(|i| case.forbidden.contains(i))
             .count();
 
+        let prec_1 = precision_at(&retrieved_1, 1);
+        let prec_3 = precision_at(&retrieved_3, 3);
+        let prec_5 = precision_at(&retrieved_5, 5);
+
         QueryResult {
             query: case.query.to_string(),
             category: case.category.to_string(),
@@ -854,9 +860,9 @@ mod tests {
             hit_3,
             hit_5,
             rr,
-            prec_1: precision_at(&retrieved_1, 1),
-            prec_3: precision_at(&retrieved_3, 3),
-            prec_5: precision_at(&retrieved_5, 5),
+            prec_1,
+            prec_3,
+            prec_5,
             distractor_count,
         }
     }
