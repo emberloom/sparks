@@ -1,16 +1,16 @@
 {
   "summary": {
     "files": 35,
-    "total_loc": 30796,
-    "functions": 1039,
+    "total_loc": 30692,
+    "functions": 1074,
     "fn_over_80": 58,
-    "fn_over_120": 35,
+    "fn_over_120": 30,
     "files_over_1000_loc": 11,
-    "max_file_loc": 5568,
+    "max_file_loc": 5612,
     "max_file_path": "src/main.rs",
-    "max_fn_len": 835,
-    "max_fn_name": "bench_memory_retrieval",
-    "max_fn_file": "src/embeddings.rs"
+    "max_fn_len": 395,
+    "max_fn_name": "extract_json_fenced",
+    "max_fn_file": "src/llm.rs"
   },
   "by_file": {
     "src/config.rs": {
@@ -63,10 +63,10 @@
       "fn_over_120": 0
     },
     "src/embeddings.rs": {
-      "loc": 1105,
-      "fn_count": 11,
-      "max_fn_len": 835,
-      "fn_over_80": 2,
+      "loc": 1050,
+      "fn_count": 16,
+      "max_fn_len": 388,
+      "fn_over_80": 3,
       "fn_over_120": 1
     },
     "src/error.rs": {
@@ -126,23 +126,23 @@
       "fn_over_120": 0
     },
     "src/llm.rs": {
-      "loc": 2876,
-      "fn_count": 75,
+      "loc": 2758,
+      "fn_count": 77,
       "max_fn_len": 395,
       "fn_over_80": 7,
-      "fn_over_120": 7
+      "fn_over_120": 5
     },
     "src/main.rs": {
-      "loc": 5568,
-      "fn_count": 131,
-      "max_fn_len": 350,
-      "fn_over_80": 12,
-      "fn_over_120": 8
+      "loc": 5612,
+      "fn_count": 145,
+      "max_fn_len": 274,
+      "fn_over_80": 11,
+      "fn_over_120": 6
     },
     "src/manager.rs": {
-      "loc": 1268,
-      "fn_count": 27,
-      "max_fn_len": 310,
+      "loc": 1302,
+      "fn_count": 35,
+      "max_fn_len": 198,
       "fn_over_80": 5,
       "fn_over_120": 3
     },
@@ -175,11 +175,11 @@
       "fn_over_120": 0
     },
     "src/proactive.rs": {
-      "loc": 1040,
-      "fn_count": 18,
-      "max_fn_len": 215,
+      "loc": 1007,
+      "fn_count": 21,
+      "max_fn_len": 146,
       "fn_over_80": 5,
-      "fn_over_120": 4
+      "fn_over_120": 3
     },
     "src/profiles.rs": {
       "loc": 141,
@@ -217,9 +217,9 @@
       "fn_over_120": 0
     },
     "src/strategy/code.rs": {
-      "loc": 1383,
-      "fn_count": 25,
-      "max_fn_len": 233,
+      "loc": 1407,
+      "fn_count": 28,
+      "max_fn_len": 160,
       "fn_over_80": 6,
       "fn_over_120": 4
     },
