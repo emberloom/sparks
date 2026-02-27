@@ -924,6 +924,15 @@ async fn command_jobs(bot: &Bot, chat_id: ChatId, state: &TelegramState) -> Resp
                         escape_html(&next),
                         escape_html(&j.prompt),
                     ));
+                    if let Some(ghost) = j.ghost.as_deref() {
+                        out.push_str(&format!("  ghost: {}\n", escape_html(ghost)));
+                    }
+                    if j.target != "broadcast" {
+                        out.push_str(&format!(
+                            "  target: {}\n",
+                            escape_html(&j.target)
+                        ));
+                    }
                 }
                 send_html(bot, chat_id, &out).await?;
             }

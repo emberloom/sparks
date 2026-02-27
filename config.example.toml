@@ -1,6 +1,8 @@
-# LLM provider: "ollama" (default), "ouath", "openrouter", or "zen"
+# LLM provider: "ouath" (default), "ollama", "openrouter", or "zen"
+# Inline secrets in config.toml are blocked by default. Use env vars or a .env file (gitignored).
+# Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
 [llm]
-provider = "ollama"
+provider = "ouath"
 
 # OpenAI subscription (Ouath) via OAuth (used by Telegram by default).
 # Run `athena ouath login` to store tokens in auth_file (default: ~/.athena/ouath.json).
@@ -24,7 +26,7 @@ classifier_model = "qwen2.5:3b"    # lighter model for routing decisions
 temperature = 0.3
 max_tokens = 4096
 
-# Uncomment to use OpenRouter (set OPENROUTER_API_KEY env or api_key below)
+# Uncomment to use OpenRouter (set OPENROUTER_API_KEY env; inline api_key is blocked by default)
 # [openrouter]
 # model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
@@ -33,7 +35,7 @@ max_tokens = 4096
 # temperature = 0.3
 # max_tokens = 4096
 
-# Uncomment to use Opencode Zen (set OPENCODE_API_KEY env or api_key below)
+# Uncomment to use Opencode Zen (set OPENCODE_API_KEY env; inline api_key is blocked by default)
 # [zen]
 # model = "zen-v1"
 # classifier_model = "zen-v1-mini"  # optional, defaults to model
@@ -104,7 +106,7 @@ enabled = true
 # dedup_threshold = 0.95
 
 [telegram]
-# token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
+# token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var or .env
 # provider = "ouath"          # optional, defaults to "ouath"
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
@@ -115,12 +117,12 @@ planning_auto = true
 planning_timeout_secs = 900
 
 [github]
-# token = "ghp_..."  # prefer GH_TOKEN env var or a local secret manager
+# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var or .env
 
 # Langfuse observability - traces all LLM calls and agent activities
 # Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
 [langfuse]
 enabled = true  # set to false to disable
-# public_key = "pk-..."    # prefer LANGFUSE_PUBLIC_KEY env var or a secret manager
-# secret_key = "sk-..."    # prefer LANGFUSE_SECRET_KEY env var or a secret manager
+# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var or .env
+# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var or .env
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud

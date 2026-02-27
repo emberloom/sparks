@@ -48,6 +48,8 @@ pub struct Config {
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
+    #[serde(skip)]
+    inline_secret_labels: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -65,7 +67,7 @@ impl Default for LlmConfig {
 }
 
 fn default_provider() -> String {
-    "ollama".into()
+    "ouath".into()
 }
 
 #[derive(Deserialize, Clone)]
@@ -787,6 +789,7 @@ impl Default for Config {
             github: GithubConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
+            inline_secret_labels: Vec::new(),
         }
     }
 }
@@ -829,35 +832,131 @@ fn default_ghosts() -> Vec<GhostConfig> {
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = if let Some(p) = path {
-            p.to_path_buf()
+            Some(p.to_path_buf())
         } else {
             // Look in current directory, then ~/.athena/
             let local = PathBuf::from("config.toml");
             if local.exists() {
-                local
+                Some(local)
             } else {
                 let home = dirs::home_dir()
                     .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
                 let global = home.join(".athena").join("config.toml");
                 if global.exists() {
-                    global
+                    Some(global)
                 } else {
                     tracing::info!("No config file found, using defaults");
-                    return Ok(Config::default());
+                    None
                 }
             }
         };
 
-        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
-            AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e))
-        })?;
+        let mut config = if let Some(path) = config_path {
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                AthenaError::Config(format!("Failed to read {}: {}", path.display(), e))
+            })?;
+            toml::from_str(&contents)
+                .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?
+        } else {
+            Config::default()
+        };
 
-        let mut config: Config = toml::from_str(&contents)
-            .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
+        config.inline_secret_labels = config.collect_inline_secret_labels();
+        if !config.inline_secret_labels.is_empty() && !allow_inline_secrets() {
+            return Err(AthenaError::Config(format!(
+                "Inline secrets found in config: {}. Move these to env vars or a .env file (gitignored). Set ATHENA_ALLOW_INLINE_SECRETS=1 to override.",
+                config.inline_secret_labels.join(", ")
+            )));
+        }
+        if !config.inline_secret_labels.is_empty() {
+            tracing::warn!(
+                fields = %config.inline_secret_labels.join(", "),
+                "Inline secrets found in config; prefer environment variables or a local secret manager"
+            );
+        }
 
+        config.apply_env_overrides();
         config.validate();
         config.load_souls();
         Ok(config)
+    }
+
+    pub fn inline_secret_labels(&self) -> &[String] {
+        &self.inline_secret_labels
+    }
+
+    fn collect_inline_secret_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if self.github.token.is_some() && std::env::var("GH_TOKEN").is_err() {
+            labels.push("github.token".to_string());
+        }
+        if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
+            labels.push("telegram.token".to_string());
+        }
+        if self.telegram.stt_api_key.is_some()
+            && std::env::var("ATHENA_STT_API_KEY").is_err()
+        {
+            labels.push("telegram.stt_api_key".to_string());
+        }
+        if self
+            .openrouter
+            .as_ref()
+            .and_then(|c| c.api_key.as_ref())
+            .is_some()
+            && std::env::var("OPENROUTER_API_KEY").is_err()
+        {
+            labels.push("openrouter.api_key".to_string());
+        }
+        if self.zen.as_ref().and_then(|c| c.api_key.as_ref()).is_some()
+            && std::env::var("OPENCODE_API_KEY").is_err()
+        {
+            labels.push("zen.api_key".to_string());
+        }
+        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err()
+        {
+            labels.push("langfuse.public_key".to_string());
+        }
+        if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
+            labels.push("langfuse.secret_key".to_string());
+        }
+        labels
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(token) = std::env::var("ATHENA_TELEGRAM_TOKEN") {
+            self.telegram.token = Some(token);
+        }
+        if let Ok(key) = std::env::var("ATHENA_STT_API_KEY") {
+            self.telegram.stt_api_key = Some(key);
+        }
+        if let Ok(token) = std::env::var("GH_TOKEN") {
+            self.github.token = Some(token);
+        }
+        if let Some(openrouter) = self.openrouter.as_mut() {
+            if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+                openrouter.api_key = Some(key);
+            }
+        }
+        if let Some(zen) = self.zen.as_mut() {
+            if let Ok(key) = std::env::var("OPENCODE_API_KEY") {
+                zen.api_key = Some(key);
+            }
+        }
+        if let Ok(key) = std::env::var("LANGFUSE_PUBLIC_KEY") {
+            self.langfuse.public_key = Some(key);
+        }
+        if let Ok(key) = std::env::var("LANGFUSE_SECRET_KEY") {
+            self.langfuse.secret_key = Some(key);
+        }
+        if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
+            self.langfuse.base_url = Some(url);
+        }
+        if self.langfuse.enabled == false
+            && self.langfuse.public_key.is_some()
+            && self.langfuse.secret_key.is_some()
+        {
+            self.langfuse.enabled = true;
+        }
     }
 
     /// Load soul file contents for persona and all ghosts
@@ -925,45 +1024,12 @@ impl Config {
             }
         }
 
-        let mut inline_secrets = Vec::new();
-        if self.github.token.is_some() {
-            inline_secrets.push("github.token");
-        }
-        if self.telegram.token.is_some() {
-            inline_secrets.push("telegram.token");
-        }
-        if self.telegram.stt_api_key.is_some() {
-            inline_secrets.push("telegram.stt_api_key");
-        }
-        if self
-            .openrouter
-            .as_ref()
-            .and_then(|c| c.api_key.as_ref())
-            .is_some()
-        {
-            inline_secrets.push("openrouter.api_key");
-        }
-        if self.zen.as_ref().and_then(|c| c.api_key.as_ref()).is_some() {
-            inline_secrets.push("zen.api_key");
-        }
-        if self.langfuse.public_key.is_some() {
-            inline_secrets.push("langfuse.public_key");
-        }
-        if self.langfuse.secret_key.is_some() {
-            inline_secrets.push("langfuse.secret_key");
-        }
-        if !inline_secrets.is_empty() {
-            tracing::warn!(
-                fields = %inline_secrets.join(", "),
-                "Inline secrets found in config; prefer environment variables or a local secret manager"
-            );
-        }
     }
 
     /// Ordered provider candidates: configured provider first, then common fallbacks.
     pub fn provider_candidates(&self) -> Vec<String> {
         let mut out = vec![self.llm.provider.clone()];
-        for p in ["ouath", "openrouter", "zen", "ollama"] {
+        for p in ["ouath", "ollama", "openrouter", "zen"] {
             if !out.iter().any(|x| x == p) {
                 out.push(p.to_string());
             }
@@ -1185,6 +1251,15 @@ impl Config {
             host_path.into()
         }
     }
+}
+
+fn allow_inline_secrets() -> bool {
+    matches!(
+        std::env::var("ATHENA_ALLOW_INLINE_SECRETS")
+            .as_deref()
+            .unwrap_or(""),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    )
 }
 
 /// Resolve a path (expanding ~) and read the file contents.

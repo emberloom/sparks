@@ -16,8 +16,8 @@ Secure autonomous multi-agent system for code execution, evaluation, and policy-
 - Python 3.11+ for `scripts/*.py`
 - Docker daemon (for containerized ghost execution)
 - one configured LLM provider:
-  - local Ollama (default), or
-  - OpenRouter / Zen compatible endpoint
+  - OpenAI (Ouath) (default), or
+  - local Ollama / OpenRouter / Zen compatible endpoint
 
 ## Quickstart
 
@@ -62,7 +62,11 @@ Real-gate and nightly optimizer workflows are intentionally self-hosted.
 - `docs/self-improvement-architecture.md`
 - `docs/eval-harness.md`
 - `docs/feature-contract-workflow.md`
-- `docs/secrets-vaultwarden.md`
+
+## Local Secrets
+
+Use a gitignored `.env` file (loaded automatically) for secrets like `ATHENA_TELEGRAM_TOKEN` and `GH_TOKEN`.
+You can start the Telegram bot via `scripts/restart-telegram.sh`, which sources `.env` by default.
 
 ## Release
 

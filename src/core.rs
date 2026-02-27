@@ -295,22 +295,19 @@ fn spawn_core_loops(
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
-    llm_for_reentry: Arc<dyn LlmProvider>,
+    _llm_for_reentry: Arc<dyn LlmProvider>,
     persona_soul_for_reentry: Option<String>,
-    langfuse: SharedLangfuse,
+    _langfuse: SharedLangfuse,
     outcome_store: Arc<TaskOutcomeStore>,
 ) {
     spawn_core_event_loop(
         rx,
         manager.clone(),
         activity,
-        knobs.clone(),
+        knobs,
         observer.clone(),
-        pulse_bus.clone(),
         memory.clone(),
-        llm_for_reentry,
         persona_soul_for_reentry,
-        langfuse.clone(),
     );
     spawn_autonomous_task_consumer(
         auto_rx,
@@ -357,10 +354,8 @@ fn init_runtime_handles(
     let cron_engine = init_cron_engine(
         memory.clone(),
         observer.clone(),
-        pulse_bus.clone(),
-        llm,
+        auto_tx.clone(),
         knobs.clone(),
-        langfuse.clone(),
     );
     let metrics = init_metrics_collector(
         config,
@@ -516,13 +511,11 @@ fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: O
 fn init_cron_engine(
     memory: Arc<MemoryStore>,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
-    llm: Arc<dyn LlmProvider>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
     knobs: SharedKnobs,
-    langfuse: SharedLangfuse,
 ) -> Arc<CronEngine> {
     let cron_engine = Arc::new(CronEngine::new(
-        memory, observer, pulse_bus, llm, knobs, langfuse,
+        memory, observer, auto_tx, knobs,
     ));
     cron_engine.clone().spawn_tick_loop();
     cron_engine
@@ -601,11 +594,8 @@ fn spawn_core_event_loop(
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
-    llm: Arc<dyn LlmProvider>,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -618,11 +608,8 @@ fn spawn_core_event_loop(
                     activity.clone(),
                     knobs.clone(),
                     observer.clone(),
-                    pulse_bus.clone(),
                     memory.clone(),
-                    llm.clone(),
                     persona_soul.clone(),
-                    langfuse.clone(),
                 )
                 .instrument(request_span),
             );
@@ -637,11 +624,8 @@ async fn handle_core_request(
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
-    llm: Arc<dyn LlmProvider>,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     activity.touch();
     let session_key = req.session.session_key();
@@ -695,12 +679,9 @@ async fn handle_core_request(
     proactive::maybe_schedule_reentry(
         knobs,
         observer,
-        pulse_bus,
-        llm,
         memory,
         session_key,
         persona_soul,
-        langfuse,
     );
 }
 
@@ -848,6 +829,36 @@ fn handle_autonomous_task_success(
         ObserverCategory::AutonomousTask,
         format!("Completed: {} ({} chars)", ghost_label, result.len()),
     );
+    if task.lane == "reentry" {
+        let trimmed = result.trim();
+        if proactive::is_refusal(trimmed) {
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Re-entry suppressed: refusal/no-followup",
+            );
+            return;
+        }
+        if trimmed.len() < 30 {
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Re-entry suppressed: response too short",
+            );
+            return;
+        }
+
+        let _ = memory.store("reentry", trimmed, None);
+        let pulse = Pulse::new(
+            crate::pulse::PulseSource::ConversationReentry,
+            crate::pulse::Urgency::Medium,
+            trimmed.to_string(),
+        )
+        .with_task_id(task_id.to_string())
+        .with_target(task.target.clone())
+        .with_ghost(ghost_label.to_string());
+        pulse_bus.send(pulse);
+        return;
+    }
+
     auto_store_task_result(task, &result, observer, memory);
 
     let outcome = format!(

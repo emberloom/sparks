@@ -144,7 +144,7 @@ impl OuathAuth {
             return Ok(tokens);
         }
 
-        let refreshed = self.refresh_tokens(&tokens.refresh_token).await?;
+        let refreshed = self.refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref()).await?;
         self.save_tokens(&refreshed).await?;
         Ok(refreshed)
     }
@@ -154,7 +154,7 @@ impl OuathAuth {
             .load_tokens()
             .await?
             .ok_or_else(|| AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into()))?;
-        let refreshed = self.refresh_tokens(&tokens.refresh_token).await?;
+        let refreshed = self.refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref()).await?;
         self.save_tokens(&refreshed).await?;
         Ok(refreshed)
     }
@@ -213,7 +213,7 @@ impl OuathAuth {
         Ok(())
     }
 
-    async fn refresh_tokens(&self, refresh_token: &str) -> Result<OuathTokens> {
+    async fn refresh_tokens(&self, refresh_token: &str, old_account_id: Option<&str>) -> Result<OuathTokens> {
         let client_id = oauth_client_id();
         let token_url = oauth_token_url();
         let params = [
@@ -243,7 +243,11 @@ impl OuathAuth {
             expires_at,
             chatgpt_account_id: None,
         };
-        self.resolve_account_id(tokens).await
+        let mut resolved = self.resolve_account_id(tokens).await?;
+        if resolved.chatgpt_account_id.is_none() {
+            resolved.chatgpt_account_id = old_account_id.map(String::from);
+        }
+        Ok(resolved)
     }
 
     async fn resolve_account_id(&self, mut tokens: OuathTokens) -> Result<OuathTokens> {

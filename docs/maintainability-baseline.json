@@ -1,12 +1,12 @@
 {
   "summary": {
     "files": 35,
-    "total_loc": 29563,
-    "functions": 987,
-    "fn_over_80": 56,
-    "fn_over_120": 34,
+    "total_loc": 30796,
+    "functions": 1039,
+    "fn_over_80": 58,
+    "fn_over_120": 35,
     "files_over_1000_loc": 11,
-    "max_file_loc": 5481,
+    "max_file_loc": 5568,
     "max_file_path": "src/main.rs",
     "max_fn_len": 835,
     "max_fn_name": "bench_memory_retrieval",
@@ -14,8 +14,8 @@
   },
   "by_file": {
     "src/config.rs": {
-      "loc": 1173,
-      "fn_count": 74,
+      "loc": 1275,
+      "fn_count": 81,
       "max_fn_len": 92,
       "fn_over_80": 1,
       "fn_over_120": 0
@@ -28,10 +28,10 @@
       "fn_over_120": 0
     },
     "src/core.rs": {
-      "loc": 1274,
+      "loc": 1285,
       "fn_count": 45,
-      "max_fn_len": 72,
-      "fn_over_80": 0,
+      "max_fn_len": 85,
+      "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/db.rs": {
@@ -49,7 +49,7 @@
       "fn_over_120": 0
     },
     "src/doctor.rs": {
-      "loc": 980,
+      "loc": 952,
       "fn_count": 41,
       "max_fn_len": 75,
       "fn_over_80": 0,
@@ -133,11 +133,11 @@
       "fn_over_120": 7
     },
     "src/main.rs": {
-      "loc": 5481,
+      "loc": 5568,
       "fn_count": 131,
       "max_fn_len": 350,
-      "fn_over_80": 11,
-      "fn_over_120": 7
+      "fn_over_80": 12,
+      "fn_over_120": 8
     },
     "src/manager.rs": {
       "loc": 1268,
@@ -147,8 +147,8 @@
       "fn_over_120": 3
     },
     "src/memory.rs": {
-      "loc": 1203,
-      "fn_count": 56,
+      "loc": 1240,
+      "fn_count": 60,
       "max_fn_len": 64,
       "fn_over_80": 0,
       "fn_over_120": 0
@@ -168,16 +168,16 @@
       "fn_over_120": 0
     },
     "src/ouath.rs": {
-      "loc": 503,
+      "loc": 507,
       "fn_count": 25,
       "max_fn_len": 76,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/proactive.rs": {
-      "loc": 1112,
-      "fn_count": 19,
-      "max_fn_len": 218,
+      "loc": 1040,
+      "fn_count": 18,
+      "max_fn_len": 215,
       "fn_over_80": 5,
       "fn_over_120": 4
     },
@@ -203,9 +203,9 @@
       "fn_over_120": 0
     },
     "src/scheduler.rs": {
-      "loc": 276,
-      "fn_count": 10,
-      "max_fn_len": 66,
+      "loc": 303,
+      "fn_count": 11,
+      "max_fn_len": 61,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
@@ -238,9 +238,9 @@
       "fn_over_120": 1
     },
     "src/telegram.rs": {
-      "loc": 1385,
-      "fn_count": 45,
-      "max_fn_len": 147,
+      "loc": 2450,
+      "fn_count": 86,
+      "max_fn_len": 178,
       "fn_over_80": 2,
       "fn_over_120": 1
     },

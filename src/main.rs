@@ -198,12 +198,31 @@ enum JobsAction {
         /// Cron expression (e.g., "0 0 9 * * MON-FRI *")
         #[arg(long)]
         cron: Option<String>,
+        /// Fire once at an absolute time (RFC3339) or relative duration (e.g., 2h30m)
+        #[arg(long)]
+        at: Option<String>,
         /// Prompt to send to LLM when the job fires
         #[arg(long)]
         prompt: String,
+        /// Route through a specific ghost
+        #[arg(long)]
+        ghost: Option<String>,
+        /// Delivery target (broadcast | session:<platform>:<user_id>:<chat_id>)
+        #[arg(long, default_value = "broadcast")]
+        target: String,
     },
     /// Delete a job by ID
     Delete {
+        /// Job ID (prefix match)
+        id: String,
+    },
+    /// Enable a job by ID
+    Enable {
+        /// Job ID (prefix match)
+        id: String,
+    },
+    /// Disable a job by ID
+    Disable {
         /// Job ID (prefix match)
         id: String,
     },
@@ -429,6 +448,14 @@ async fn main() -> anyhow::Result<()> {
     // Handle observe subcommand early — it doesn't need config/db/LLM
     if matches!(cli.command, Some(Commands::Observe)) {
         return run_observe().await;
+    }
+
+    match dotenvy::dotenv_override() {
+        Ok(path) => eprintln!("Loaded .env from {}", path.display()),
+        Err(e) if e.not_found() => {
+            // No .env file — fine, rely on process environment
+        }
+        Err(e) => eprintln!("Warning: failed to load .env: {}", e),
     }
 
     let auto_approve = cli.auto_approve;
@@ -4187,13 +4214,25 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
                         .next_run
                         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "-".to_string());
+                    let ghost_info = j
+                        .ghost
+                        .as_deref()
+                        .map(|g| format!(" — ghost: {}", g))
+                        .unwrap_or_default();
+                    let target_info = if j.target != "broadcast" {
+                        format!(" — target: {}", j.target)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  [{}] {} ({}) — next: {} — {}",
+                        "  [{}] {} ({}) — next: {} — {}{}{}",
                         &j.id[..8],
                         j.name,
                         status,
                         next,
-                        j.prompt
+                        j.prompt,
+                        ghost_info,
+                        target_info
                     );
                 }
             }
@@ -4202,8 +4241,18 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             name,
             every,
             cron,
+            at,
             prompt,
+            ghost,
+            target,
         } => {
+            let schedule_count =
+                u8::from(every.is_some()) + u8::from(cron.is_some()) + u8::from(at.is_some());
+            if schedule_count != 1 {
+                eprintln!("Specify exactly one of --every, --cron, or --at");
+                return Ok(());
+            }
+
             let schedule = if let Some(secs) = every {
                 Schedule::Interval {
                     every_secs: secs,
@@ -4211,11 +4260,23 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
                 }
             } else if let Some(expr) = cron {
                 Schedule::Cron { expression: expr }
+            } else if let Some(at_str) = at {
+                let at_time = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&at_str) {
+                    ts.with_timezone(&chrono::Utc)
+                } else {
+                    let dur = humantime::parse_duration(&at_str).map_err(|e| {
+                        anyhow::anyhow!("Invalid --at '{}': {}", at_str, e)
+                    })?;
+                    chrono::Utc::now()
+                        + chrono::Duration::from_std(dur).map_err(|e| {
+                            anyhow::anyhow!("Invalid --at duration '{}': {}", at_str, e)
+                        })?
+                };
+                Schedule::OneShot { at: at_time }
             } else {
-                eprintln!("Specify --every <secs> or --cron <expression>");
-                return Ok(());
+                unreachable!("schedule_count validated")
             };
-            let id = engine.create_job(&name, schedule, &prompt, None)?;
+            let id = engine.create_job(&name, schedule, &prompt, ghost.as_deref(), &target)?;
             println!("Created job: {} ({})", name, &id[..8]);
         }
         JobsAction::Delete { id } => {
@@ -4227,6 +4288,32 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             if let Some(full_id) = full_id {
                 engine.delete_job(&full_id)?;
                 println!("Deleted job: {}", &full_id[..8]);
+            } else {
+                println!("Job not found: {}", id);
+            }
+        }
+        JobsAction::Enable { id } => {
+            let jobs = engine.list_jobs()?;
+            let full_id = jobs
+                .iter()
+                .find(|j| j.id.starts_with(&id))
+                .map(|j| j.id.clone());
+            if let Some(full_id) = full_id {
+                engine.toggle_job(&full_id, true)?;
+                println!("Enabled job: {}", &full_id[..8]);
+            } else {
+                println!("Job not found: {}", id);
+            }
+        }
+        JobsAction::Disable { id } => {
+            let jobs = engine.list_jobs()?;
+            let full_id = jobs
+                .iter()
+                .find(|j| j.id.starts_with(&id))
+                .map(|j| j.id.clone());
+            if let Some(full_id) = full_id {
+                engine.toggle_job(&full_id, false)?;
+                println!("Disabled job: {}", &full_id[..8]);
             } else {
                 println!("Job not found: {}", id);
             }
