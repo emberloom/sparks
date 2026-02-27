@@ -219,6 +219,25 @@ struct ApiFunctionDefinition {
     parameters: Value,
 }
 
+fn tool_schemas_to_api(tools: &[ToolSchema]) -> Option<Vec<ApiToolDefinition>> {
+    if tools.is_empty() {
+        return None;
+    }
+    Some(
+        tools
+            .iter()
+            .map(|t| ApiToolDefinition {
+                def_type: "function".to_string(),
+                function: ApiFunctionDefinition {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
+            })
+            .collect(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Provider trait
 // ---------------------------------------------------------------------------
@@ -383,6 +402,39 @@ impl OuathClient {
         url.contains("chatgpt.com") || url.contains("backend-api")
     }
 
+    async fn send_with_auth_retry<T: Serialize + ?Sized>(
+        &self,
+        style: OuathApiStyle,
+        body: &T,
+        extra_header: Option<(&str, &str)>,
+    ) -> Result<(reqwest::Response, Instant)> {
+        let mut tokens = self.auth.ensure_valid_tokens().await?;
+        let mut start = Instant::now();
+        let mut resp = send_ouath_request(
+            &self.client,
+            &self.endpoint(style),
+            body,
+            &tokens,
+            self.requires_account_id(),
+            extra_header,
+        )
+        .await?;
+        if matches!(resp.status().as_u16(), 401 | 403) {
+            tokens = self.auth.force_refresh().await?;
+            start = Instant::now();
+            resp = send_ouath_request(
+                &self.client,
+                &self.endpoint(style),
+                body,
+                &tokens,
+                self.requires_account_id(),
+                extra_header,
+            )
+            .await?;
+        }
+        Ok((resp, start))
+    }
+
     async fn chat_with_tools_chat_completions(
         &self,
         messages: &[ChatMessage],
@@ -403,23 +455,7 @@ impl OuathClient {
             .filter_map(|m| chat_message_to_wire(m))
             .collect();
 
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let req = OpenAiChatRequestWithTools {
             model,
@@ -431,31 +467,9 @@ impl OuathClient {
             stream_options: None,
         };
 
-        let mut tokens = self.auth.ensure_valid_tokens().await?;
-        let mut start = Instant::now();
-        let mut resp = send_ouath_request(
-            &self.client,
-            &self.endpoint(OuathApiStyle::ChatCompletions),
-            &req,
-            &tokens,
-            self.requires_account_id(),
-            None,
-        )
-        .await?;
-        if matches!(resp.status().as_u16(), 401 | 403) {
-            tokens = self.auth.force_refresh().await?;
-            start = Instant::now();
-            resp = send_ouath_request(
-                &self.client,
-                &self.endpoint(OuathApiStyle::ChatCompletions),
-                &req,
-                &tokens,
-                self.requires_account_id(),
-                None,
-            )
+        let (resp, start) = self
+            .send_with_auth_retry(OuathApiStyle::ChatCompletions, &req, None)
             .await?;
-        }
-
         let latency = start.elapsed();
         crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
@@ -531,23 +545,7 @@ impl OuathClient {
         );
 
         let (instructions, input) = build_responses_input(messages);
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let mut req = serde_json::json!({
             "model": model,
@@ -589,31 +587,13 @@ impl OuathClient {
             );
         }
 
-        let mut tokens = self.auth.ensure_valid_tokens().await?;
-        let mut start = Instant::now();
-        let mut resp = send_ouath_request(
-            &self.client,
-            &self.endpoint(OuathApiStyle::Responses),
-            &req,
-            &tokens,
-            self.requires_account_id(),
-            Some(("OpenAI-Beta", "responses=experimental")),
-        )
-        .await?;
-        if matches!(resp.status().as_u16(), 401 | 403) {
-            tokens = self.auth.force_refresh().await?;
-            start = Instant::now();
-            resp = send_ouath_request(
-                &self.client,
-                &self.endpoint(OuathApiStyle::Responses),
+        let (resp, start) = self
+            .send_with_auth_retry(
+                OuathApiStyle::Responses,
                 &req,
-                &tokens,
-                self.requires_account_id(),
                 Some(("OpenAI-Beta", "responses=experimental")),
             )
             .await?;
-        }
-
         let latency = start.elapsed();
         crate::introspect::record_llm_latency(latency.as_millis() as u64);
 
@@ -813,23 +793,7 @@ impl OuathClient {
             .filter_map(|m| chat_message_to_wire(m))
             .collect();
 
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let req = OpenAiChatRequestWithTools {
             model,
@@ -843,28 +807,9 @@ impl OuathClient {
             }),
         };
 
-        let mut tokens = self.auth.ensure_valid_tokens().await?;
-        let mut resp = send_ouath_request(
-            &self.client,
-            &self.endpoint(OuathApiStyle::ChatCompletions),
-            &req,
-            &tokens,
-            self.requires_account_id(),
-            None,
-        )
-        .await?;
-        if matches!(resp.status().as_u16(), 401 | 403) {
-            tokens = self.auth.force_refresh().await?;
-            resp = send_ouath_request(
-                &self.client,
-                &self.endpoint(OuathApiStyle::ChatCompletions),
-                &req,
-                &tokens,
-                self.requires_account_id(),
-                None,
-            )
+        let (resp, _start) = self
+            .send_with_auth_retry(OuathApiStyle::ChatCompletions, &req, None)
             .await?;
-        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -1032,23 +977,7 @@ impl OuathClient {
         );
 
         let (instructions, input) = build_responses_input(messages);
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let mut req = serde_json::json!({
             "model": model,
@@ -1091,28 +1020,13 @@ impl OuathClient {
             );
         }
 
-        let mut tokens = self.auth.ensure_valid_tokens().await?;
-        let mut resp = send_ouath_request(
-            &self.client,
-            &self.endpoint(OuathApiStyle::Responses),
-            &req,
-            &tokens,
-            self.requires_account_id(),
-            Some(("OpenAI-Beta", "responses=experimental")),
-        )
-        .await?;
-        if matches!(resp.status().as_u16(), 401 | 403) {
-            tokens = self.auth.force_refresh().await?;
-            resp = send_ouath_request(
-                &self.client,
-                &self.endpoint(OuathApiStyle::Responses),
+        let (resp, _start) = self
+            .send_with_auth_retry(
+                OuathApiStyle::Responses,
                 &req,
-                &tokens,
-                self.requires_account_id(),
                 Some(("OpenAI-Beta", "responses=experimental")),
             )
             .await?;
-        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -2034,23 +1948,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .collect();
 
         // Convert ToolSchema to API format
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let req = OpenAiChatRequestWithTools {
             model,
@@ -2189,23 +2087,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .filter_map(|m| chat_message_to_wire(m))
             .collect();
 
-        let api_tools: Option<Vec<ApiToolDefinition>> = if has_tools {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| ApiToolDefinition {
-                        def_type: "function".to_string(),
-                        function: ApiFunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: t.parameters.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let api_tools = tool_schemas_to_api(tools);
 
         let req = OpenAiChatRequestWithTools {
             model,

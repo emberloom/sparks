@@ -1849,8 +1849,7 @@ fn write_self_build_artifacts(
     Ok((json_path, md_path))
 }
 
-fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
-    let mut out = String::new();
+fn render_self_build_md_header(out: &mut String, ledger: &SelfBuildLedger) {
     out.push_str("# Self-Build Run Ledger\n\n");
     out.push_str(&format!("- run_id: `{}`\n", ledger.run_id));
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
@@ -1885,29 +1884,30 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         out.push_str(&format!("- cleanup_error: {}\n", err));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_dispatch(out: &mut String, dispatch: &SelfBuildDispatchSummary) {
     out.push_str("## Dispatch\n\n");
-    out.push_str(&format!("- status: `{}`\n", ledger.dispatch.status));
-    out.push_str(&format!("- command: `{}`\n", ledger.dispatch.command));
+    out.push_str(&format!("- status: `{}`\n", dispatch.status));
+    out.push_str(&format!("- command: `{}`\n", dispatch.command));
     out.push_str(&format!(
         "- exit_code: `{}` timed_out: `{}` duration_ms: `{}`\n",
-        ledger
-            .dispatch
+        dispatch
             .exit_code
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        ledger.dispatch.timed_out,
-        ledger.dispatch.duration_ms
+        dispatch.timed_out,
+        dispatch.duration_ms
     ));
     out.push_str(&format!(
         "- attempts: `{}` noop_retry_used: `{}`\n",
-        ledger.dispatch.attempts, ledger.dispatch.noop_retry_used
+        dispatch.attempts, dispatch.noop_retry_used
     ));
     out.push_str(&format!(
         "- task_id: `{}`\n",
-        ledger.dispatch.task_id.as_deref().unwrap_or("-")
+        dispatch.task_id.as_deref().unwrap_or("-")
     ));
-    if let Some(outcome) = &ledger.dispatch.outcome {
+    if let Some(outcome) = &dispatch.outcome {
         out.push_str(&format!(
             "- outcome_status: `{}` error: `{}` verify: `{}/{}` rolled_back: `{}`\n",
             outcome.status.as_deref().unwrap_or("-"),
@@ -1918,11 +1918,13 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         ));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_maintenance(out: &mut String, maintenance: &[SelfBuildMaintenanceStep]) {
     out.push_str("## Maintenance\n\n");
     out.push_str("| step | status | exit_code | timed_out | duration_ms |\n");
     out.push_str("|---|---|---|---|---|\n");
-    for m in &ledger.maintenance {
+    for m in maintenance {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             m.name,
@@ -1935,35 +1937,39 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         ));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_guardrails(out: &mut String, guardrails: &SelfBuildGuardrailReport) {
     out.push_str("## Guardrails\n\n");
-    out.push_str(&format!("- passed: `{}`\n", ledger.guardrails.passed));
+    out.push_str(&format!("- passed: `{}`\n", guardrails.passed));
     out.push_str(&format!(
         "- hard_blocked: `{}` codes: `{}`\n",
-        ledger.guardrails.hard_blocked,
-        if ledger.guardrails.hard_block_codes.is_empty() {
+        guardrails.hard_blocked,
+        if guardrails.hard_block_codes.is_empty() {
             "-".to_string()
         } else {
-            ledger.guardrails.hard_block_codes.join(",")
+            guardrails.hard_block_codes.join(",")
         }
     ));
-    if !ledger.guardrails.details.is_empty() {
+    if !guardrails.details.is_empty() {
         out.push_str("- details:\n");
-        for d in &ledger.guardrails.details {
+        for d in &guardrails.details {
             out.push_str(&format!(
                 "  - code={} hard_block={} message={}\n",
                 d.code, d.hard_block, d.message
             ));
         }
     }
-    if !ledger.guardrails.violations.is_empty() {
+    if !guardrails.violations.is_empty() {
         out.push_str("- violations:\n");
-        for v in &ledger.guardrails.violations {
+        for v in &guardrails.violations {
             out.push_str(&format!("  - {}\n", v));
         }
     }
     out.push('\n');
+}
 
+fn render_self_build_md_review(out: &mut String, ledger: &SelfBuildLedger) {
     out.push_str("## Critic\n\n");
     out.push_str(&format!("- score: `{:.2}`\n", ledger.critic.score));
     out.push_str(&format!("- passed: `{}`\n", ledger.critic.passed));
@@ -2012,32 +2018,32 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         }
     }
     out.push('\n');
+}
 
+fn render_self_build_md_promotion_exec(out: &mut String, exec: &SelfBuildPromotionExecution) {
     out.push_str("## Promotion Execution\n\n");
     out.push_str(&format!(
         "- mode: `{}` status: `{}` merged: `{}`\n",
-        ledger.promotion_execution.mode,
-        ledger.promotion_execution.status,
-        ledger.promotion_execution.merged
+        exec.mode, exec.status, exec.merged
     ));
-    if let Some(branch) = &ledger.promotion_execution.branch {
+    if let Some(branch) = &exec.branch {
         out.push_str(&format!("- branch: `{}`\n", branch));
     }
-    if let Some(commit) = &ledger.promotion_execution.commit {
+    if let Some(commit) = &exec.commit {
         out.push_str(&format!("- commit: `{}`\n", commit));
     }
-    if let Some(pr) = &ledger.promotion_execution.pr_url {
+    if let Some(pr) = &exec.pr_url {
         out.push_str(&format!("- pr_url: `{}`\n", pr));
     }
-    if !ledger.promotion_execution.reasons.is_empty() {
+    if !exec.reasons.is_empty() {
         out.push_str("- reasons:\n");
-        for r in &ledger.promotion_execution.reasons {
+        for r in &exec.reasons {
             out.push_str(&format!("  - {}\n", r));
         }
     }
-    if !ledger.promotion_execution.commands.is_empty() {
+    if !exec.commands.is_empty() {
         out.push_str("- commands:\n");
-        for c in &ledger.promotion_execution.commands {
+        for c in &exec.commands {
             out.push_str(&format!(
                 "  - {} status={} exit={} timed_out={} duration_ms={}\n",
                 c.name,
@@ -2051,23 +2057,33 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         }
     }
     out.push('\n');
+}
 
+fn render_self_build_md_diff(out: &mut String, changed_files: &[String], diff_numstat: &[String]) {
     out.push_str("## Diff Summary\n\n");
-    out.push_str(&format!(
-        "- changed_files: `{}`\n",
-        ledger.changed_files.len()
-    ));
-    if !ledger.changed_files.is_empty() {
-        for p in &ledger.changed_files {
+    out.push_str(&format!("- changed_files: `{}`\n", changed_files.len()));
+    if !changed_files.is_empty() {
+        for p in changed_files {
             out.push_str(&format!("  - `{}`\n", p));
         }
     }
-    if !ledger.diff_numstat.is_empty() {
+    if !diff_numstat.is_empty() {
         out.push_str("- numstat:\n");
-        for line in &ledger.diff_numstat {
+        for line in diff_numstat {
             out.push_str(&format!("  - `{}`\n", line));
         }
     }
+}
+
+fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
+    let mut out = String::new();
+    render_self_build_md_header(&mut out, ledger);
+    render_self_build_md_dispatch(&mut out, &ledger.dispatch);
+    render_self_build_md_maintenance(&mut out, &ledger.maintenance);
+    render_self_build_md_guardrails(&mut out, &ledger.guardrails);
+    render_self_build_md_review(&mut out, ledger);
+    render_self_build_md_promotion_exec(&mut out, &ledger.promotion_execution);
+    render_self_build_md_diff(&mut out, &ledger.changed_files, &ledger.diff_numstat);
     out
 }
 
@@ -2107,6 +2123,117 @@ async fn handle_self_build(
             )
             .await
         }
+    }
+}
+
+fn resolve_dispatch_status(
+    run: &CommandRunResult,
+    outcome: Option<&SelfBuildOutcomeRecord>,
+) -> String {
+    if run.timed_out {
+        "timeout".to_string()
+    } else if let Some(status) = outcome.and_then(|o| o.status.clone()) {
+        status
+    } else if run.exit_code == Some(0) {
+        "contract_error".to_string()
+    } else {
+        "failed".to_string()
+    }
+}
+
+async fn collect_worktree_changed_files(worktree: &Path) -> Vec<String> {
+    let status_run =
+        run_command_capture(worktree, "git", &args(&["status", "--porcelain"]), 60).await;
+    if command_succeeded(&status_run) {
+        parse_git_status_paths(&status_run.stdout)
+    } else {
+        Vec::new()
+    }
+}
+
+async fn collect_self_build_git_artifacts(
+    worktree: &Path,
+) -> (String, Vec<String>, String) {
+    let diff_run =
+        run_command_capture(worktree, "git", &args(&["diff", "--no-color"]), 120).await;
+    let diff_text = command_combined_output(&diff_run);
+    let numstat_run =
+        run_command_capture(worktree, "git", &args(&["diff", "--numstat"]), 60).await;
+    let diff_numstat = if command_succeeded(&numstat_run) {
+        numstat_run
+            .stdout
+            .lines()
+            .take(100)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let branch_run =
+        run_command_capture(worktree, "git", &args(&["branch", "--show-current"]), 30).await;
+    let branch_name = if command_succeeded(&branch_run) {
+        branch_run.stdout.trim().to_string()
+    } else {
+        String::new()
+    };
+    (diff_text, diff_numstat, branch_name)
+}
+
+async fn run_self_build_maintenance(
+    worktree: &Path,
+    profile: &str,
+) -> Vec<SelfBuildMaintenanceStep> {
+    let specs = maintenance_command_specs(profile);
+    let mut rows = Vec::new();
+    for spec in specs {
+        let run =
+            run_command_capture(worktree, spec.program, &spec.args, spec.timeout_secs).await;
+        let status = if run.timed_out {
+            "timeout"
+        } else if run.exit_code == Some(0) {
+            "passed"
+        } else {
+            "failed"
+        };
+        rows.push(SelfBuildMaintenanceStep {
+            name: spec.name.to_string(),
+            command: run.command,
+            exit_code: run.exit_code,
+            timed_out: run.timed_out,
+            duration_ms: run.duration_ms,
+            status: status.to_string(),
+            stdout_tail: tail_text(&run.stdout, 900),
+            stderr_tail: tail_text(&run.stderr, 900),
+        });
+    }
+    rows
+}
+
+fn print_self_build_summary(
+    ledger: &SelfBuildLedger,
+    json_path: &Path,
+    md_path: &Path,
+    review_json_path: &Path,
+    review_md_path: &Path,
+) {
+    println!("self_build_json={}", json_path.display());
+    println!("self_build_md={}", md_path.display());
+    println!("self_build_review_json={}", review_json_path.display());
+    println!("self_build_review_md={}", review_md_path.display());
+    println!("self_build_run_id={}", ledger.run_id);
+    println!(
+        "self_build_auto_promote_recommended={}",
+        ledger.promotion.auto_promote_recommended
+    );
+    println!("self_build_guardrails_passed={}", ledger.guardrails.passed);
+    println!("self_build_critic_score={:.2}", ledger.critic.score);
+    println!(
+        "self_build_promotion_status={}",
+        ledger.promotion_execution.status
+    );
+    if let Some(url) = &ledger.promotion_execution.pr_url {
+        println!("self_build_pr_url={}", url);
     }
 }
 
@@ -2201,24 +2328,11 @@ async fn run_self_build(
     } else {
         None
     };
-    let mut dispatch_status = if dispatch_run.timed_out {
-        "timeout".to_string()
-    } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
-        status
-    } else if dispatch_run.exit_code == Some(0) {
-        "contract_error".to_string()
-    } else {
-        "failed".to_string()
-    };
+    let mut dispatch_status =
+        resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
     let mut dispatch_attempts = 1u8;
     let mut noop_retry_used = false;
-    let mut status_run =
-        run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
-    let mut changed_files = if command_succeeded(&status_run) {
-        parse_git_status_paths(&status_run.stdout)
-    } else {
-        Vec::new()
-    };
+    let mut changed_files = collect_worktree_changed_files(&worktree).await;
     if dispatch_status == "succeeded"
         && dispatch_run.exit_code == Some(0)
         && changed_files.is_empty()
@@ -2241,22 +2355,9 @@ async fn run_self_build(
         } else {
             None
         };
-        dispatch_status = if dispatch_run.timed_out {
-            "timeout".to_string()
-        } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
-            status
-        } else if dispatch_run.exit_code == Some(0) {
-            "contract_error".to_string()
-        } else {
-            "failed".to_string()
-        };
-        status_run =
-            run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
-        changed_files = if command_succeeded(&status_run) {
-            parse_git_status_paths(&status_run.stdout)
-        } else {
-            Vec::new()
-        };
+        dispatch_status =
+            resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
+        changed_files = collect_worktree_changed_files(&worktree).await;
     }
     let dispatch_summary = SelfBuildDispatchSummary {
         command: dispatch_run.command.clone(),
@@ -2272,52 +2373,10 @@ async fn run_self_build(
         stderr_tail: tail_text(&dispatch_run.stderr, 1200),
     };
 
-    let diff_run = run_command_capture(&worktree, "git", &args(&["diff", "--no-color"]), 120).await;
-    let diff_text = command_combined_output(&diff_run);
-    let numstat_run =
-        run_command_capture(&worktree, "git", &args(&["diff", "--numstat"]), 60).await;
-    let diff_numstat = if command_succeeded(&numstat_run) {
-        numstat_run
-            .stdout
-            .lines()
-            .take(100)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let branch_run =
-        run_command_capture(&worktree, "git", &args(&["branch", "--show-current"]), 30).await;
-    let branch_name = if command_succeeded(&branch_run) {
-        branch_run.stdout.trim().to_string()
-    } else {
-        String::new()
-    };
-
-    let specs = maintenance_command_specs(&maintenance_profile);
-    let mut maintenance_rows = Vec::new();
-    for spec in specs {
-        let run = run_command_capture(&worktree, spec.program, &spec.args, spec.timeout_secs).await;
-        let status = if run.timed_out {
-            "timeout"
-        } else if run.exit_code == Some(0) {
-            "passed"
-        } else {
-            "failed"
-        };
-        maintenance_rows.push(SelfBuildMaintenanceStep {
-            name: spec.name.to_string(),
-            command: run.command,
-            exit_code: run.exit_code,
-            timed_out: run.timed_out,
-            duration_ms: run.duration_ms,
-            status: status.to_string(),
-            stdout_tail: tail_text(&run.stdout, 900),
-            stderr_tail: tail_text(&run.stderr, 900),
-        });
-    }
+    let (diff_text, diff_numstat, branch_name) =
+        collect_self_build_git_artifacts(&worktree).await;
+    let maintenance_rows =
+        run_self_build_maintenance(&worktree, &maintenance_profile).await;
 
     let guardrails =
         evaluate_self_build_guardrails(&changed_files, &diff_text, &dispatch_output, &branch_name);
@@ -2403,24 +2462,7 @@ async fn run_self_build(
     };
 
     let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;
-    println!("self_build_json={}", json_path.display());
-    println!("self_build_md={}", md_path.display());
-    println!("self_build_review_json={}", review_json_path.display());
-    println!("self_build_review_md={}", review_md_path.display());
-    println!("self_build_run_id={}", ledger.run_id);
-    println!(
-        "self_build_auto_promote_recommended={}",
-        ledger.promotion.auto_promote_recommended
-    );
-    println!("self_build_guardrails_passed={}", ledger.guardrails.passed);
-    println!("self_build_critic_score={:.2}", ledger.critic.score);
-    println!(
-        "self_build_promotion_status={}",
-        ledger.promotion_execution.status
-    );
-    if let Some(url) = &ledger.promotion_execution.pr_url {
-        println!("self_build_pr_url={}", url);
-    }
+    print_self_build_summary(&ledger, &json_path, &md_path, &review_json_path, &review_md_path);
 
     let memory_category = if ledger.critic.passed {
         "self_build_run"
@@ -4197,6 +4239,46 @@ fn handle_memory(
     Ok(())
 }
 
+fn parse_job_schedule(
+    every: Option<u64>,
+    cron: Option<String>,
+    at: Option<String>,
+) -> anyhow::Result<Schedule> {
+    if let Some(secs) = every {
+        return Ok(Schedule::Interval {
+            every_secs: secs,
+            jitter: 0.1,
+        });
+    }
+    if let Some(expr) = cron {
+        return Ok(Schedule::Cron { expression: expr });
+    }
+    if let Some(at_str) = at {
+        let at_time = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&at_str) {
+            ts.with_timezone(&chrono::Utc)
+        } else {
+            let dur = humantime::parse_duration(&at_str)
+                .map_err(|e| anyhow::anyhow!("Invalid --at '{}': {}", at_str, e))?;
+            chrono::Utc::now()
+                + chrono::Duration::from_std(dur)
+                    .map_err(|e| anyhow::anyhow!("Invalid --at duration '{}': {}", at_str, e))?
+        };
+        return Ok(Schedule::OneShot { at: at_time });
+    }
+    anyhow::bail!("Specify exactly one of --every, --cron, or --at")
+}
+
+fn resolve_job_by_prefix(
+    engine: &scheduler::CronEngine,
+    prefix: &str,
+) -> anyhow::Result<Option<String>> {
+    let jobs = engine.list_jobs()?;
+    Ok(jobs
+        .iter()
+        .find(|j| j.id.starts_with(prefix))
+        .map(|j| j.id.clone()))
+}
+
 fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<()> {
     let engine = handle
         .cron_engine
@@ -4252,40 +4334,12 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
                 eprintln!("Specify exactly one of --every, --cron, or --at");
                 return Ok(());
             }
-
-            let schedule = if let Some(secs) = every {
-                Schedule::Interval {
-                    every_secs: secs,
-                    jitter: 0.1,
-                }
-            } else if let Some(expr) = cron {
-                Schedule::Cron { expression: expr }
-            } else if let Some(at_str) = at {
-                let at_time = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&at_str) {
-                    ts.with_timezone(&chrono::Utc)
-                } else {
-                    let dur = humantime::parse_duration(&at_str).map_err(|e| {
-                        anyhow::anyhow!("Invalid --at '{}': {}", at_str, e)
-                    })?;
-                    chrono::Utc::now()
-                        + chrono::Duration::from_std(dur).map_err(|e| {
-                            anyhow::anyhow!("Invalid --at duration '{}': {}", at_str, e)
-                        })?
-                };
-                Schedule::OneShot { at: at_time }
-            } else {
-                unreachable!("schedule_count validated")
-            };
+            let schedule = parse_job_schedule(every, cron, at)?;
             let id = engine.create_job(&name, schedule, &prompt, ghost.as_deref(), &target)?;
             println!("Created job: {} ({})", name, &id[..8]);
         }
         JobsAction::Delete { id } => {
-            let jobs = engine.list_jobs()?;
-            let full_id = jobs
-                .iter()
-                .find(|j| j.id.starts_with(&id))
-                .map(|j| j.id.clone());
-            if let Some(full_id) = full_id {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
                 engine.delete_job(&full_id)?;
                 println!("Deleted job: {}", &full_id[..8]);
             } else {
@@ -4293,12 +4347,7 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             }
         }
         JobsAction::Enable { id } => {
-            let jobs = engine.list_jobs()?;
-            let full_id = jobs
-                .iter()
-                .find(|j| j.id.starts_with(&id))
-                .map(|j| j.id.clone());
-            if let Some(full_id) = full_id {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
                 engine.toggle_job(&full_id, true)?;
                 println!("Enabled job: {}", &full_id[..8]);
             } else {
@@ -4306,12 +4355,7 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             }
         }
         JobsAction::Disable { id } => {
-            let jobs = engine.list_jobs()?;
-            let full_id = jobs
-                .iter()
-                .find(|j| j.id.starts_with(&id))
-                .map(|j| j.id.clone());
-            if let Some(full_id) = full_id {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
                 engine.toggle_job(&full_id, false)?;
                 println!("Disabled job: {}", &full_id[..8]);
             } else {
