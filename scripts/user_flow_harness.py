@@ -75,6 +75,12 @@ def start_mock_linear_server(ledger_path: Path, issue_path: Path) -> tuple[subpr
 
 def build_config(path: Path, db_path: Path, api_base: str, webhook_port: int) -> None:
     content = f"""
+[llm]
+provider = "ollama"
+
+[ollama]
+url = "http://127.0.0.1:11434"
+
 [db]
 path = "{db_path}"
 
@@ -121,6 +127,7 @@ def start_athena(config_path: Path, log_path: Path, athena_bin: str | None) -> s
     log_file = log_path.open("w", encoding="utf-8")
     env = os.environ.copy()
     env["ATHENA_DISABLE_HOME_PROFILES"] = "1"
+    env["ATHENA_SKIP_LLM_HEALTHCHECK"] = "1"
     env["LINEAR_API_KEY"] = "test"
     env["LINEAR_WEBHOOK_SECRET"] = "test-secret"
 

@@ -1106,6 +1106,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
     let mut llm: Option<Arc<dyn LlmProvider>> = None;
     let mut selected_provider = config.llm.provider.clone();
     let mut last_err: Option<crate::error::AthenaError> = None;
+    let skip_health = llm_health_check_disabled();
 
     for provider_name in config.provider_candidates() {
         let candidate = match config.build_llm_provider_for(&provider_name) {
@@ -1120,6 +1121,16 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
                 continue;
             }
         };
+
+        if skip_health {
+            eprintln!(
+                "Skipping LLM health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+                candidate.provider_name()
+            );
+            selected_provider = provider_name;
+            llm = Some(candidate);
+            break;
+        }
 
         eprint!("Connecting to {}... ", candidate.provider_name());
         match candidate.health_check().await {
@@ -1160,6 +1171,14 @@ async fn connect_orchestrator(
         return Ok(orchestrator);
     }
 
+    if llm_health_check_disabled() {
+        eprintln!(
+            "Skipping orchestrator health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+            orchestrator.provider_name()
+        );
+        return Ok(orchestrator);
+    }
+
     eprint!("Connecting to {}... ", orchestrator.provider_name());
     match orchestrator.health_check().await {
         Ok(()) => {
@@ -1175,6 +1194,16 @@ async fn connect_orchestrator(
             Ok(llm.clone())
         }
     }
+}
+
+fn llm_health_check_disabled() -> bool {
+    matches!(
+        std::env::var("ATHENA_SKIP_LLM_HEALTHCHECK")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 async fn init_embedder_opt(config: &Config) -> Option<Arc<Embedder>> {
