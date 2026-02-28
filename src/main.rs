@@ -2,6 +2,7 @@
 
 mod config;
 mod confirm;
+mod ci_monitor;
 mod core;
 mod db;
 mod docker;
@@ -89,6 +90,30 @@ enum Commands {
     },
     /// Watch internal observer events in real time
     Observe,
+    /// Monitor CI status for a PR and optionally heal/merge
+    CiMonitor {
+        /// PR URL to monitor
+        #[arg(long)]
+        pr: String,
+        /// Optional PR branch name (auto-detected when omitted)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Auto-merge after CI passes
+        #[arg(long)]
+        auto_merge: bool,
+        /// Attempt self-heal on CI failures
+        #[arg(long)]
+        heal: bool,
+        /// Max self-heal attempts
+        #[arg(long, default_value_t = ci_monitor::CI_HEAL_MAX_ATTEMPTS)]
+        max_heal: u8,
+        /// Seconds between CI polls
+        #[arg(long, default_value_t = ci_monitor::CI_POLL_INTERVAL_SECS)]
+        poll_interval: u64,
+        /// Max total wait time in seconds
+        #[arg(long, default_value_t = ci_monitor::CI_POLL_TIMEOUT_SECS)]
+        timeout: u64,
+    },
     /// Manage scheduled jobs
     Jobs {
         #[command(subcommand)]
@@ -413,6 +438,9 @@ enum SelfBuildAction {
         /// Base branch for PR creation/merge flow
         #[arg(long, default_value = "main")]
         base_branch: String,
+        /// Monitor CI after opening a PR
+        #[arg(long)]
+        monitor_ci: bool,
     },
 }
 
@@ -593,6 +621,27 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Observe) => unreachable!(), // handled above
+        Some(Commands::CiMonitor {
+            pr,
+            branch,
+            auto_merge,
+            heal,
+            max_heal,
+            poll_interval,
+            timeout,
+        }) => {
+            run_ci_monitor(
+                config,
+                pr,
+                branch,
+                auto_merge,
+                heal,
+                max_heal,
+                poll_interval,
+                timeout,
+            )
+            .await?
+        }
         Some(Commands::Jobs { action }) => {
             let handle = AthenaCore::start(config, memory).await?;
             handle_jobs(action, &handle)?;
@@ -832,6 +881,7 @@ struct SelfBuildLedger {
     review_checklist: SelfBuildReviewChecklist,
     promotion: SelfBuildPromotionDecision,
     promotion_execution: SelfBuildPromotionExecution,
+    ci_monitor: Option<ci_monitor::CiMonitorReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -2060,6 +2110,54 @@ fn render_self_build_md_promotion_exec(out: &mut String, exec: &SelfBuildPromoti
     out.push('\n');
 }
 
+fn render_self_build_md_ci_monitor(out: &mut String, monitor: &ci_monitor::CiMonitorReport) {
+    out.push_str("## CI Monitor\n\n");
+    out.push_str(&format!("- pr_url: `{}`\n", monitor.pr_url));
+    if let Some(branch) = &monitor.branch {
+        out.push_str(&format!("- branch: `{}`\n", branch));
+    }
+    out.push_str(&format!(
+        "- final_status: `{}` merged_after_ci: `{}`\n",
+        monitor.final_status, monitor.merged_after_ci
+    ));
+    out.push_str(&format!(
+        "- started_utc: `{}` finished_utc: `{}`\n",
+        monitor.started_utc, monitor.finished_utc
+    ));
+    out.push_str(&format!(
+        "- polls: `{}` heal_attempts: `{}`\n",
+        monitor.polls.len(),
+        monitor.heal_attempts.len()
+    ));
+    if let Some(last) = monitor.polls.last() {
+        out.push_str(&format!(
+            "- last_overall: `{}` at `{}`\n",
+            last.overall, last.timestamp_utc
+        ));
+        if !last.checks.is_empty() {
+            out.push_str("- last_checks:\n");
+            for c in &last.checks {
+                out.push_str(&format!(
+                    "  - {} status={} conclusion={}\n",
+                    c.name, c.status, c.conclusion
+                ));
+            }
+        }
+    }
+    if !monitor.heal_attempts.is_empty() {
+        out.push_str("- heal_attempts:\n");
+        for h in &monitor.heal_attempts {
+            out.push_str(&format!(
+                "  - attempt={} status={} commit={}\n",
+                h.attempt,
+                h.dispatch_status,
+                h.commit_sha.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    out.push('\n');
+}
+
 fn render_self_build_md_diff(out: &mut String, changed_files: &[String], diff_numstat: &[String]) {
     out.push_str("## Diff Summary\n\n");
     out.push_str(&format!("- changed_files: `{}`\n", changed_files.len()));
@@ -2084,6 +2182,9 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
     render_self_build_md_guardrails(&mut out, &ledger.guardrails);
     render_self_build_md_review(&mut out, ledger);
     render_self_build_md_promotion_exec(&mut out, &ledger.promotion_execution);
+    if let Some(ci) = &ledger.ci_monitor {
+        render_self_build_md_ci_monitor(&mut out, ci);
+    }
     render_self_build_md_diff(&mut out, &ledger.changed_files, &ledger.diff_numstat);
     out
 }
@@ -2106,6 +2207,7 @@ async fn handle_self_build(
             allow_auto_promote,
             promote_mode,
             base_branch,
+            monitor_ci,
         } => {
             run_self_build(
                 config,
@@ -2121,10 +2223,77 @@ async fn handle_self_build(
                 allow_auto_promote,
                 promote_mode,
                 base_branch,
+                monitor_ci,
             )
             .await
         }
     }
+}
+
+async fn run_ci_monitor(
+    config: Config,
+    pr: String,
+    branch: Option<String>,
+    auto_merge: bool,
+    heal: bool,
+    max_heal: u8,
+    poll_interval: u64,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let base_repo = resolve_repo_root().await?;
+    let report = ci_monitor::monitor_pr_ci(
+        &pr,
+        branch.as_deref(),
+        &base_repo,
+        &config,
+        auto_merge,
+        heal,
+        poll_interval,
+        timeout,
+        max_heal,
+    )
+    .await;
+    let json_path = write_ci_monitor_artifact(&base_repo, &report)?;
+    println!("ci_monitor_report={}", json_path.display());
+    println!("ci_monitor_status={}", report.final_status);
+    println!("ci_monitor_merged={}", report.merged_after_ci);
+    println!("ci_monitor_polls={}", report.polls.len());
+    println!("ci_monitor_heal_attempts={}", report.heal_attempts.len());
+    Ok(())
+}
+
+fn write_ci_monitor_artifact(
+    base_repo: &Path,
+    report: &ci_monitor::CiMonitorReport,
+) -> anyhow::Result<PathBuf> {
+    let out_dir = base_repo.join("eval").join("results");
+    std::fs::create_dir_all(&out_dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let safe_label = sanitize_ci_monitor_label(&report.pr_url, 40);
+    let base = format!("ci-monitor-{}-{}", stamp, safe_label);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let latest_json = out_dir.join("ci-monitor-latest.json");
+    std::fs::write(&json_path, serde_json::to_string_pretty(report)?)?;
+    let _ = std::fs::copy(&json_path, &latest_json);
+    Ok(json_path)
+}
+
+fn sanitize_ci_monitor_label(input: &str, max_len: usize) -> String {
+    let mut out = input
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        out = "pr".to_string();
+    }
+    if out.chars().count() > max_len {
+        out = out.chars().take(max_len).collect();
+    }
+    out
 }
 
 fn resolve_dispatch_status(
@@ -2236,6 +2405,10 @@ fn print_self_build_summary(
     if let Some(url) = &ledger.promotion_execution.pr_url {
         println!("self_build_pr_url={}", url);
     }
+    if let Some(ci) = &ledger.ci_monitor {
+        println!("self_build_ci_monitor_status={}", ci.final_status);
+        println!("self_build_ci_monitor_merged={}", ci.merged_after_ci);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2253,6 +2426,7 @@ async fn run_self_build(
     allow_auto_promote: bool,
     promote_mode: SelfBuildPromoteMode,
     base_branch: String,
+    monitor_ci: bool,
 ) -> anyhow::Result<()> {
     validate_risk(&risk)?;
     let timestamp_utc = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
@@ -2428,6 +2602,29 @@ async fn run_self_build(
     )
     .await;
 
+    let ci_monitor = if monitor_ci
+        && promotion_execution.status == "pr_opened"
+        && promotion_execution.pr_url.is_some()
+    {
+        let pr_url = promotion_execution.pr_url.as_ref().unwrap();
+        Some(
+            ci_monitor::monitor_pr_ci(
+                pr_url,
+                promotion_execution.branch.as_deref(),
+                &base_repo,
+                &config,
+                promote_mode == SelfBuildPromoteMode::Auto,
+                true,
+                ci_monitor::CI_POLL_INTERVAL_SECS,
+                ci_monitor::CI_POLL_TIMEOUT_SECS,
+                ci_monitor::CI_HEAL_MAX_ATTEMPTS,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
     let mut cleanup_error = None;
     if !keep_worktree {
         cleanup_error = remove_self_build_worktree(&base_repo, &worktree).await;
@@ -2460,6 +2657,7 @@ async fn run_self_build(
         review_checklist,
         promotion,
         promotion_execution,
+        ci_monitor,
     };
 
     let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;

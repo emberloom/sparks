@@ -28,6 +28,7 @@ pub enum ObserverCategory {
     ToolUsage,
     ToolReload,
     SelfMetrics,
+    CiMonitor,
 }
 
 impl ObserverCategory {
@@ -52,6 +53,7 @@ impl ObserverCategory {
             Self::ToolUsage => "TOOL_USE",
             Self::ToolReload => "TOOL_RELOAD",
             Self::SelfMetrics => "SELF_METRICS",
+            Self::CiMonitor => "CI_MON",
         }
     }
 
@@ -77,6 +79,7 @@ impl ObserverCategory {
             Self::ToolUsage => "\x1b[36m",        // cyan
             Self::ToolReload => "\x1b[1;33m",     // bright yellow
             Self::SelfMetrics => "\x1b[2;36m",    // dim cyan
+            Self::CiMonitor => "\x1b[1;36m",      // bright cyan
         }
     }
 }
