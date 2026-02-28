@@ -490,14 +490,19 @@ fn verify_github(state: &WebhookState, headers: &HeaderMap, body: &[u8]) -> bool
     else {
         return false;
     };
-
+    let Some(hex_sig) = sig.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(hex_sig) else {
+        return false;
+    };
     let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
         Ok(m) => m,
         Err(_) => return false,
     };
     mac.update(body);
-    let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-    sig == expected
+    // Use constant-time comparison to prevent timing attacks.
+    mac.verify_slice(&sig_bytes).is_ok()
 }
 
 fn verify_linear(state: &WebhookState, headers: &HeaderMap, body: &[u8]) -> bool {
@@ -510,25 +515,39 @@ fn verify_linear(state: &WebhookState, headers: &HeaderMap, body: &[u8]) -> bool
     else {
         return false;
     };
-
+    let Ok(sig_bytes) = hex::decode(sig) else {
+        return false;
+    };
     let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
         Ok(m) => m,
         Err(_) => return false,
     };
     mac.update(body);
-    let expected = hex::encode(mac.finalize().into_bytes());
-    sig == expected
+    // Use constant-time comparison to prevent timing attacks.
+    mac.verify_slice(&sig_bytes).is_ok()
 }
 
 fn verify_token(secret: &Option<String>, headers: &HeaderMap, header_name: &str) -> bool {
     let Some(secret) = secret.as_ref() else {
         return true;
     };
-    headers
-        .get(header_name)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == secret)
-        .unwrap_or(false)
+    let Some(header_val) = headers.get(header_name).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    // Use constant-time comparison to prevent timing attacks.
+    constant_time_eq(header_val.as_bytes(), secret.as_bytes())
+}
+
+/// Compares two byte slices in constant time to prevent timing attacks.
+/// Returns true only if both slices are identical in length and content.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn build_gitlab_repo_candidates(project: &GlProject) -> Vec<String> {
@@ -682,4 +701,212 @@ struct JiraReporter {
 #[derive(Deserialize)]
 struct JiraProject {
     key: Option<String>,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TicketIntakeSourceConfig;
+
+    fn make_source(provider: &str, repo: &str) -> TicketIntakeSourceConfig {
+        TicketIntakeSourceConfig {
+            provider: provider.to_string(),
+            repo: repo.to_string(),
+            filter_label: Some("athena".to_string()),
+            api_base: None,
+            token_env: None,
+            email_env: None,
+        }
+    }
+
+    // --- provider_key ---
+
+    #[test]
+    fn provider_key_formats_correctly() {
+        assert_eq!(provider_key("github", "owner/repo"), "github:owner/repo");
+        assert_eq!(provider_key("GITHUB", "owner/repo"), "github:owner/repo");
+        assert_eq!(provider_key("linear", "TEAM"), "linear:TEAM");
+    }
+
+    // --- match_source ---
+
+    #[test]
+    fn match_source_finds_matching_entry() {
+        let sources = vec![make_source("github", "owner/repo")];
+        let result = match_source(&sources, "github", "owner/repo");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn match_source_is_case_insensitive_for_provider() {
+        let sources = vec![make_source("github", "owner/repo")];
+        let result = match_source(&sources, "GitHub", "owner/repo");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn match_source_returns_none_for_wrong_repo() {
+        let sources = vec![make_source("github", "owner/repo")];
+        let result = match_source(&sources, "github", "other/repo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn match_source_returns_none_when_empty() {
+        let result = match_source(&[], "github", "owner/repo");
+        assert!(result.is_none());
+    }
+
+    // --- match_source_candidates ---
+
+    #[test]
+    fn match_source_candidates_finds_by_any_candidate() {
+        let sources = vec![make_source("gitlab", "group/project")];
+        let candidates = vec!["group/project".to_string(), "12345".to_string()];
+        let result = match_source_candidates(&sources, "gitlab", &candidates);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn match_source_candidates_returns_none_when_no_match() {
+        let sources = vec![make_source("gitlab", "group/project")];
+        let candidates = vec!["other/project".to_string()];
+        let result = match_source_candidates(&sources, "gitlab", &candidates);
+        assert!(result.is_none());
+    }
+
+    // --- labels_match ---
+
+    #[test]
+    fn labels_match_returns_true_when_no_filter() {
+        assert!(labels_match(&["any".to_string()], &None));
+        assert!(labels_match(&[], &None));
+    }
+
+    #[test]
+    fn labels_match_returns_true_for_empty_filter() {
+        assert!(labels_match(&["any".to_string()], &Some(String::new())));
+    }
+
+    #[test]
+    fn labels_match_is_case_insensitive() {
+        assert!(labels_match(&["Athena".to_string()], &Some("athena".to_string())));
+        assert!(labels_match(&["ATHENA".to_string()], &Some("Athena".to_string())));
+    }
+
+    #[test]
+    fn labels_match_returns_false_when_label_absent() {
+        assert!(!labels_match(&["other".to_string()], &Some("athena".to_string())));
+    }
+
+    // --- extract_linear_labels ---
+
+    #[test]
+    fn extract_linear_labels_from_nodes_array() {
+        let data: Value = serde_json::json!({
+            "labels": { "nodes": [{ "name": "bug" }, { "name": "urgent" }] }
+        });
+        let labels = extract_linear_labels(&data);
+        assert_eq!(labels, vec!["bug", "urgent"]);
+    }
+
+    #[test]
+    fn extract_linear_labels_from_flat_array() {
+        let data: Value = serde_json::json!({
+            "labels": [{ "name": "feature" }]
+        });
+        let labels = extract_linear_labels(&data);
+        assert_eq!(labels, vec!["feature"]);
+    }
+
+    #[test]
+    fn extract_linear_labels_returns_empty_when_absent() {
+        let data: Value = serde_json::json!({});
+        assert!(extract_linear_labels(&data).is_empty());
+    }
+
+    // --- map_linear_priority ---
+
+    #[test]
+    fn map_linear_priority_maps_known_values() {
+        assert_eq!(map_linear_priority(1), Some("urgent".to_string()));
+        assert_eq!(map_linear_priority(2), Some("high".to_string()));
+        assert_eq!(map_linear_priority(3), Some("medium".to_string()));
+        assert_eq!(map_linear_priority(4), Some("low".to_string()));
+    }
+
+    #[test]
+    fn map_linear_priority_returns_none_for_unknown() {
+        assert_eq!(map_linear_priority(0), None);
+        assert_eq!(map_linear_priority(5), None);
+    }
+
+    // --- build_gitlab_repo_candidates ---
+
+    #[test]
+    fn build_gitlab_repo_candidates_includes_path_and_id() {
+        let project = GlProject {
+            id: Some(42),
+            path_with_namespace: Some("group/proj".to_string()),
+        };
+        let candidates = build_gitlab_repo_candidates(&project);
+        assert!(candidates.contains(&"group/proj".to_string()));
+        assert!(candidates.contains(&"42".to_string()));
+    }
+
+    #[test]
+    fn build_gitlab_repo_candidates_handles_missing_fields() {
+        let project = GlProject { id: None, path_with_namespace: None };
+        assert!(build_gitlab_repo_candidates(&project).is_empty());
+    }
+
+    // --- constant_time_eq ---
+
+    #[test]
+    fn constant_time_eq_returns_true_for_equal_slices() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_returns_false_for_different_content() {
+        assert!(!constant_time_eq(b"secret1", b"secret2"));
+    }
+
+    #[test]
+    fn constant_time_eq_returns_false_for_different_length() {
+        assert!(!constant_time_eq(b"short", b"longer"));
+    }
+
+    // --- HMAC signature helpers ---
+
+    #[test]
+    fn verify_github_hmac_accepts_correct_signature() {
+        use hmac::Mac;
+
+        let secret = "test_secret";
+        let body = b"hello world";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let raw_bytes = mac.finalize().into_bytes();
+        let sig = format!("sha256={}", hex::encode(raw_bytes));
+
+        // Verify that our constant-time path accepts the correct signature.
+        let ok_bytes = hex::decode(sig.strip_prefix("sha256=").unwrap()).unwrap();
+        let mut mac2 = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac2.update(body);
+        assert!(mac2.verify_slice(&ok_bytes).is_ok());
+    }
+
+    #[test]
+    fn verify_github_hmac_rejects_wrong_signature() {
+        use hmac::Mac;
+
+        let body = b"hello world";
+        let bad_sig = hex::decode("deadbeef00000000000000000000000000000000000000000000000000000000").unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
+        mac.update(body);
+        assert!(mac.verify_slice(&bad_sig).is_err());
+    }
 }

@@ -12,3 +12,5 @@ eval/results/
 eval/.worktrees/
 *.log
 hello.txt
+__pycache__/
+*.pyc

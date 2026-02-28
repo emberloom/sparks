@@ -12,7 +12,39 @@ Key mechanics:
 - **Strategy phases:** The coding strategy uses EXPLORE → EXECUTE → VERIFY phases with different tool sets and step limits.
 - **Resource limits:** Docker memory/CPU/time limits are enforced per run.
 
+Ghost configuration constraints:
+- `strategy` must be exactly `"code"` or `"react"`. Any other value silently fails at dispatch — no compile error or panic.
+- `soul_file` is an optional path to a persona file injected into the ghost's system prompt. Keep it under ~2K tokens; it counts against the completion budget.
+- Default completion limit: **4096 tokens**. Default context window: **128K tokens**. Long soul files, large memory payloads, and verbose tool outputs all reduce usable context for the task.
+- The local embedding model for memory search lives at `~/.athena/models/all-MiniLM-L6-v2`. If the directory is missing, memory and semantic search fail silently — run `athena doctor` to verify.
+
 Relevant code: `src/docker.rs`, `src/manager.rs`, `src/strategy/code.rs`, `config.example.toml`.
+
+## Model Configuration
+
+Each provider has **two independent model slots**:
+
+| Slot | Config key | Used by | Typical choice |
+| --- | --- | --- | --- |
+| Main | `model` | Ghost task execution | capable/expensive model (e.g. `claude-opus-4-6`, `gpt-5.3-codex`) |
+| Classifier | `classifier_model` | Orchestrator routing only (SIMPLE / DIRECT / COMPLEX) | lighter/cheaper model (e.g. `claude-haiku-4-5-20251001`, `qwen2.5:3b`) |
+
+**Always set `classifier_model`** to a lighter model. If omitted, the main model handles routing on every request — slow and expensive.
+
+Auth requirements differ per provider:
+- **`ouath`** — reads `~/.athena/ouath.json` (not an env var). Default URL: `https://chatgpt.com/backend-api/codex`.
+- **`openrouter`** — `OPENROUTER_API_KEY` env var.
+- **`zen`** — `OPENCODE_API_KEY` env var.
+- **`ollama`** — no auth; the Ollama daemon must be running at the configured URL (default `http://localhost:11434`).
+
+Provider fallback order when the primary is unavailable:
+```
+configured provider → ouath → ollama → openrouter → zen
+```
+
+Observability via Langfuse is fully opt-in. Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` to enable tracing. No errors are emitted if these are absent — tracing is simply skipped.
+
+Relevant code: `src/config.rs`, `src/llm.rs`.
 
 ## Security Model
 Security is enforced across layers:

@@ -165,3 +165,68 @@ pub fn find_spec(key: &str) -> Result<SecretSpec> {
         .find(|spec| spec.key == key)
         .ok_or_else(|| AthenaError::Tool(format!("Unknown secret key: {}", key)))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- KNOWN_SECRETS integrity ---
+
+    #[test]
+    fn known_secrets_has_no_duplicate_keys() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in KNOWN_SECRETS {
+            assert!(
+                seen.insert(spec.key),
+                "Duplicate key in KNOWN_SECRETS: {}",
+                spec.key
+            );
+        }
+    }
+
+    #[test]
+    fn known_secrets_has_no_duplicate_env_vars() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in KNOWN_SECRETS {
+            assert!(
+                seen.insert(spec.env),
+                "Duplicate env var in KNOWN_SECRETS: {}",
+                spec.env
+            );
+        }
+    }
+
+    #[test]
+    fn known_secrets_keys_are_non_empty() {
+        for spec in KNOWN_SECRETS {
+            assert!(!spec.key.is_empty(), "Empty key in KNOWN_SECRETS");
+            assert!(!spec.env.is_empty(), "Empty env var in KNOWN_SECRETS for key {}", spec.key);
+        }
+    }
+
+    // --- find_spec ---
+
+    #[test]
+    fn find_spec_returns_matching_spec() {
+        let spec = find_spec("github.token").expect("github.token should be known");
+        assert_eq!(spec.key, "github.token");
+        assert_eq!(spec.env, "GH_TOKEN");
+    }
+
+    #[test]
+    fn find_spec_returns_error_for_unknown_key() {
+        let result = find_spec("unknown.key");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown secret key"));
+    }
+
+    #[test]
+    fn find_spec_covers_all_known_keys() {
+        for spec in KNOWN_SECRETS {
+            let found = find_spec(spec.key).expect("every KNOWN_SECRETS entry should be findable");
+            assert_eq!(found.key, spec.key);
+        }
+    }
+}
