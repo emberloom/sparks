@@ -166,6 +166,7 @@ pub fn find_spec(key: &str) -> Result<SecretSpec> {
         .ok_or_else(|| AthenaError::Tool(format!("Unknown secret key: {}", key)))
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;

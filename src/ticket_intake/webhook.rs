@@ -703,6 +703,7 @@ struct JiraProject {
     key: Option<String>,
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,4 +910,3 @@ mod tests {
         assert!(mac.verify_slice(&bad_sig).is_err());
     }
 }
-

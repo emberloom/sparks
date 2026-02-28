@@ -178,6 +178,7 @@ fn repo_from_provider(provider: &str) -> String {
         .unwrap_or_default()
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
