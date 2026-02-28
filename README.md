@@ -43,6 +43,7 @@ This disables `~/.athena/ghosts/*.toml` overrides so behavior only depends on re
 - dispatch one task: `cargo run -- dispatch --goal "..." --wait-secs 120`
 - doctor report: `cargo run -- doctor --skip-llm`
 - KPI snapshot: `cargo run -- kpi snapshot --lane delivery`
+- user-flow harness (Linear intake + writeback): `make user-flow`
 - feature contract flow: `cargo run -- feature --help`
 - self-build flow: `cargo run -- self-build --help`
 

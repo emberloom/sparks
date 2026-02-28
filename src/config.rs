@@ -559,6 +559,8 @@ pub struct TicketIntakeConfig {
     #[serde(default = "default_ticket_intake_interval")]
     pub poll_interval_secs: u64,
     #[serde(default)]
+    pub mock_dispatch: bool,
+    #[serde(default)]
     pub sources: Vec<TicketIntakeSourceConfig>,
     #[serde(default)]
     pub webhook: TicketIntakeWebhookConfig,
@@ -569,6 +571,7 @@ impl Default for TicketIntakeConfig {
         Self {
             enabled: false,
             poll_interval_secs: default_ticket_intake_interval(),
+            mock_dispatch: false,
             sources: Vec::new(),
             webhook: TicketIntakeWebhookConfig::default(),
         }

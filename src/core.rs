@@ -254,6 +254,7 @@ impl AthenaCore {
             persona_soul_for_reentry,
             langfuse.clone(),
             outcome_store,
+            config.ticket_intake.mock_dispatch,
         );
 
         Ok(CoreHandle {
@@ -301,6 +302,7 @@ fn spawn_core_loops(
     persona_soul_for_reentry: Option<String>,
     _langfuse: SharedLangfuse,
     outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
 ) {
     spawn_core_event_loop(
         rx,
@@ -318,6 +320,7 @@ fn spawn_core_loops(
         pulse_bus,
         memory,
         outcome_store,
+        mock_ticket_intake_dispatch,
     );
 }
 
@@ -758,6 +761,7 @@ fn spawn_autonomous_task_consumer(
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
 ) {
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
@@ -766,9 +770,18 @@ fn spawn_autonomous_task_consumer(
             let pulse_bus = pulse_bus.clone();
             let memory = memory.clone();
             let outcome_store = outcome_store.clone();
+            let mock_ticket_intake_dispatch = mock_ticket_intake_dispatch;
             tokio::spawn(async move {
-                execute_autonomous_task(task, manager, observer, pulse_bus, memory, outcome_store)
-                    .await;
+                execute_autonomous_task(
+                    task,
+                    manager,
+                    observer,
+                    pulse_bus,
+                    memory,
+                    outcome_store,
+                    mock_ticket_intake_dispatch,
+                )
+                .await;
             });
         }
     });
@@ -781,6 +794,7 @@ async fn execute_autonomous_task(
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
 ) {
     let confirmer = AutoConfirmer;
     expire_stale_started_tasks(&outcome_store, &observer);
@@ -793,6 +807,29 @@ async fn execute_autonomous_task(
     record_autonomous_task_start(&outcome_store, &task_id, &task);
     log_autonomous_dispatch(&observer, &task, &ghost_label);
     introspect::inc_active_tasks();
+
+    if mock_ticket_intake_dispatch && task.lane == "ticket_intake" {
+        observer.log(
+            ObserverCategory::AutonomousTask,
+            format!(
+                "Mock dispatch enabled for ticket intake task [{}]: skipping execution",
+                task_id
+            ),
+        );
+        handle_autonomous_task_success(
+            &task,
+            &task_id,
+            &ghost_label,
+            &goal_summary,
+            "Mock dispatch: ticket intake task auto-completed without ghost execution.".to_string(),
+            &observer,
+            &pulse_bus,
+            &memory,
+            &outcome_store,
+        );
+        introspect::dec_active_tasks();
+        return;
+    }
 
     let (verification_total_on_fail, _) = infer_verification_counters(&task.goal, None, false);
     let rolled_back_on_fail = infer_rollback_flag(&task.goal, None);
@@ -1069,6 +1106,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
     let mut llm: Option<Arc<dyn LlmProvider>> = None;
     let mut selected_provider = config.llm.provider.clone();
     let mut last_err: Option<crate::error::AthenaError> = None;
+    let skip_health = llm_health_check_disabled();
 
     for provider_name in config.provider_candidates() {
         let candidate = match config.build_llm_provider_for(&provider_name) {
@@ -1083,6 +1121,16 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
                 continue;
             }
         };
+
+        if skip_health {
+            eprintln!(
+                "Skipping LLM health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+                candidate.provider_name()
+            );
+            selected_provider = provider_name;
+            llm = Some(candidate);
+            break;
+        }
 
         eprint!("Connecting to {}... ", candidate.provider_name());
         match candidate.health_check().await {
@@ -1123,6 +1171,14 @@ async fn connect_orchestrator(
         return Ok(orchestrator);
     }
 
+    if llm_health_check_disabled() {
+        eprintln!(
+            "Skipping orchestrator health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+            orchestrator.provider_name()
+        );
+        return Ok(orchestrator);
+    }
+
     eprint!("Connecting to {}... ", orchestrator.provider_name());
     match orchestrator.health_check().await {
         Ok(()) => {
@@ -1138,6 +1194,16 @@ async fn connect_orchestrator(
             Ok(llm.clone())
         }
     }
+}
+
+fn llm_health_check_disabled() -> bool {
+    matches!(
+        std::env::var("ATHENA_SKIP_LLM_HEALTHCHECK")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 async fn init_embedder_opt(config: &Config) -> Option<Arc<Embedder>> {
@@ -1397,11 +1463,14 @@ fn build_ticket_intake_providers(
                     );
                     continue;
                 };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
                 let provider = Arc::new(ticket_intake::linear::LinearProvider::new(
                     reqwest::Client::new(),
                     repo,
                     filter_label,
                     token,
+                    api_base,
                 ));
                 providers.insert(provider.name(), provider);
             }
