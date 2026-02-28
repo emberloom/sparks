@@ -11,6 +11,7 @@ pub struct LinearProvider {
     team_key: String,
     filter_label: String,
     token: String,
+    graphql_url: String,
 }
 
 impl LinearProvider {
@@ -19,19 +20,22 @@ impl LinearProvider {
         team_key: String,
         filter_label: String,
         token: String,
+        api_base: String,
     ) -> Self {
+        let graphql_url = normalize_graphql_url(&api_base);
         Self {
             client,
             team_key,
             filter_label,
             token,
+            graphql_url,
         }
     }
 
     async fn post_graphql(&self, payload: serde_json::Value) -> Result<serde_json::Value> {
         let resp = self
             .client
-            .post("https://api.linear.app/graphql")
+            .post(&self.graphql_url)
             .header("Authorization", self.token.clone())
             .json(&payload)
             .send()
@@ -117,6 +121,15 @@ query Issues($team: String!, $label: String!) {
   }
 }
 "#;
+
+fn normalize_graphql_url(api_base: &str) -> String {
+    let trimmed = api_base.trim_end_matches('/');
+    if trimmed.ends_with("/graphql") {
+        trimmed.to_string()
+    } else {
+        format!("{}/graphql", trimmed)
+    }
+}
 
 const LINEAR_COMMENT_MUTATION: &str = r#"
 mutation CommentCreate($issueId: String!, $body: String!) {
@@ -225,7 +238,7 @@ impl TicketProvider for LinearProvider {
 
         let resp = self
             .client
-            .post("https://api.linear.app/graphql")
+            .post(&self.graphql_url)
             .header("Authorization", self.token.clone())
             .json(&body)
             .send()

@@ -123,6 +123,8 @@ planning_timeout_secs = 900
 [ticket_intake]
 enabled = false
 poll_interval_secs = 300
+# When true, ticket intake tasks are auto-completed without executing a ghost (useful for CI).
+mock_dispatch = false
 
 # [[ticket_intake.sources]]
 # provider = "github"
@@ -141,6 +143,7 @@ poll_interval_secs = 300
 # provider = "linear"
 # repo = "ENG"
 # filter_label = "athena"
+# api_base = "https://api.linear.app/graphql"
 # token_env = "LINEAR_API_KEY"  # or use `athena secrets set linear.api_key`
 
 # [[ticket_intake.sources]]
