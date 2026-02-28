@@ -55,3 +55,33 @@ jobs:
           latest="$(ls -t eval/results/eval-*.md | head -n 1)"
           echo "Latest report: $latest"
           cat "$latest"
+
+  user-flow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build athena (webhook feature)
+        run: cargo build --quiet --features webhook
+
+      - name: Validate user flow harness
+        run: python3 -m py_compile scripts/mock_linear_server.py scripts/user_flow_harness.py
+
+      - name: Run user flow harness
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
+        run: |
+          python3 scripts/user_flow_harness.py --athena-bin target/debug/athena
