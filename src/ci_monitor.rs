@@ -101,10 +101,17 @@ struct CiMonitorContext {
 }
 
 impl CiMonitorContext {
-    fn new() -> Self {
+    fn new(spawn_observer: bool) -> Self {
+        let observer = if spawn_observer {
+            let handle = ObserverHandle::new(256);
+            crate::observer::spawn_uds_listener(handle.clone());
+            Some(handle)
+        } else {
+            None
+        };
         Self {
             commands: Vec::new(),
-            observer: Some(ObserverHandle::new(256)),
+            observer,
         }
     }
 
@@ -132,7 +139,7 @@ pub async fn monitor_pr_ci(
     max_heal: u8,
 ) -> CiMonitorReport {
     let started_utc = chrono::Utc::now().to_rfc3339();
-    let mut ctx = CiMonitorContext::new();
+    let mut ctx = CiMonitorContext::new(true);
     ctx.log(format!("ci monitor started pr={}", pr_url));
 
     let mut branch_name = branch.map(|b| b.to_string());
@@ -246,7 +253,7 @@ pub async fn monitor_pr_ci(
 }
 
 pub async fn poll_pr_ci_status(pr_url: &str, workdir: &Path) -> CiPollResult {
-    poll_pr_ci_status_internal(pr_url, workdir, &mut CiMonitorContext::new()).await
+    poll_pr_ci_status_internal(pr_url, workdir, &mut CiMonitorContext::new(false)).await
 }
 
 async fn poll_pr_ci_status_internal(
@@ -287,7 +294,14 @@ async fn poll_pr_ci_status_internal(
 
     let checks = match parse_status_check_rollup(&raw_json) {
         Some(c) => c,
-        None => Vec::new(),
+        None => {
+            return CiPollResult {
+                timestamp_utc,
+                overall: "pending".to_string(),
+                checks: Vec::new(),
+                raw_json,
+            };
+        }
     };
     let overall = compute_overall(&checks);
 
@@ -300,7 +314,7 @@ async fn poll_pr_ci_status_internal(
 }
 
 pub async fn extract_failed_ci_logs(pr_url: &str, workdir: &Path) -> String {
-    extract_failed_ci_logs_internal(pr_url, workdir, &mut CiMonitorContext::new()).await
+    extract_failed_ci_logs_internal(pr_url, workdir, &mut CiMonitorContext::new(false)).await
 }
 
 async fn extract_failed_ci_logs_internal(
@@ -387,7 +401,7 @@ pub async fn heal_ci_failure(
         failure_logs,
         attempt,
         config,
-        &mut CiMonitorContext::new(),
+        &mut CiMonitorContext::new(false),
     )
     .await
 }
@@ -568,7 +582,7 @@ async fn heal_ci_failure_internal(
                 let push_run = run_command_capture(
                     &worktree_path,
                     "git",
-                    &args(&["push", "origin", branch]),
+                    &args(&["push", "origin", &format!("HEAD:{}", branch)]),
                     CI_COMMAND_TIMEOUT_SECS,
                 )
                 .await;
@@ -729,15 +743,15 @@ fn parse_pr_checks(raw_json: &str) -> Vec<PrCheckEntry> {
 }
 
 fn extract_run_id(link: &str) -> Option<String> {
-    let re = regex::Regex::new(r"/runs/(\\d+)").ok()?;
+    let re = regex::Regex::new(r"/runs/(\d+)").ok()?;
     if let Some(caps) = re.captures(link) {
         return caps.get(1).map(|m| m.as_str().to_string());
     }
-    let re = regex::Regex::new(r"/check-runs/(\\d+)").ok()?;
+    let re = regex::Regex::new(r"/check-runs/(\d+)").ok()?;
     if let Some(caps) = re.captures(link) {
         return caps.get(1).map(|m| m.as_str().to_string());
     }
-    let re = regex::Regex::new(r"(\\d{5,})").ok()?;
+    let re = regex::Regex::new(r"(\d{5,})").ok()?;
     re.find_iter(link)
         .last()
         .map(|m| m.as_str().to_string())
