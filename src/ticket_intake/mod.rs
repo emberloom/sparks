@@ -12,15 +12,18 @@ pub mod jira;
 pub mod linear;
 pub mod provider;
 pub mod store;
+pub mod sync;
+#[cfg(feature = "webhook")]
+pub mod webhook;
 
-pub use provider::{ExternalTicket, TicketProvider};
+pub use provider::TicketProvider;
 pub use store::TicketIntakeStore;
 
 pub fn spawn_ticket_intake(
     knobs: SharedKnobs,
     observer: ObserverHandle,
     auto_tx: mpsc::Sender<AutonomousTask>,
-    providers: Vec<Box<dyn TicketProvider>>,
+    providers: Vec<Arc<dyn TicketProvider>>,
     store: Arc<TicketIntakeStore>,
 ) {
     if providers.is_empty() {
@@ -96,6 +99,7 @@ pub fn spawn_ticket_intake(
                         &dedup_key,
                         &ticket.provider,
                         &ticket.external_id,
+                        ticket.number.as_deref(),
                         &ticket.title,
                     ) {
                         observer.log(

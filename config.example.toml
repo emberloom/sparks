@@ -1,5 +1,6 @@
 # LLM provider: "ouath" (default), "ollama", "openrouter", or "zen"
-# Inline secrets in config.toml are blocked by default. Use env vars or a .env file (gitignored).
+# Inline secrets in config.toml are blocked by default. Use env vars, a .env file (gitignored),
+# or `athena secrets set <key>` to store credentials in the OS keyring.
 # Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
 [llm]
 provider = "ouath"
@@ -31,7 +32,7 @@ max_tokens = 4096
 # model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
 # url = "https://openrouter.ai/api/v1"
-# api_key = ""
+# api_key = ""  # discouraged; use OPENROUTER_API_KEY env var, .env, or `athena secrets set openrouter.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
@@ -40,7 +41,7 @@ max_tokens = 4096
 # model = "zen-v1"
 # classifier_model = "zen-v1-mini"  # optional, defaults to model
 # url = "https://opencode.ai/zen/v1"
-# api_key = ""
+# api_key = ""  # discouraged; use OPENCODE_API_KEY env var, .env, or `athena secrets set zen.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
@@ -106,7 +107,7 @@ enabled = true
 # dedup_threshold = 0.95
 
 [telegram]
-# token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var or .env
+# token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`
 # provider = "ouath"          # optional, defaults to "ouath"
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
@@ -117,7 +118,7 @@ planning_auto = true
 planning_timeout_secs = 900
 
 [github]
-# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var or .env
+# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `athena secrets set github.token`
 
 [ticket_intake]
 enabled = false
@@ -127,33 +128,41 @@ poll_interval_secs = 300
 # provider = "github"
 # repo = "myorg/myrepo"
 # filter_label = "athena"
-# token_env = "GH_TOKEN"
+# token_env = "GH_TOKEN"  # or use `athena secrets set github.token`
 
 # [[ticket_intake.sources]]
 # provider = "gitlab"
 # repo = "mygroup/myproject"
 # filter_label = "athena"
 # api_base = "https://gitlab.example.com/api/v4"
-# token_env = "GITLAB_TOKEN"
+# token_env = "GITLAB_TOKEN"  # or use `athena secrets set gitlab.token`
 
 # [[ticket_intake.sources]]
 # provider = "linear"
 # repo = "ENG"
 # filter_label = "athena"
-# token_env = "LINEAR_API_KEY"
+# token_env = "LINEAR_API_KEY"  # or use `athena secrets set linear.api_key`
 
 # [[ticket_intake.sources]]
 # provider = "jira"
 # repo = "PROJ"
 # api_base = "https://mycompany.atlassian.net"
 # filter_label = "athena"
-# token_env = "JIRA_API_TOKEN"
+# token_env = "JIRA_API_TOKEN"  # or use `athena secrets set jira.api_token`
 # email_env = "JIRA_EMAIL"
+
+# [ticket_intake.webhook]
+# enabled = false
+# bind = "127.0.0.1:8765"
+# github_secret_env = "GITHUB_WEBHOOK_SECRET"
+# gitlab_secret_env = "GITLAB_WEBHOOK_TOKEN"
+# linear_secret_env = "LINEAR_WEBHOOK_SECRET"
+# jira_secret_env = "JIRA_WEBHOOK_SECRET"
 
 # Langfuse observability - traces all LLM calls and agent activities
 # Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
 [langfuse]
 enabled = true  # set to false to disable
-# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var or .env
-# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var or .env
+# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `athena secrets set langfuse.public_key`
+# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `athena secrets set langfuse.secret_key`
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud

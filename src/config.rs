@@ -560,6 +560,8 @@ pub struct TicketIntakeConfig {
     pub poll_interval_secs: u64,
     #[serde(default)]
     pub sources: Vec<TicketIntakeSourceConfig>,
+    #[serde(default)]
+    pub webhook: TicketIntakeWebhookConfig,
 }
 
 impl Default for TicketIntakeConfig {
@@ -568,6 +570,7 @@ impl Default for TicketIntakeConfig {
             enabled: false,
             poll_interval_secs: default_ticket_intake_interval(),
             sources: Vec::new(),
+            webhook: TicketIntakeWebhookConfig::default(),
         }
     }
 }
@@ -578,6 +581,39 @@ fn default_ticket_intake_interval() -> u64 {
 
 fn default_ticket_intake_label() -> Option<String> {
     Some("athena".to_string())
+}
+
+fn default_ticket_intake_webhook_bind() -> String {
+    "127.0.0.1:8765".to_string()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeWebhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_intake_webhook_bind")]
+    pub bind: String,
+    #[serde(default)]
+    pub github_secret_env: Option<String>,
+    #[serde(default)]
+    pub gitlab_secret_env: Option<String>,
+    #[serde(default)]
+    pub linear_secret_env: Option<String>,
+    #[serde(default)]
+    pub jira_secret_env: Option<String>,
+}
+
+impl Default for TicketIntakeWebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_ticket_intake_webhook_bind(),
+            github_secret_env: None,
+            gitlab_secret_env: None,
+            linear_secret_env: None,
+            jira_secret_env: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

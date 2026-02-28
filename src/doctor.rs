@@ -6,6 +6,7 @@ use crate::config::{self, Config};
 use crate::docker;
 use crate::knobs;
 use crate::profiles;
+use crate::secrets;
 use crate::tool_usage::ToolUsageStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,6 +76,8 @@ struct DoctorSnapshot {
     preferred_cli: String,
     rust_workspace: bool,
     inline_secret_labels: Vec<String>,
+    keyring_missing: Vec<String>,
+    keyring_error: Option<String>,
 }
 
 struct MemoryCounts {
@@ -228,24 +231,37 @@ fn feedback_loop_check(snap: &DoctorSnapshot) -> CheckItem {
 }
 
 fn credentials_hygiene_check(snap: &DoctorSnapshot) -> CheckItem {
+    let mut detail = if snap.inline_secret_labels.is_empty() {
+        "No inline credentials found in config".to_string()
+    } else {
+        format!(
+            "Inline secrets configured for: {}",
+            snap.inline_secret_labels.join(", ")
+        )
+    };
+
+    if let Some(err) = snap.keyring_error.as_ref() {
+        detail.push_str(&format!(" | Keyring unavailable: {}", err));
+    } else if !snap.keyring_missing.is_empty() {
+        detail.push_str(&format!(
+            " | Keyring missing: {}",
+            snap.keyring_missing.join(", ")
+        ));
+    }
+
     CheckItem {
         stage: "Credentials storage hygiene",
-        status: if snap.inline_secret_labels.is_empty() {
+        status: if snap.inline_secret_labels.is_empty() && snap.keyring_error.is_none() {
             CheckStatus::Pass
         } else {
             CheckStatus::Warn
         },
-        detail: if snap.inline_secret_labels.is_empty() {
-            "No inline credentials found in config".to_string()
-        } else {
-            format!(
-                "Inline secrets configured for: {}",
-                snap.inline_secret_labels.join(", ")
-            )
-        },
-        fix: (!snap.inline_secret_labels.is_empty()).then(|| {
-            "Move secrets out of config.toml into env vars or a .env file (gitignored).".to_string()
-        }),
+        detail,
+        fix: (!snap.inline_secret_labels.is_empty() || !snap.keyring_missing.is_empty())
+            .then(|| {
+                "Move secrets into env vars, a .env file (gitignored), or use `athena secrets set <key>`."
+                    .to_string()
+            }),
     }
 }
 
@@ -267,6 +283,13 @@ fn collect_snapshot(config: &Config) -> anyhow::Result<DoctorSnapshot> {
 
     let runtime_knobs = knobs::RuntimeKnobs::from_config(config);
     let inline_secret_labels = collect_inline_secret_labels(config);
+    let keyring_report = secrets::keyring_report();
+    let keyring_missing = keyring_report
+        .statuses
+        .iter()
+        .filter(|s| !s.in_env && !s.in_keyring)
+        .map(|s| s.key.to_string())
+        .collect::<Vec<_>>();
 
     Ok(DoctorSnapshot {
         db_path,
@@ -281,6 +304,8 @@ fn collect_snapshot(config: &Config) -> anyhow::Result<DoctorSnapshot> {
         preferred_cli: runtime_knobs.cli_tool,
         rust_workspace: std::path::Path::new("Cargo.toml").exists(),
         inline_secret_labels,
+        keyring_missing,
+        keyring_error: keyring_report.error,
     })
 }
 

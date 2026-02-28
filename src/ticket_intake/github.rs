@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::error::{AthenaError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
@@ -61,6 +62,7 @@ impl TicketProvider for GitHubProvider {
     }
 
     async fn poll(&self) -> Result<Vec<ExternalTicket>> {
+        let provider_name = self.name();
         let url = format!(
             "{}/repos/{}/issues",
             self.api_base.trim_end_matches('/'),
@@ -95,7 +97,8 @@ impl TicketProvider for GitHubProvider {
             .filter(|issue| issue.pull_request.is_none())
             .map(|issue| ExternalTicket {
                 external_id: issue.id.to_string(),
-                provider: "github".to_string(),
+                number: Some(issue.number.to_string()),
+                provider: provider_name.clone(),
                 title: issue.title,
                 body: issue.body.unwrap_or_default(),
                 labels: issue.labels.into_iter().map(|l| l.name).collect(),
@@ -107,5 +110,63 @@ impl TicketProvider for GitHubProvider {
             .collect::<Vec<_>>();
 
         Ok(tickets)
+    }
+
+    async fn post_comment(&self, ticket: &ExternalTicket, message: &str) -> Result<()> {
+        let Some(number) = ticket.number.as_ref() else {
+            return Err(AthenaError::Tool(
+                "GitHub write-back missing issue number".to_string(),
+            ));
+        };
+
+        let url = format!(
+            "{}/repos/{}/issues/{}/comments",
+            self.api_base.trim_end_matches('/'),
+            self.repo,
+            number
+        );
+        self.client
+            .post(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&json!({ "body": message }))
+            .send()
+            .await
+            .map_err(|e| AthenaError::Tool(format!("GitHub comment failed: {}", e)))?
+            .error_for_status()
+            .map_err(|e| AthenaError::Tool(format!("GitHub comment error: {}", e)))?;
+        Ok(())
+    }
+
+    async fn update_status(&self, ticket: &ExternalTicket, status: &str) -> Result<()> {
+        if status != "succeeded" {
+            return Ok(());
+        }
+        let Some(number) = ticket.number.as_ref() else {
+            return Err(AthenaError::Tool(
+                "GitHub write-back missing issue number".to_string(),
+            ));
+        };
+        let url = format!(
+            "{}/repos/{}/issues/{}",
+            self.api_base.trim_end_matches('/'),
+            self.repo,
+            number
+        );
+        self.client
+            .patch(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT, "application/vnd.github+json")
+            .json(&json!({ "state": "closed" }))
+            .send()
+            .await
+            .map_err(|e| AthenaError::Tool(format!("GitHub status update failed: {}", e)))?
+            .error_for_status()
+            .map_err(|e| AthenaError::Tool(format!("GitHub status update error: {}", e)))?;
+        Ok(())
+    }
+
+    fn supports_writeback(&self) -> bool {
+        true
     }
 }

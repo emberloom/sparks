@@ -30,6 +30,7 @@ mod randomness;
 mod scheduler;
 mod self_heal;
 mod strategy;
+mod secrets;
 #[cfg(feature = "telegram")]
 mod telegram;
 mod ticket_intake;
@@ -80,6 +81,11 @@ enum Commands {
     },
     /// List configured ghosts
     Ghosts,
+    /// Manage secrets stored in OS keyring
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
@@ -206,6 +212,22 @@ enum MemoryAction {
     Retire {
         /// Memory ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretsAction {
+    /// List known secret slots and their status
+    List,
+    /// Store a secret in the OS keyring
+    Set {
+        /// Secret key (e.g. github.token)
+        key: String,
+    },
+    /// Delete a secret from the OS keyring
+    Delete {
+        /// Secret key (e.g. github.token)
+        key: String,
     },
 }
 
@@ -487,6 +509,10 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => eprintln!("Warning: failed to load .env: {}", e),
     }
 
+    if let Err(e) = secrets::load_keyring_into_env() {
+        eprintln!("Warning: failed to load keyring secrets: {}", e);
+    }
+
     let auto_approve = cli.auto_approve;
     let config = Config::load(cli.config.as_deref())?;
 
@@ -533,6 +559,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("  {} — {} [{}]", g.name, g.description, g.tools.join(", "));
             }
         }
+        Some(Commands::Secrets { action }) => handle_secrets(action)?,
         #[cfg(feature = "telegram")]
         Some(Commands::Telegram) => {
             let mut telegram_config = config.clone();
@@ -699,6 +726,35 @@ fn validate_risk(risk: &str) -> anyhow::Result<()> {
         "low" | "medium" | "high" => Ok(()),
         _ => anyhow::bail!("Invalid risk '{}'. Use: low | medium | high", risk),
     }
+}
+
+fn handle_secrets(action: SecretsAction) -> anyhow::Result<()> {
+    match action {
+        SecretsAction::List => {
+            let mut report = secrets::keyring_report();
+            report.statuses.sort_by(|a, b| a.key.cmp(b.key));
+            for status in report.statuses {
+                let env = if status.in_env { "set" } else { "unset" };
+                let keyring = if status.in_keyring { "set" } else { "unset" };
+                println!(
+                    "{:<24} env={} keyring={}",
+                    status.key, env, keyring
+                );
+            }
+            if let Some(err) = report.error {
+                println!("keyring_error={}", err);
+            }
+        }
+        SecretsAction::Set { key } => {
+            secrets::set_secret(&key)?;
+            println!("secret_saved={}", key);
+        }
+        SecretsAction::Delete { key } => {
+            secrets::delete_secret(&key)?;
+            println!("secret_deleted={}", key);
+        }
+    }
+    Ok(())
 }
 
 async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {

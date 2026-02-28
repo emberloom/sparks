@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -21,7 +22,7 @@ use crate::profiles;
 use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
-use crate::ticket_intake::{self, TicketIntakeStore};
+use crate::ticket_intake::{self, TicketIntakeStore, TicketProvider};
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
@@ -486,16 +487,51 @@ fn spawn_housekeeping_loops(
     );
 
     let providers = build_ticket_intake_providers(config, &observer);
-    if !providers.is_empty() {
+    let webhook_enabled = config.ticket_intake.webhook.enabled;
+    let has_sources = !config.ticket_intake.sources.is_empty();
+    if has_sources || webhook_enabled {
         match create_ticket_intake_store(config) {
             Ok(store) => {
-                ticket_intake::spawn_ticket_intake(
-                    knobs,
-                    observer,
-                    auto_tx,
+                let provider_list = providers.values().cloned().collect::<Vec<_>>();
+                if !provider_list.is_empty() {
+                    ticket_intake::spawn_ticket_intake(
+                        knobs.clone(),
+                        observer.clone(),
+                        auto_tx.clone(),
+                        provider_list,
+                        store.clone(),
+                    );
+                }
+
+                ticket_intake::sync::spawn_ticket_status_sync(
+                    knobs.clone(),
+                    observer.clone(),
+                    store.clone(),
                     providers,
-                    store,
+                    webhook_enabled,
                 );
+
+                #[cfg(feature = "webhook")]
+                if webhook_enabled {
+                    let webhook_config = config.ticket_intake.webhook.clone();
+                    let sources = config.ticket_intake.sources.clone();
+                    let observer_clone = observer.clone();
+                    let store_clone = store.clone();
+                    let auto_tx_clone = auto_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ticket_intake::webhook::spawn_ticket_intake_webhook(
+                            webhook_config,
+                            sources,
+                            observer_clone,
+                            store_clone,
+                            auto_tx_clone,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Ticket webhook failed: {}", e);
+                        }
+                    });
+                }
             }
             Err(e) => {
                 tracing::warn!("Ticket intake store unavailable: {}", e);
@@ -1255,12 +1291,12 @@ fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>>
 fn build_ticket_intake_providers(
     config: &Config,
     observer: &ObserverHandle,
-) -> Vec<Box<dyn ticket_intake::TicketProvider>> {
+) -> HashMap<String, Arc<dyn ticket_intake::TicketProvider>> {
     if config.ticket_intake.sources.is_empty() {
-        return Vec::new();
+        return HashMap::new();
     }
 
-    let mut providers: Vec<Box<dyn ticket_intake::TicketProvider>> = Vec::new();
+    let mut providers: HashMap<String, Arc<dyn ticket_intake::TicketProvider>> = HashMap::new();
 
     let read_env = |key: &str| -> Option<String> {
         std::env::var(key).ok().and_then(|v| {
@@ -1315,13 +1351,14 @@ fn build_ticket_intake_providers(
                 };
                 let api_base = clean_opt(&source.api_base)
                     .unwrap_or_else(|| "https://api.github.com".to_string());
-                providers.push(Box::new(ticket_intake::github::GitHubProvider::new(
+                let provider = Arc::new(ticket_intake::github::GitHubProvider::new(
                     reqwest::Client::new(),
                     repo,
                     filter_label,
                     token,
                     api_base,
-                )));
+                ));
+                providers.insert(provider.name(), provider);
             }
             "gitlab" => {
                 let token_env = clean_opt(&source.token_env)
@@ -1338,13 +1375,14 @@ fn build_ticket_intake_providers(
                 };
                 let api_base = clean_opt(&source.api_base)
                     .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string());
-                providers.push(Box::new(ticket_intake::gitlab::GitLabProvider::new(
+                let provider = Arc::new(ticket_intake::gitlab::GitLabProvider::new(
                     reqwest::Client::new(),
                     repo,
                     filter_label,
                     token,
                     api_base,
-                )));
+                ));
+                providers.insert(provider.name(), provider);
             }
             "linear" => {
                 let token_env = clean_opt(&source.token_env)
@@ -1359,12 +1397,13 @@ fn build_ticket_intake_providers(
                     );
                     continue;
                 };
-                providers.push(Box::new(ticket_intake::linear::LinearProvider::new(
+                let provider = Arc::new(ticket_intake::linear::LinearProvider::new(
                     reqwest::Client::new(),
                     repo,
                     filter_label,
                     token,
-                )));
+                ));
+                providers.insert(provider.name(), provider);
             }
             "jira" => {
                 let token_env = clean_opt(&source.token_env)
@@ -1401,14 +1440,15 @@ fn build_ticket_intake_providers(
                     );
                     continue;
                 };
-                providers.push(Box::new(ticket_intake::jira::JiraProvider::new(
+                let provider = Arc::new(ticket_intake::jira::JiraProvider::new(
                     reqwest::Client::new(),
                     repo,
                     filter_label,
                     base_url,
                     email,
                     token,
-                )));
+                ));
+                providers.insert(provider.name(), provider);
             }
             _ => {
                 observer.log(

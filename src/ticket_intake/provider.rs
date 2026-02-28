@@ -8,6 +8,7 @@ use crate::pulse::PulseTarget;
 #[derive(Debug, Clone)]
 pub struct ExternalTicket {
     pub external_id: String,
+    pub number: Option<String>,
     pub provider: String,
     pub title: String,
     pub body: String,
@@ -77,6 +78,11 @@ impl ExternalTicket {
             self.labels.join(", ")
         };
         let priority = self.priority.clone().unwrap_or_else(|| "none".to_string());
+        let number = self
+            .number
+            .as_ref()
+            .map(|n| n.as_str())
+            .unwrap_or("n/a");
         let author = self
             .author
             .as_ref()
@@ -84,8 +90,8 @@ impl ExternalTicket {
             .unwrap_or("unknown");
 
         let mut context = format!(
-            "Source: {}\nRepo: {}\nURL: {}\nAuthor: {}\nLabels: {}\nPriority: {}",
-            self.provider, self.repo, self.url, author, labels, priority
+            "Source: {}\nRepo: {}\nNumber: {}\nURL: {}\nAuthor: {}\nLabels: {}\nPriority: {}",
+            self.provider, self.repo, number, self.url, author, labels, priority
         );
 
         if !self.body.trim().is_empty() {
@@ -116,4 +122,13 @@ impl ExternalTicket {
 pub trait TicketProvider: Send + Sync {
     fn name(&self) -> String;
     async fn poll(&self) -> Result<Vec<ExternalTicket>>;
+    async fn post_comment(&self, _ticket: &ExternalTicket, _message: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn update_status(&self, _ticket: &ExternalTicket, _status: &str) -> Result<()> {
+        Ok(())
+    }
+    fn supports_writeback(&self) -> bool {
+        false
+    }
 }
