@@ -32,6 +32,14 @@ pub struct TaskOutcomeStore {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostSuccessRate {
+    pub ghost: String,
+    pub tasks_started: u64,
+    pub tasks_succeeded: u64,
+    pub success_rate: f64,
+}
+
 impl TaskOutcomeStore {
     pub fn new(conn: Connection) -> Self {
         Self {
@@ -147,6 +155,74 @@ impl TaskOutcomeStore {
         )?;
         Ok(())
     }
+}
+
+pub fn query_ghost_success_rates(
+    conn: &Connection,
+    repo: &str,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+    min_samples: u64,
+    limit: usize,
+) -> Result<Vec<GhostSuccessRate>> {
+    if min_samples == 0 || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT
+            ghost,
+            COUNT(*) as tasks_started,
+            COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) as tasks_succeeded
+         FROM autonomous_task_outcomes
+         WHERE repo = ?1
+           AND ghost IS NOT NULL
+           AND TRIM(ghost) != ''
+           AND status IN ('succeeded', 'failed', 'rolled_back')",
+    );
+    let mut args: Vec<rusqlite::types::Value> = vec![repo.to_string().into()];
+
+    if let Some(v) = lane {
+        sql.push_str(" AND lane = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    if let Some(v) = risk_tier {
+        sql.push_str(" AND risk_tier = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+
+    sql.push_str(" GROUP BY ghost");
+    sql.push_str(" HAVING COUNT(*) >= ?");
+    sql.push_str(&(args.len() + 1).to_string());
+    args.push((min_samples as i64).into());
+    sql.push_str(
+        " ORDER BY (1.0 * tasks_succeeded / tasks_started) DESC, tasks_started DESC, ghost ASC",
+    );
+    sql.push_str(" LIMIT ?");
+    sql.push_str(&(args.len() + 1).to_string());
+    args.push((limit as i64).into());
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |row| {
+        let ghost: String = row.get(0)?;
+        let tasks_started = row.get::<_, i64>(1)?.max(0) as u64;
+        let tasks_succeeded = row.get::<_, i64>(2)?.max(0) as u64;
+        let success_rate = ratio(tasks_succeeded, tasks_started);
+        Ok(GhostSuccessRate {
+            ghost,
+            tasks_started,
+            tasks_succeeded,
+            success_rate,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 fn parse_sqlite_datetime(ts: &str) -> Option<DateTime<Utc>> {
@@ -854,5 +930,49 @@ mod tests {
         assert_eq!(old, "failed");
         assert_eq!(fresh, "started");
         assert_eq!(done, "succeeded");
+    }
+
+    #[test]
+    fn query_ghost_success_rates_applies_threshold_and_sorting() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO autonomous_task_outcomes
+             (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at)
+             VALUES
+             ('g1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00'),
+             ('g2','delivery','athena','medium','coder','b','succeeded','2026-01-01 10:02:00','2026-01-01 10:03:00'),
+             ('g3','delivery','athena','medium','coder','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00'),
+             ('g4','delivery','athena','medium','coder','d','failed','2026-01-01 10:06:00','2026-01-01 10:07:00'),
+             ('g5','delivery','athena','medium','scout','e','failed','2026-01-01 10:08:00','2026-01-01 10:09:00'),
+             ('g6','delivery','athena','medium','scout','f','failed','2026-01-01 10:10:00','2026-01-01 10:11:00'),
+             ('g7','delivery','athena','medium','scout','g','succeeded','2026-01-01 10:12:00','2026-01-01 10:13:00'),
+             ('g8','delivery','athena','medium','architect','h','succeeded','2026-01-01 10:14:00','2026-01-01 10:15:00'),
+             ('g9','delivery','athena','medium','architect','i','failed','2026-01-01 10:16:00','2026-01-01 10:17:00'),
+             ('g10','delivery','athena','medium','architect','j','failed','2026-01-01 10:18:00','2026-01-01 10:19:00'),
+             ('g11','delivery','athena','medium','','k','succeeded','2026-01-01 10:20:00','2026-01-01 10:21:00'),
+             ('g12','delivery','athena','medium',NULL,'l','succeeded','2026-01-01 10:22:00','2026-01-01 10:23:00'),
+             ('g13','delivery','athena','medium','coder','m','started','2026-01-01 10:24:00',NULL)",
+            [],
+        )
+        .unwrap();
+
+        let rows =
+            query_ghost_success_rates(&conn, "athena", Some("delivery"), Some("medium"), 3, 10)
+                .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ghost, "coder");
+        assert_eq!(rows[0].tasks_started, 4);
+        assert_eq!(rows[0].tasks_succeeded, 3);
+        assert!((rows[0].success_rate - 0.75).abs() < 1e-9);
+
+        assert_eq!(rows[1].ghost, "architect");
+        assert_eq!(rows[1].tasks_started, 3);
+        assert_eq!(rows[1].tasks_succeeded, 1);
+        assert!((rows[1].success_rate - (1.0 / 3.0)).abs() < 1e-9);
+
+        assert_eq!(rows[2].ghost, "scout");
+        assert_eq!(rows[2].tasks_started, 3);
+        assert_eq!(rows[2].tasks_succeeded, 1);
+        assert!((rows[2].success_rate - (1.0 / 3.0)).abs() < 1e-9);
     }
 }

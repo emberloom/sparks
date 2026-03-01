@@ -28,6 +28,8 @@ struct DirectStep {
 }
 
 const KPI_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
+const KPI_GHOST_MIN_SAMPLES: u64 = 3;
+const KPI_GHOST_TOP_LIMIT: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KpiPromptScope {
@@ -1109,37 +1111,7 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         let config = self.config.clone();
         let scope_for_query = scope.clone();
         let value = tokio::task::spawn_blocking(move || {
-            let conn = match kpi::open_connection(&config) {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::debug!("Skipping KPI context: {}", e);
-                    return String::new();
-                }
-            };
-
-            match query_kpi_rollup(
-                &conn,
-                &scope_for_query.repo,
-                scope_for_query.lane.as_deref(),
-                scope_for_query.risk_tier.as_deref(),
-            ) {
-                Ok(Some((success_rate, verification_pass, rollback_rate, tasks_started))) => {
-                    format_kpi_context(
-                        &scope_for_query.repo,
-                        scope_for_query.lane.as_deref(),
-                        scope_for_query.risk_tier.as_deref(),
-                        success_rate,
-                        verification_pass,
-                        rollback_rate,
-                        tasks_started,
-                    )
-                }
-                Ok(None) => String::new(),
-                Err(e) => {
-                    tracing::debug!("Skipping KPI context snapshot: {}", e);
-                    String::new()
-                }
-            }
+            load_kpi_context_snapshot(&config, &scope_for_query)
         })
         .await
         .ok()
@@ -1305,6 +1277,67 @@ fn query_kpi_rollup(
     )))
 }
 
+fn load_kpi_context_snapshot(config: &Config, scope: &KpiPromptScope) -> String {
+    let conn = match kpi::open_connection(config) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::debug!("Skipping KPI context: {}", e);
+            return String::new();
+        }
+    };
+
+    let rollup_section = load_rollup_context(&conn, scope);
+    let ghost_section = load_ghost_success_context(&conn, scope);
+    if rollup_section.is_empty() {
+        ghost_section
+    } else {
+        format!("{}{}", rollup_section, ghost_section)
+    }
+}
+
+fn load_rollup_context(conn: &rusqlite::Connection, scope: &KpiPromptScope) -> String {
+    match query_kpi_rollup(
+        conn,
+        &scope.repo,
+        scope.lane.as_deref(),
+        scope.risk_tier.as_deref(),
+    ) {
+        Ok(Some((success_rate, verification_pass, rollback_rate, tasks_started))) => {
+            format_kpi_context(
+                &scope.repo,
+                scope.lane.as_deref(),
+                scope.risk_tier.as_deref(),
+                success_rate,
+                verification_pass,
+                rollback_rate,
+                tasks_started,
+            )
+        }
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::debug!("Skipping KPI context snapshot: {}", e);
+            String::new()
+        }
+    }
+}
+
+fn load_ghost_success_context(conn: &rusqlite::Connection, scope: &KpiPromptScope) -> String {
+    match kpi::query_ghost_success_rates(
+        conn,
+        &scope.repo,
+        scope.lane.as_deref(),
+        scope.risk_tier.as_deref(),
+        KPI_GHOST_MIN_SAMPLES,
+        KPI_GHOST_TOP_LIMIT,
+    ) {
+        Ok(rows) => format_ghost_success_context(&rows),
+        Err(e) => {
+            tracing::debug!("Skipping ghost KPI context: {}", e);
+            String::new()
+        }
+    }
+}
+
 fn format_kpi_context(
     repo: &str,
     lane: Option<&str>,
@@ -1324,6 +1357,29 @@ fn format_kpi_context(
         tasks_started,
         lane = lane_label,
         risk_tier = risk_label,
+    )
+}
+
+fn format_ghost_success_context(rows: &[kpi::GhostSuccessRate]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "- {}: success_rate={:.1}% ({}/{})",
+                row.ghost,
+                row.success_rate * 100.0,
+                row.tasks_succeeded,
+                row.tasks_started
+            )
+        })
+        .collect();
+    format!(
+        "\n\nRecent ghost performance (>= {} samples):\n{}",
+        KPI_GHOST_MIN_SAMPLES,
+        lines.join("\n")
     )
 }
 
@@ -1438,9 +1494,11 @@ enum Classification {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_kpi_context, format_lesson_context, infer_kpi_prompt_scope, Classification, Manager,
+        format_ghost_success_context, format_kpi_context, format_lesson_context,
+        infer_kpi_prompt_scope, Classification, Manager,
     };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
+    use crate::kpi::GhostSuccessRate;
     use crate::memory::Memory;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1602,6 +1660,34 @@ mod tests {
         assert!(scope.lane.is_none());
         assert!(scope.risk_tier.is_none());
         assert!(!scope.repo.is_empty());
+    }
+
+    #[test]
+    fn format_ghost_success_context_contains_expected_metrics() {
+        let rows = vec![
+            GhostSuccessRate {
+                ghost: "coder".to_string(),
+                tasks_started: 5,
+                tasks_succeeded: 4,
+                success_rate: 0.8,
+            },
+            GhostSuccessRate {
+                ghost: "scout".to_string(),
+                tasks_started: 3,
+                tasks_succeeded: 1,
+                success_rate: 1.0 / 3.0,
+            },
+        ];
+        let section = format_ghost_success_context(&rows);
+        assert!(section.contains("Recent ghost performance (>= 3 samples):"));
+        assert!(section.contains("- coder: success_rate=80.0% (4/5)"));
+        assert!(section.contains("- scout: success_rate=33.3% (1/3)"));
+    }
+
+    #[test]
+    fn format_ghost_success_context_empty_when_no_rows() {
+        let section = format_ghost_success_context(&[]);
+        assert!(section.is_empty());
     }
 
     #[test]
