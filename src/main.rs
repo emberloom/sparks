@@ -3426,8 +3426,13 @@ async fn run_feature_dispatch_flow(
 
     let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
         std::collections::HashMap::new();
+    let rollback_commit_tag = opts
+        .rollback_on_failure
+        .then(|| format!("athena-feature-run:{}", uuid::Uuid::new_v4()));
     let rollback_repo_root = if opts.rollback_on_failure {
-        Some(resolve_repo_root().await?)
+        let repo_root = resolve_repo_root().await?;
+        ensure_clean_working_tree(&repo_root).await?;
+        Some(repo_root)
     } else {
         None
     };
@@ -3491,6 +3496,10 @@ async fn run_feature_dispatch_flow(
                 task_wait,
                 opts.outcome_grace_secs,
             );
+            let mut context = build_feature_task_context(contract, task, &predecessor_summaries);
+            if let Some(tag) = rollback_commit_tag.as_deref() {
+                context = append_feature_rollback_commit_policy_context(context, tag);
+            }
             runnable.push(FeatureRunnableTask {
                 task: task.clone(),
                 lane,
@@ -3498,7 +3507,7 @@ async fn run_feature_dispatch_flow(
                 repo,
                 wait_secs: task_wait,
                 outcome_grace_secs: task_grace,
-                context: build_feature_task_context(contract, task, &predecessor_summaries),
+                context,
             });
         }
         if runnable.is_empty() {
@@ -3554,6 +3563,7 @@ async fn run_feature_dispatch_flow(
                         repo_root,
                         &mut rollback_last_head,
                         &mut rollback_seen,
+                        rollback_commit_tag.as_deref(),
                     )
                     .await?;
                     if !new_commits.is_empty() {
@@ -3763,6 +3773,37 @@ fn build_feature_task_context(
     context
 }
 
+fn append_feature_rollback_commit_policy_context(mut context: String, commit_tag: &str) -> String {
+    context.push_str(&format!("\n[feature_rollback_commit_tag:{}]", commit_tag));
+    context.push_str(
+        "\nIf you create git commits for this feature task, include the rollback tag in the commit message.",
+    );
+    context
+}
+
+async fn ensure_clean_working_tree(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let status = run_command_capture(repo_root, "git", &args(&["status", "--porcelain"]), 30).await;
+    if !command_succeeded(&status) {
+        anyhow::bail!(
+            "rollback-on-failure precheck failed: could not read git status ({})",
+            tail_text(&command_combined_output(&status), 300)
+        );
+    }
+    let dirty = status
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string());
+    if let Some(first) = dirty {
+        anyhow::bail!(
+            "rollback-on-failure requires a clean working tree; found local changes (first entry: '{}')",
+            first
+        );
+    }
+    Ok(())
+}
+
 async fn current_git_head(repo_root: &std::path::Path) -> anyhow::Result<Option<String>> {
     let rev = run_command_capture(repo_root, "git", &args(&["rev-parse", "HEAD"]), 30).await;
     if !command_succeeded(&rev) {
@@ -3780,6 +3821,7 @@ async fn track_feature_commits_since(
     repo_root: &std::path::Path,
     last_head: &mut Option<String>,
     seen: &mut std::collections::HashSet<String>,
+    commit_tag: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     let Some(current_head) = current_git_head(repo_root).await? else {
         return Ok(Vec::new());
@@ -3812,11 +3854,49 @@ async fn track_feature_commits_since(
         if sha.is_empty() {
             continue;
         }
+        if let Some(tag) = commit_tag {
+            if !commit_message_contains_tag(repo_root, sha, tag).await? {
+                continue;
+            }
+        }
         if seen.insert(sha.to_string()) {
             out.push(sha.to_string());
         }
     }
     Ok(out)
+}
+
+async fn commit_message_contains_tag(
+    repo_root: &std::path::Path,
+    sha: &str,
+    tag: &str,
+) -> anyhow::Result<bool> {
+    let show = run_command_capture(
+        repo_root,
+        "git",
+        &args(&["show", "-s", "--format=%B", sha]),
+        30,
+    )
+    .await;
+    if !command_succeeded(&show) {
+        return Ok(false);
+    }
+    Ok(show.stdout.contains(tag))
+}
+
+async fn abort_git_revert_if_needed(repo_root: &std::path::Path) -> Option<String> {
+    let abort = run_command_capture(repo_root, "git", &args(&["revert", "--abort"]), 30).await;
+    if command_succeeded(&abort) {
+        return None;
+    }
+    let output = command_combined_output(&abort);
+    let lowered = output.to_ascii_lowercase();
+    if lowered.contains("no cherry-pick or revert in progress")
+        || lowered.contains("there is no merge to abort")
+    {
+        return None;
+    }
+    Some(tail_text(&output, 300))
 }
 
 async fn rollback_feature_commits(
@@ -3835,7 +3915,10 @@ async fn rollback_feature_commits(
                 error: None,
             });
         } else {
-            let error = tail_text(&command_combined_output(&revert), 400);
+            let mut error = tail_text(&command_combined_output(&revert), 400);
+            if let Some(abort_error) = abort_git_revert_if_needed(repo_root).await {
+                error.push_str(&format!(" | revert_abort_failed: {}", abort_error));
+            }
             println!(
                 "feature_rollback commit={} status=failed reason={}",
                 sha,
@@ -5540,19 +5623,22 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_promotion_decision, build_feature_run_ledger, build_feature_task_context,
+        append_feature_rollback_commit_policy_context, build_feature_promotion_decision,
+        build_feature_run_ledger, build_feature_task_context, commit_message_contains_tag,
         build_self_build_review_checklist, classify_chat_command,
-        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
+        compute_feature_outcome_grace_secs, ensure_clean_working_tree,
+        evaluate_self_build_guardrails,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
-        render_feature_ledger_markdown, wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus,
-        SelfBuildPromoteMode, WaitForAutonomousOutcome,
+        render_feature_ledger_markdown, rollback_feature_commits, track_feature_commits_since,
+        wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
+        WaitForAutonomousOutcome,
     };
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
     };
     use crate::pulse::{Pulse, PulseSource, Urgency};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
     #[test]
@@ -5704,6 +5790,150 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    struct TempRepo {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRepo {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn init_temp_git_repo() -> TempRepo {
+        let path = std::env::temp_dir().join(format!("athena-test-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp repo dir");
+        let repo = path.as_path();
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "athena-test@example.com"]);
+        run_git(repo, &["config", "user.name", "Athena Test"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "init"]);
+        TempRepo { path }
+    }
+
+    #[tokio::test]
+    async fn track_feature_commits_since_filters_to_owned_tagged_commits() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let mut last_head = Some(git_stdout(repo, &["rev-parse", "HEAD"]));
+        let mut seen = HashSet::new();
+        let tag = "athena-feature-run:test-123";
+
+        std::fs::write(repo.join("README.md"), "owned change\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned commit", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "unowned\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned commit"]);
+        let unowned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        let tracked = track_feature_commits_since(repo, &mut last_head, &mut seen, Some(tag))
+            .await
+            .expect("track commits");
+        assert_eq!(tracked, vec![owned_sha.clone()]);
+        assert!(!tracked.contains(&unowned_sha));
+        assert!(commit_message_contains_tag(repo, &owned_sha, tag)
+            .await
+            .expect("owned tag lookup"));
+        assert!(!commit_message_contains_tag(repo, &unowned_sha, tag)
+            .await
+            .expect("unowned tag lookup"));
+    }
+
+    #[tokio::test]
+    async fn rollback_feature_commits_reverts_owned_commit_without_touching_other_changes() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let tag = "athena-feature-run:test-rollback";
+
+        std::fs::write(repo.join("README.md"), "owned delta\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned delta", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "keep this\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned delta"]);
+
+        let rows = rollback_feature_commits(repo, &[owned_sha]).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].reverted);
+        assert!(rows[0].error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).expect("read reverted file"),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("notes.txt")).expect("read unowned file"),
+            "keep this\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_on_failure_requires_clean_working_tree() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        ensure_clean_working_tree(repo)
+            .await
+            .expect("clean repo should pass precheck");
+
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+        let err = ensure_clean_working_tree(repo)
+            .await
+            .expect_err("dirty repo should fail precheck");
+        let msg = err.to_string();
+        assert!(msg.contains("clean working tree"));
+    }
+
+    #[test]
+    fn rollback_commit_policy_context_includes_tag_and_instruction() {
+        let context = append_feature_rollback_commit_policy_context(
+            "base context".to_string(),
+            "athena-feature-run:test-ctx",
+        );
+        assert!(context.contains("[feature_rollback_commit_tag:athena-feature-run:test-ctx]"));
+        assert!(context.contains("include the rollback tag"));
     }
 
     #[test]
