@@ -194,6 +194,18 @@ def check_ticket_status(db_path: Path) -> str | None:
         conn.close()
 
 
+def wait_for_terminal_ticket_status(db_path: Path, timeout_secs: int) -> str | None:
+    deadline = time.time() + timeout_secs
+    last_status: str | None = None
+    while time.time() < deadline:
+        status = check_ticket_status(db_path)
+        last_status = status
+        if status in ("synced", "sync_failed"):
+            return status
+        time.sleep(1)
+    return last_status
+
+
 def terminate(proc: subprocess.Popen, name: str) -> None:
     if proc.poll() is not None:
         return
@@ -245,7 +257,7 @@ def main() -> int:
         send_linear_webhook(webhook_port, DEFAULT_WEBHOOK_FIXTURE, "test-secret")
         wait_for_writeback(ledger_path, args.sync_timeout_secs)
 
-        status = check_ticket_status(db_path)
+        status = wait_for_terminal_ticket_status(db_path, args.sync_timeout_secs)
         if status not in ("synced", "sync_failed"):
             raise RuntimeError(f"Unexpected ticket status: {status}")
 
