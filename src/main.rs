@@ -2901,6 +2901,7 @@ struct FeatureTaskDispatchOutcome {
     task_id: String,
     dispatch_task_id: String,
     status: FeatureRunStatus,
+    result_summary: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3336,6 +3337,10 @@ async fn run_feature_task_dispatch(
     );
     let wait =
         wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, runnable.wait_secs).await;
+    let result_summary = match &wait {
+        WaitForAutonomousOutcome::Received(content) => clip_feature_result_summary(content),
+        WaitForAutonomousOutcome::TimedOut | WaitForAutonomousOutcome::ChannelClosed => None,
+    };
     let status = resolve_feature_run_status_after_wait(
         &config,
         &task_dispatch_id,
@@ -3348,6 +3353,7 @@ async fn run_feature_task_dispatch(
         task_id: runnable.task.id,
         dispatch_task_id: task_dispatch_id,
         status,
+        result_summary,
     })
 }
 
@@ -3390,6 +3396,8 @@ async fn run_feature_dispatch_flow(
     );
 
     let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
+        std::collections::HashMap::new();
+    let mut predecessor_summaries: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut dispatch_ids: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -3449,7 +3457,7 @@ async fn run_feature_dispatch_flow(
                 repo,
                 wait_secs: task_wait,
                 outcome_grace_secs: task_grace,
-                context: build_feature_task_context(contract, task),
+                context: build_feature_task_context(contract, task, &predecessor_summaries),
             });
         }
         if runnable.is_empty() {
@@ -3496,6 +3504,11 @@ async fn run_feature_dispatch_flow(
                 ),
             }
             let failed = matches!(outcome.status, FeatureRunStatus::Failed(_));
+            if matches!(outcome.status, FeatureRunStatus::Succeeded) {
+                if let Some(summary) = outcome.result_summary.clone() {
+                    predecessor_summaries.insert(outcome.task_id.clone(), summary);
+                }
+            }
             dispatch_ids.insert(outcome.task_id.clone(), outcome.dispatch_task_id);
             statuses.insert(outcome.task_id.clone(), outcome.status);
             if failed && !opts.continue_on_failure {
@@ -3615,9 +3628,18 @@ fn compute_feature_outcome_grace_secs(
     base.max(wait_scaled).clamp(60, 1800)
 }
 
+fn clip_feature_result_summary(summary: &str) -> Option<String> {
+    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(500).collect())
+}
+
 fn build_feature_task_context(
     contract: &feature_contract::FeatureContract,
     task: &feature_contract::FeatureTask,
+    predecessor_summaries: &std::collections::HashMap<String, String>,
 ) -> String {
     let mut context = task.context.clone().unwrap_or_default();
     if !context.is_empty() {
@@ -3647,6 +3669,22 @@ fn build_feature_task_context(
     }
     if let Some(model) = task.cli_model.as_deref() {
         context.push_str(&format!("\n[cli_model:{}]", model));
+    }
+    let mut predecessor_lines = Vec::new();
+    for dep in &task.depends_on {
+        if let Some(summary) = predecessor_summaries
+            .get(dep)
+            .and_then(|summary| clip_feature_result_summary(summary))
+        {
+            predecessor_lines.push(format!("- {}: {}", dep, summary));
+        }
+    }
+    if !predecessor_lines.is_empty() {
+        context.push_str("\nPrevious task results:");
+        for line in predecessor_lines {
+            context.push('\n');
+            context.push_str(&line);
+        }
     }
     context
 }
@@ -4680,7 +4718,7 @@ async fn run_dispatch(
         ghost_label, task_id, wait_secs
     );
     match wait_for_autonomous_pulse(&mut pulse_rx, &task_id, wait_secs).await {
-        WaitForAutonomousOutcome::Received => Ok(()),
+        WaitForAutonomousOutcome::Received(_) => Ok(()),
         WaitForAutonomousOutcome::TimedOut => {
             mark_dispatch_task_failed_if_started(
                 &config_for_finalize,
@@ -4750,14 +4788,14 @@ async fn wait_for_autonomous_pulse(
         };
         if pulse_matches_task_id(&pulse, task_id) {
             println!("[{}] {}", pulse.source.label(), pulse.content);
-            return WaitForAutonomousOutcome::Received;
+            return WaitForAutonomousOutcome::Received(pulse.content);
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WaitForAutonomousOutcome {
-    Received,
+    Received(String),
     TimedOut,
     ChannelClosed,
 }
@@ -4802,7 +4840,7 @@ async fn resolve_feature_run_status_after_wait(
     outcome_grace_secs: u64,
 ) -> anyhow::Result<FeatureRunStatus> {
     match wait_outcome {
-        WaitForAutonomousOutcome::Received => {
+        WaitForAutonomousOutcome::Received(_) => {
             match wait_for_terminal_outcome_status(config, task_id, 10).await? {
                 Some(status) => Ok(feature_status_from_terminal(&status)),
                 None => {
@@ -5304,7 +5342,7 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_promotion_decision, build_feature_run_ledger,
+        build_feature_promotion_decision, build_feature_run_ledger, build_feature_task_context,
         build_self_build_review_checklist, classify_chat_command,
         compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
@@ -5377,7 +5415,7 @@ mod tests {
         );
 
         let res = wait_for_autonomous_pulse(&mut rx, "task-match", 1).await;
-        assert_eq!(res, WaitForAutonomousOutcome::Received);
+        assert_eq!(res, WaitForAutonomousOutcome::Received("match".to_string()));
     }
 
     #[tokio::test]
@@ -5846,7 +5884,84 @@ index 1111111..2222222 100644
         );
 
         let res = wait_for_autonomous_pulse(&mut rx, "dispatch-42", 2).await;
-        assert_eq!(res, WaitForAutonomousOutcome::Received);
+        assert_eq!(res, WaitForAutonomousOutcome::Received("done".to_string()));
+    }
+
+    #[test]
+    fn feature_task_context_includes_predecessor_result_summaries() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert(
+            "T1".to_string(),
+            "Parser and validation implemented with tests".to_string(),
+        );
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(context.contains("Previous task results:"));
+        assert!(context.contains("- T1: Parser and validation implemented with tests"));
+    }
+
+    #[test]
+    fn feature_task_context_truncates_predecessor_result_summaries_to_500_chars() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "x".repeat(700));
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        let prefix = "- T1: ";
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .expect("expected predecessor summary line");
+        let summary = &line[prefix.len()..];
+        assert_eq!(summary.chars().count(), 500);
+    }
+
+    #[test]
+    fn feature_task_context_includes_only_direct_predecessor_summaries() {
+        let mut contract = sample_contract();
+        contract.tasks.push(FeatureTask {
+            id: "T3".to_string(),
+            goal: "task3".to_string(),
+            context: None,
+            ghost: None,
+            lane: None,
+            risk: None,
+            repo: None,
+            auto_store: None,
+            wait_secs: None,
+            cli_tool: None,
+            cli_model: None,
+            mapped_acceptance: vec!["AC-2".to_string()],
+            depends_on: vec!["T2".to_string()],
+            enabled: true,
+        });
+        let task = contract.task_by_id("T3").expect("T3 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "summary from T1".to_string());
+        predecessor_summaries.insert("T2".to_string(), "summary from T2".to_string());
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(context.contains("Previous task results:"));
+        assert!(context.contains("- T2: summary from T2"));
+        assert!(!context.contains("- T1: summary from T1"));
+    }
+
+    #[test]
+    fn feature_task_context_omits_previous_results_when_summary_missing_or_empty() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+
+        let context_without_summary = build_feature_task_context(&contract, task, &HashMap::new());
+        assert!(!context_without_summary.contains("Previous task results:"));
+
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "   \n\t".to_string());
+        let context_with_empty_summary =
+            build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(!context_with_empty_summary.contains("Previous task results:"));
     }
 
     #[test]
