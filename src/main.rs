@@ -466,6 +466,9 @@ enum SelfBuildAction {
         /// Monitor CI after opening a PR
         #[arg(long)]
         monitor_ci: bool,
+        /// Explicitly disable CI monitoring after opening a PR
+        #[arg(long, conflicts_with = "monitor_ci")]
+        no_monitor_ci: bool,
     },
 }
 
@@ -969,6 +972,23 @@ fn self_build_promote_mode_label(mode: SelfBuildPromoteMode) -> &'static str {
         SelfBuildPromoteMode::Pr => "pr",
         SelfBuildPromoteMode::Auto => "auto",
     }
+}
+
+fn resolve_self_build_ci_monitor(
+    promote_mode: SelfBuildPromoteMode,
+    monitor_ci: bool,
+    no_monitor_ci: bool,
+) -> (bool, &'static str) {
+    if monitor_ci {
+        return (true, "explicit_on");
+    }
+    if no_monitor_ci {
+        return (false, "explicit_off");
+    }
+    if promote_mode == SelfBuildPromoteMode::Auto {
+        return (true, "auto_default");
+    }
+    (false, "default_off")
 }
 
 fn self_build_promotion_branch(run_id: &str) -> String {
@@ -2267,6 +2287,7 @@ async fn handle_self_build(
             promote_mode,
             base_branch,
             monitor_ci,
+            no_monitor_ci,
         } => {
             run_self_build(
                 config,
@@ -2283,6 +2304,7 @@ async fn handle_self_build(
                 promote_mode,
                 base_branch,
                 monitor_ci,
+                no_monitor_ci,
             )
             .await
         }
@@ -2486,6 +2508,7 @@ async fn run_self_build(
     promote_mode: SelfBuildPromoteMode,
     base_branch: String,
     monitor_ci: bool,
+    no_monitor_ci: bool,
 ) -> anyhow::Result<()> {
     validate_risk(&risk)?;
     let timestamp_utc = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
@@ -2661,7 +2684,13 @@ async fn run_self_build(
     )
     .await;
 
-    let ci_monitor = if monitor_ci
+    let (monitor_ci_enabled, monitor_ci_source) =
+        resolve_self_build_ci_monitor(promote_mode, monitor_ci, no_monitor_ci);
+    if monitor_ci_source == "auto_default" {
+        println!("auto-enabling CI monitor for promote_mode=auto");
+    }
+
+    let ci_monitor = if monitor_ci_enabled
         && promotion_execution.status == "pr_opened"
         && promotion_execution.pr_url.is_some()
     {
@@ -5688,7 +5717,7 @@ mod tests {
         build_self_build_review_checklist, classify_chat_command,
         compute_feature_outcome_grace_secs, ensure_clean_working_tree,
         evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
-        feature_batch_dynamic_parallelism,
+        feature_batch_dynamic_parallelism, resolve_self_build_ci_monitor,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
         render_feature_ledger_markdown, rollback_feature_commits, track_feature_commits_since,
@@ -6067,6 +6096,37 @@ mod tests {
         let (parallelism, reason) = feature_batch_dynamic_parallelism(3, Some(&metrics));
         assert_eq!(parallelism, 3);
         assert!(reason.contains("rss_unavailable"));
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_auto_defaults_on() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, false, false);
+        assert!(enabled);
+        assert_eq!(source, "auto_default");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_non_auto_defaults_off() {
+        let (enabled, source) = resolve_self_build_ci_monitor(SelfBuildPromoteMode::Pr, false, false);
+        assert!(!enabled);
+        assert_eq!(source, "default_off");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_explicit_on_wins() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, true, false);
+        assert!(enabled);
+        assert_eq!(source, "explicit_on");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_explicit_off_wins() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, false, true);
+        assert!(!enabled);
+        assert_eq!(source, "explicit_off");
     }
 
     #[test]
