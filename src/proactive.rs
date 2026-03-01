@@ -73,8 +73,8 @@ fn has_similar_failure(idea: &str, past_failures: &[crate::memory::Memory]) -> b
 
 fn recent_refactoring_failures(memory: &MemoryStore) -> Vec<crate::memory::Memory> {
     memory
-        .list_by_category_recent("code_change_failed", 20, 2)
-        .or_else(|_| memory.search_hybrid("code_change_failed", None, 20))
+        .list_by_categories_recent_hours(&["code_change_failed", "refactoring_failed"], 20, 48)
+        .or_else(|_| memory.search_hybrid("code_change_failed refactoring_failed", None, 20))
         .unwrap_or_default()
 }
 
@@ -1066,7 +1066,7 @@ mod tests {
         MemoryStore::new(conn, 30.0, 1.0)
     }
 
-    fn setup_test_db_with_failure(content: &str, age_days: i64) -> MemoryStore {
+    fn setup_test_db_with_failure(category: &str, content: &str, age_hours: i64) -> MemoryStore {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE memories (
@@ -1098,11 +1098,12 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO memories(id, category, content, active, created_at, updated_at, embedding)
-             VALUES (?1, 'code_change_failed', ?2, 1, datetime('now', ?3), datetime('now', ?3), NULL)",
+             VALUES (?1, ?2, ?3, 1, datetime('now', ?4), datetime('now', ?4), NULL)",
             rusqlite::params![
                 "seed-failure",
+                category,
                 content,
-                format!("-{} days", age_days.max(0)),
+                format!("-{} hours", age_hours.max(0)),
             ],
         )
         .unwrap();
@@ -1156,8 +1157,9 @@ mod tests {
     #[tokio::test]
     async fn old_refactoring_failure_does_not_suppress_dispatch() {
         let store = setup_test_db_with_failure(
+            "code_change_failed",
             "Autonomous task FAILED [coder]: Implement this refactoring: split src/proactive.rs scanner loop",
-            3,
+            72,
         );
         let observer = ObserverHandle::new(8);
         let (tx, mut rx) = mpsc::channel(1);
@@ -1174,7 +1176,27 @@ mod tests {
         let failures = recent_refactoring_failures(&store);
         assert!(
             failures.is_empty(),
-            "48h failure scan should exclude entries older than 2 days"
+            "48h failure scan should exclude entries older than 48 hours"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_refactoring_failed_category_suppresses_dispatch() {
+        let store = setup_test_db_with_failure(
+            "refactoring_failed",
+            "Autonomous task FAILED [coder]: Implement this refactoring: split src/proactive.rs scanner loop",
+            6,
+        );
+        let observer = ObserverHandle::new(8);
+        let (tx, mut rx) = mpsc::channel(1);
+        let opportunity =
+            "split src/proactive.rs scanner loop to isolate refactoring gate and dispatch logic";
+
+        check_and_dispatch_refactoring(opportunity, 10.0, &observer, &store, &tx, None).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "recent refactoring_failed entries should suppress dispatch"
         );
     }
 }
