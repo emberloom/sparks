@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import json
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -159,6 +161,62 @@ class EvalDashboardTests(unittest.TestCase):
         )
         self.assertIn("sparse data: no ghosts meet the stable-sample threshold yet", content)
         self.assertIn("`low-sample(<3)`", content)
+
+    def test_lookup_pricing_unknown_provider_and_version_fallback(self) -> None:
+        in_price, out_price, used_version, known = eval_dashboard.lookup_pricing(
+            provider="unknown",
+            pricing_version="v999",
+        )
+        self.assertEqual(used_version, eval_dashboard.DEFAULT_PRICING_VERSION)
+        self.assertFalse(known)
+        self.assertEqual(in_price, 0.0)
+        self.assertEqual(out_price, 0.0)
+
+    def test_build_token_cost_rows_infers_pricing_and_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "eval-report.json"
+            report.write_text(
+                json.dumps(
+                    {
+                        "suite": "smoke-mini",
+                        "results": [
+                            {
+                                "task_id": "t-known",
+                                "cli_model": "openai/gpt-5-codex",
+                                "stdout": "prompt_tokens=120 completion_tokens=30",
+                                "stderr": "",
+                            },
+                            {
+                                "task_id": "t-unknown",
+                                "stdout": "",
+                                "stderr": "",
+                                "prompt_tokens": 50,
+                                "completion_tokens": 25,
+                            },
+                        ],
+                    }
+                )
+            )
+            history = [
+                {
+                    "timestamp_utc": "2026-03-01T10:00:00Z",
+                    "suite": "smoke-mini",
+                    "report_json": str(report),
+                }
+            ]
+            rows, summary = eval_dashboard.build_token_cost_rows(
+                history=history,
+                repo_root=root,
+                pricing_version="v999",
+            )
+
+        self.assertEqual(summary["pricing_version_used"], eval_dashboard.DEFAULT_PRICING_VERSION)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(any(r["provider"] == "openai" and r["known_pricing"] for r in rows))
+        self.assertTrue(any(r["provider"] == "unknown" and not r["known_pricing"] for r in rows))
+        self.assertGreater(summary["total_cost_usd"], 0.0)
+        self.assertGreaterEqual(summary["unknown_pricing_tasks"], 1)
 
 
 if __name__ == "__main__":

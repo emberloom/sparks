@@ -11,13 +11,28 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
+
+
+DEFAULT_PRICING_VERSION = "v1"
+TOKEN_PRICING_USD_PER_MTOK: dict[str, dict[str, dict[str, float]]] = {
+    # Costs are estimates per 1M tokens for dashboard trend comparison.
+    "v1": {
+        "openai": {"input": 5.0, "output": 15.0},
+        "openrouter": {"input": 5.0, "output": 15.0},
+        "zen": {"input": 5.0, "output": 15.0},
+        "ouath": {"input": 5.0, "output": 15.0},
+        "ollama": {"input": 0.0, "output": 0.0},
+    }
+}
 
 
 def parse_db_path(config_path: Path) -> Path:
@@ -62,6 +77,179 @@ def load_history(path: Path, limit: int) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows[-limit:]
+
+
+def parse_token_usage_from_text(text: str) -> tuple[int, int]:
+    prompt_matches = re.findall(r"prompt_tokens=(\d+)", text)
+    completion_matches = re.findall(r"completion_tokens=(\d+)", text)
+    if not prompt_matches and not completion_matches:
+        return 0, 0
+    prompt = int(prompt_matches[-1]) if prompt_matches else 0
+    completion = int(completion_matches[-1]) if completion_matches else 0
+    return prompt, completion
+
+
+def infer_provider_from_model(model_name: str | None) -> str | None:
+    if not model_name:
+        return None
+    raw = model_name.strip().lower()
+    if not raw:
+        return None
+    if "/" in raw:
+        prefix = raw.split("/", 1)[0]
+        if prefix:
+            return prefix
+    if "gpt" in raw or "o3" in raw or "o4" in raw:
+        return "openai"
+    return None
+
+
+def canonical_provider_name(raw: str | None) -> str:
+    if not raw:
+        return "unknown"
+    key = raw.strip().lower()
+    aliases = {
+        "chatgpt": "openai",
+        "ouath": "ouath",
+        "openrouter": "openrouter",
+        "ollama": "ollama",
+        "zen": "zen",
+        "openai": "openai",
+    }
+    return aliases.get(key, key)
+
+
+def lookup_pricing(provider: str, pricing_version: str) -> tuple[float, float, str, bool]:
+    version = pricing_version if pricing_version in TOKEN_PRICING_USD_PER_MTOK else DEFAULT_PRICING_VERSION
+    book = TOKEN_PRICING_USD_PER_MTOK.get(version, {})
+    record = book.get(provider)
+    if record is None:
+        return 0.0, 0.0, version, False
+    return float(record.get("input", 0.0)), float(record.get("output", 0.0)), version, True
+
+
+def resolve_report_path(repo_root: Path, raw: str | None) -> Path | None:
+    if not raw:
+        return None
+    p = Path(raw)
+    return p if p.is_absolute() else (repo_root / p).resolve()
+
+
+def build_token_cost_rows(
+    history: list[dict],
+    repo_root: Path,
+    pricing_version: str,
+) -> tuple[list[dict], dict[str, Any]]:
+    rows: list[dict] = []
+    aggregate: dict[str, dict[str, float | int]] = {}
+    total_cost = 0.0
+    total_prompt = 0
+    total_completion = 0
+    total_known_provider_cost = 0.0
+    unknown_provider_tasks = 0
+    unknown_pricing_tasks = 0
+
+    for entry in history:
+        report_path = resolve_report_path(repo_root, str(entry.get("report_json", "")))
+        if report_path is None or not report_path.exists():
+            continue
+        try:
+            payload = json.loads(report_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        suite = str(entry.get("suite", payload.get("suite", "unknown")))
+        ts = str(entry.get("timestamp_utc", payload.get("timestamp_utc", "unknown")))
+        entry_cli_model = str(entry.get("cli_model") or payload.get("cli_model") or "")
+        for task in payload.get("results", []):
+            task_id = str(task.get("task_id", "unknown"))
+            prompt_tokens = int(task.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(task.get("completion_tokens", 0) or 0)
+            if prompt_tokens <= 0 and completion_tokens <= 0:
+                text = f"{task.get('stdout', '')}\n{task.get('stderr', '')}"
+                prompt_tokens, completion_tokens = parse_token_usage_from_text(text)
+
+            provider_raw = (
+                task.get("token_provider")
+                or task.get("provider")
+                or infer_provider_from_model(str(task.get("cli_model") or entry_cli_model))
+                or "unknown"
+            )
+            provider = canonical_provider_name(str(provider_raw))
+
+            in_price, out_price, used_version, known_pricing = lookup_pricing(provider, pricing_version)
+            cost_usd = ((prompt_tokens * in_price) + (completion_tokens * out_price)) / 1_000_000.0
+
+            if provider == "unknown":
+                unknown_provider_tasks += 1
+            if not known_pricing:
+                unknown_pricing_tasks += 1
+            if known_pricing:
+                total_known_provider_cost += cost_usd
+
+            total_cost += cost_usd
+            total_prompt += prompt_tokens
+            total_completion += completion_tokens
+
+            agg = aggregate.setdefault(
+                provider,
+                {
+                    "provider": provider,
+                    "tasks": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost_usd": 0.0,
+                    "known_pricing": known_pricing,
+                },
+            )
+            agg["tasks"] = int(agg["tasks"]) + 1
+            agg["prompt_tokens"] = int(agg["prompt_tokens"]) + prompt_tokens
+            agg["completion_tokens"] = int(agg["completion_tokens"]) + completion_tokens
+            agg["cost_usd"] = float(agg["cost_usd"]) + cost_usd
+            agg["known_pricing"] = bool(agg["known_pricing"]) and known_pricing
+
+            rows.append(
+                {
+                    "timestamp_utc": ts,
+                    "suite": suite,
+                    "task_id": task_id,
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "cost_usd": cost_usd,
+                    "pricing_version": used_version,
+                    "known_pricing": known_pricing,
+                }
+            )
+
+    rows.sort(
+        key=lambda x: (
+            str(x.get("timestamp_utc", "")),
+            str(x.get("suite", "")),
+            str(x.get("task_id", "")),
+        ),
+        reverse=True,
+    )
+    aggregate_rows = sorted(
+        aggregate.values(),
+        key=lambda x: (float(x["cost_usd"]), int(x["tasks"])),
+        reverse=True,
+    )
+    summary = {
+        "pricing_version_requested": pricing_version,
+        "pricing_version_used": (
+            pricing_version if pricing_version in TOKEN_PRICING_USD_PER_MTOK else DEFAULT_PRICING_VERSION
+        ),
+        "total_cost_usd": total_cost,
+        "total_cost_known_provider_usd": total_known_provider_cost,
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "total_tokens": total_prompt + total_completion,
+        "unknown_provider_tasks": unknown_provider_tasks,
+        "unknown_pricing_tasks": unknown_pricing_tasks,
+        "providers": aggregate_rows,
+    }
+    return rows, summary
 
 
 def is_smoke_suite(suite_name: str) -> bool:
@@ -335,7 +523,26 @@ def render_dashboard(
     lane_filter: str | None = None,
     risk_filter: str | None = None,
     ghost_min_samples: int = 3,
+    task_cost_limit: int = 20,
+    token_cost_rows: list[dict] | None = None,
+    token_cost_summary: dict[str, Any] | None = None,
 ) -> str:
+    if token_cost_rows is None:
+        token_cost_rows = []
+    if token_cost_summary is None:
+        token_cost_summary = {
+            "pricing_version_requested": DEFAULT_PRICING_VERSION,
+            "pricing_version_used": DEFAULT_PRICING_VERSION,
+            "total_cost_usd": 0.0,
+            "total_cost_known_provider_usd": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "unknown_provider_tasks": 0,
+            "unknown_pricing_tasks": 0,
+            "providers": [],
+        }
+
     now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = []
     lines.append("# Athena KPI + Eval Dashboard")
@@ -426,6 +633,73 @@ def render_dashboard(
         lines.append("| - | - | 0 | 0 | 0 | n/a | n/a | n/a | n/a |")
     lines.append("")
 
+    lines.append("## Token Cost (Estimated)")
+    lines.append("")
+    lines.append(
+        "- pricing_version: "
+        f"`{token_cost_summary.get('pricing_version_used', DEFAULT_PRICING_VERSION)}`"
+    )
+    if str(token_cost_summary.get("pricing_version_requested")) != str(
+        token_cost_summary.get("pricing_version_used")
+    ):
+        lines.append(
+            "- pricing_version_fallback: "
+            f"`{token_cost_summary.get('pricing_version_requested')}` -> "
+            f"`{token_cost_summary.get('pricing_version_used')}`"
+        )
+    lines.append(
+        "- total_tokens: "
+        f"`{int(token_cost_summary.get('total_tokens', 0))}` "
+        f"(prompt={int(token_cost_summary.get('total_prompt_tokens', 0))}, "
+        f"completion={int(token_cost_summary.get('total_completion_tokens', 0))})"
+    )
+    lines.append(
+        "- total_cost_usd: "
+        f"`{float(token_cost_summary.get('total_cost_usd', 0.0)):.6f}` "
+        f"(known_provider_cost={float(token_cost_summary.get('total_cost_known_provider_usd', 0.0)):.6f})"
+    )
+    lines.append(
+        "- unknown_provider_tasks: "
+        f"`{int(token_cost_summary.get('unknown_provider_tasks', 0))}` "
+        f"unknown_pricing_tasks: `{int(token_cost_summary.get('unknown_pricing_tasks', 0))}`"
+    )
+    lines.append("")
+    lines.append("### Aggregate by Provider")
+    lines.append("")
+    lines.append("| provider | tasks | prompt_tokens | completion_tokens | total_tokens | cost_usd | pricing |")
+    lines.append("|---|---:|---:|---:|---:|---:|---|")
+    providers = token_cost_summary.get("providers", [])
+    if providers:
+        for p in providers:
+            prompt_tokens = int(p.get("prompt_tokens", 0))
+            completion_tokens = int(p.get("completion_tokens", 0))
+            lines.append(
+                f"| `{p.get('provider', 'unknown')}` | {int(p.get('tasks', 0))} | "
+                f"{prompt_tokens} | {completion_tokens} | {prompt_tokens + completion_tokens} | "
+                f"{float(p.get('cost_usd', 0.0)):.6f} | "
+                f"`{'known' if p.get('known_pricing', False) else 'unknown'}` |"
+            )
+    else:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0.000000 | n/a |")
+    lines.append("")
+    lines.append("### Per-Task Cost (Recent)")
+    lines.append("")
+    lines.append("| timestamp | suite | task | provider | prompt | completion | total | cost_usd | pricing |")
+    lines.append("|---|---|---|---|---:|---:|---:|---:|---|")
+    if token_cost_rows:
+        limit = max(1, task_cost_limit)
+        for r in token_cost_rows[:limit]:
+            lines.append(
+                f"| `{r['timestamp_utc']}` | `{r['suite']}` | `{r['task_id']}` | `{r['provider']}` | "
+                f"{r['prompt_tokens']} | {r['completion_tokens']} | {r['total_tokens']} | "
+                f"{r['cost_usd']:.6f} | `{'known' if r['known_pricing'] else 'unknown'}` |"
+            )
+    else:
+        lines.append("| - | - | - | - | 0 | 0 | 0 | 0.000000 | n/a |")
+        lines.append("")
+        lines.append("- no token usage found in available eval report artifacts")
+    lines.append("")
+
     lines.append("## Per-Ghost Performance")
     lines.append("")
     lines.append(f"- sample_threshold: `>= {max(1, ghost_min_samples)}`")
@@ -455,6 +729,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-file", default="eval/results/history.jsonl")
     p.add_argument("--history-limit", type=int, default=20)
     p.add_argument("--kpi-trend-limit", type=int, default=20)
+    p.add_argument(
+        "--pricing-version",
+        default=DEFAULT_PRICING_VERSION,
+        help="Pricing mapping version for token cost estimates.",
+    )
+    p.add_argument(
+        "--task-cost-limit",
+        type=int,
+        default=20,
+        help="How many per-task cost rows to render.",
+    )
     p.add_argument(
         "--ghost-min-samples",
         type=int,
@@ -496,6 +781,11 @@ def main() -> int:
         min_samples=args.ghost_min_samples,
     )
     conn.close()
+    token_cost_rows, token_cost_summary = build_token_cost_rows(
+        history,
+        repo_root=repo,
+        pricing_version=args.pricing_version,
+    )
 
     content = render_dashboard(
         history,
@@ -506,6 +796,9 @@ def main() -> int:
         lane_filter=args.lane,
         risk_filter=args.risk,
         ghost_min_samples=args.ghost_min_samples,
+        task_cost_limit=args.task_cost_limit,
+        token_cost_rows=token_cost_rows,
+        token_cost_summary=token_cost_summary,
     )
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(content)
