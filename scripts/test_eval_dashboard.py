@@ -15,6 +15,25 @@ def _setup_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
+        CREATE TABLE autonomous_task_outcomes (
+            task_id TEXT PRIMARY KEY,
+            lane TEXT,
+            repo TEXT,
+            risk_tier TEXT,
+            ghost TEXT,
+            goal TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            verification_total INTEGER DEFAULT 0,
+            verification_passed INTEGER DEFAULT 0,
+            rolled_back INTEGER DEFAULT 0,
+            error TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE kpi_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lane TEXT NOT NULL,
@@ -43,9 +62,11 @@ class EvalDashboardTests(unittest.TestCase):
             history=[],
             kpis=[],
             kpi_trend=[],
+            ghost_breakdown=[],
             repo_name="athena",
             lane_filter="delivery",
             risk_filter="high",
+            ghost_min_samples=3,
         )
         self.assertIn("no KPI snapshot trend found for current filters", content)
         self.assertIn("| - | - | - | n/a | n/a | n/a | 0 |", content)
@@ -90,12 +111,54 @@ class EvalDashboardTests(unittest.TestCase):
             history=[],
             kpis=[],
             kpi_trend=trend,
+            ghost_breakdown=[],
             repo_name="athena",
             lane_filter="delivery",
             risk_filter="low",
+            ghost_min_samples=3,
         )
         self.assertIn("50.0% -> 70.0% (up", content)
         self.assertIn("| `2026-03-01 03:00:00` | `delivery` | `low` | 70.0% | 80.0% | 5.0% | 12 |", content)
+
+    def test_ghost_breakdown_sparse_data_indicator(self) -> None:
+        conn = _setup_conn()
+        conn.executemany(
+            """
+            INSERT INTO autonomous_task_outcomes
+            (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, rolled_back)
+            VALUES (?, 'delivery', 'athena', 'low', ?, 'goal', ?, datetime('now','-1 minute'), datetime('now'), ?)
+            """,
+            [
+                ("t1", "coder", "succeeded", 0),
+                ("t2", "coder", "failed", 0),
+                ("t3", "scout", "succeeded", 0),
+            ],
+        )
+        conn.commit()
+
+        ghosts = eval_dashboard.query_ghost_breakdown(
+            conn,
+            repo_name="athena",
+            lane_filter="delivery",
+            risk_filter="low",
+            min_samples=3,
+        )
+        self.assertEqual(len(ghosts), 2)
+        self.assertTrue(all(not g["meets_threshold"] for g in ghosts))
+        self.assertEqual(ghosts[0]["sample_flag"], "low-sample(<3)")
+
+        content = eval_dashboard.render_dashboard(
+            history=[],
+            kpis=[],
+            kpi_trend=[],
+            ghost_breakdown=ghosts,
+            repo_name="athena",
+            lane_filter="delivery",
+            risk_filter="low",
+            ghost_min_samples=3,
+        )
+        self.assertIn("sparse data: no ghosts meet the stable-sample threshold yet", content)
+        self.assertIn("`low-sample(<3)`", content)
 
 
 if __name__ == "__main__":
