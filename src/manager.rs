@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, GhostConfig};
 use crate::confirm::Confirmer;
@@ -24,6 +25,22 @@ use crate::tool_usage::ToolUsageStore;
 struct DirectStep {
     tool: String,
     params: serde_json::Value,
+}
+
+const KPI_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KpiPromptScope {
+    lane: Option<String>,
+    repo: String,
+    risk_tier: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KpiPromptCache {
+    key: String,
+    value: String,
+    expires_at: Instant,
 }
 
 fn compact_context_line(input: &str, max_chars: usize) -> String {
@@ -64,6 +81,8 @@ pub struct Manager {
     metrics: SharedMetrics,
     /// Langfuse observability client
     langfuse: SharedLangfuse,
+    /// Short-lived KPI prompt cache to avoid repeated DB hits per turn.
+    kpi_context_cache: Arc<tokio::sync::RwLock<Option<KpiPromptCache>>>,
 }
 
 impl Manager {
@@ -150,6 +169,7 @@ impl Manager {
             usage_store,
             metrics,
             langfuse,
+            kpi_context_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -516,7 +536,7 @@ impl Manager {
         conversation_summary: Option<&str>,
         metrics_section: &str,
     ) -> Result<Classification> {
-        let kpi_context = self.build_kpi_context().await;
+        let kpi_context = self.build_kpi_context(user_input, recent_turns).await;
         let lesson_context = self.build_lesson_context();
         let system = self
             .build_classifier_system_prompt(
@@ -1067,13 +1087,28 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         }
     }
 
-    async fn build_kpi_context(&self) -> String {
-        let config = self.config.clone();
-        tokio::task::spawn_blocking(move || {
-            let lane = "delivery";
-            let repo = kpi::default_repo_name();
-            let risk_tier = "medium";
+    async fn build_kpi_context(
+        &self,
+        user_input: &str,
+        recent_turns: &[(String, String)],
+    ) -> String {
+        let scope = infer_kpi_prompt_scope(user_input, recent_turns);
+        let cache_key = format!(
+            "repo={} lane={} risk={}",
+            scope.repo,
+            scope.lane.as_deref().unwrap_or("all-lanes"),
+            scope.risk_tier.as_deref().unwrap_or("all-risks")
+        );
 
+        if let Some(cached) = self.kpi_context_cache.read().await.clone() {
+            if cached.key == cache_key && cached.expires_at > Instant::now() {
+                return cached.value;
+            }
+        }
+
+        let config = self.config.clone();
+        let scope_for_query = scope.clone();
+        let value = tokio::task::spawn_blocking(move || {
             let conn = match kpi::open_connection(&config) {
                 Ok(conn) => conn,
                 Err(e) => {
@@ -1082,20 +1117,24 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 }
             };
 
-            let task_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM autonomous_task_outcomes
-                     WHERE lane = ?1 AND repo = ?2 AND risk_tier = ?3",
-                    rusqlite::params![lane, &repo, risk_tier],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            if task_count <= 0 {
-                return String::new();
-            }
-
-            match kpi::compute_snapshot(&conn, lane, &repo, risk_tier) {
-                Ok(snapshot) => format_kpi_context(lane, &repo, risk_tier, &snapshot),
+            match query_kpi_rollup(
+                &conn,
+                &scope_for_query.repo,
+                scope_for_query.lane.as_deref(),
+                scope_for_query.risk_tier.as_deref(),
+            ) {
+                Ok(Some((success_rate, verification_pass, rollback_rate, tasks_started))) => {
+                    format_kpi_context(
+                        &scope_for_query.repo,
+                        scope_for_query.lane.as_deref(),
+                        scope_for_query.risk_tier.as_deref(),
+                        success_rate,
+                        verification_pass,
+                        rollback_rate,
+                        tasks_started,
+                    )
+                }
+                Ok(None) => String::new(),
                 Err(e) => {
                     tracing::debug!("Skipping KPI context snapshot: {}", e);
                     String::new()
@@ -1104,11 +1143,23 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         })
         .await
         .ok()
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+        let mut cache = self.kpi_context_cache.write().await;
+        *cache = Some(KpiPromptCache {
+            key: cache_key,
+            value: value.clone(),
+            expires_at: Instant::now() + KPI_CONTEXT_CACHE_TTL,
+        });
+        value
     }
 
     fn build_lesson_context(&self) -> String {
-        let lessons = self.memory.search("lesson").unwrap_or_default();
+        let lessons = self
+            .memory
+            .list_by_category_recent("lesson", 5, 30)
+            .or_else(|_| self.memory.search("lesson"))
+            .unwrap_or_default();
         format_lesson_context(&lessons)
     }
 
@@ -1194,19 +1245,156 @@ fn format_memory_context(memories: &[crate::memory::Memory]) -> String {
     }
 }
 
-fn format_kpi_context(
-    lane: &str,
+fn query_kpi_rollup(
+    conn: &rusqlite::Connection,
     repo: &str,
-    risk_tier: &str,
-    snapshot: &kpi::KpiSnapshot,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+) -> Result<Option<(f64, f64, f64, u64)>> {
+    let mut sql = String::from(
+        "SELECT
+            COUNT(*) as tasks_started,
+            COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) as tasks_succeeded,
+            COALESCE(SUM(verification_total), 0) as verification_total,
+            COALESCE(SUM(verification_passed), 0) as verification_passed,
+            COALESCE(SUM(CASE WHEN rolled_back = 1 THEN 1 ELSE 0 END), 0) as rollbacks
+         FROM autonomous_task_outcomes
+         WHERE repo = ?1",
+    );
+    let mut args: Vec<String> = vec![repo.to_string()];
+
+    if let Some(v) = lane {
+        sql.push_str(" AND lane = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string());
+    }
+    if let Some(v) = risk_tier {
+        sql.push_str(" AND risk_tier = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string());
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let row: (i64, i64, i64, i64, i64) = stmt
+        .query_row(rusqlite::params_from_iter(args.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+
+    let tasks_started = row.0.max(0) as u64;
+    if tasks_started == 0 {
+        return Ok(None);
+    }
+    let tasks_succeeded = row.1.max(0) as u64;
+    let verification_total = row.2.max(0) as u64;
+    let verification_passed = row.3.max(0) as u64;
+    let rollbacks = row.4.max(0) as u64;
+
+    let success_rate = tasks_succeeded as f64 / tasks_started as f64;
+    let verification_pass_rate = if verification_total == 0 {
+        0.0
+    } else {
+        verification_passed as f64 / verification_total as f64
+    };
+    let rollback_rate = rollbacks as f64 / tasks_started as f64;
+
+    Ok(Some((
+        success_rate,
+        verification_pass_rate,
+        rollback_rate,
+        tasks_started,
+    )))
+}
+
+fn format_kpi_context(
+    repo: &str,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+    success_rate: f64,
+    verification_pass_rate: f64,
+    rollback_rate: f64,
+    tasks_started: u64,
 ) -> String {
+    let lane_label = lane.unwrap_or("all-lanes");
+    let risk_label = risk_tier.unwrap_or("all-risks");
     format!(
         "\n\nRecent stats for {repo}/{lane}/{risk_tier}: success_rate={:.1}%, verification_pass={:.1}%, rollback_rate={:.1}%, tasks_started={}",
-        snapshot.task_success_rate * 100.0,
-        snapshot.verification_pass_rate * 100.0,
-        snapshot.rollback_rate * 100.0,
-        snapshot.tasks_started
+        success_rate * 100.0,
+        verification_pass_rate * 100.0,
+        rollback_rate * 100.0,
+        tasks_started,
+        lane = lane_label,
+        risk_tier = risk_label,
     )
+}
+
+fn infer_kpi_prompt_scope(user_input: &str, recent_turns: &[(String, String)]) -> KpiPromptScope {
+    let mut lane: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut risk_tier: Option<String> = None;
+
+    let mut texts: Vec<&str> = recent_turns
+        .iter()
+        .rev()
+        .filter(|(role, _)| role == "user")
+        .take(4)
+        .map(|(_, content)| content.as_str())
+        .collect();
+    texts.reverse();
+    texts.push(user_input);
+    let merged = texts.join("\n");
+    let lower = merged.to_lowercase();
+
+    if lower.contains("ticket intake") || lower.contains("ticket_intake") {
+        lane = Some("ticket_intake".to_string());
+    } else if lower.contains("self improvement") || lower.contains("self_improvement") {
+        lane = Some("self_improvement".to_string());
+    } else if lower.contains("reentry") {
+        lane = Some("reentry".to_string());
+    } else if lower.contains("delivery") {
+        lane = Some("delivery".to_string());
+    }
+
+    if lower.contains("risk high") || lower.contains("risk: high") || lower.contains("high risk") {
+        risk_tier = Some("high".to_string());
+    } else if lower.contains("risk low")
+        || lower.contains("risk: low")
+        || lower.contains("low risk")
+    {
+        risk_tier = Some("low".to_string());
+    } else if lower.contains("risk medium")
+        || lower.contains("risk: medium")
+        || lower.contains("medium risk")
+    {
+        risk_tier = Some("medium".to_string());
+    }
+
+    if let Some(pos) = lower.find("repo:") {
+        let start = pos + "repo:".len();
+        let val = lower[start..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| ",.;".contains(c));
+        if !val.is_empty() {
+            repo = Some(val.to_string());
+        }
+    } else if let Some(pos) = lower.find("repo=") {
+        let start = pos + "repo=".len();
+        let val = lower[start..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| ",.;".contains(c));
+        if !val.is_empty() {
+            repo = Some(val.to_string());
+        }
+    }
+
+    KpiPromptScope {
+        lane,
+        repo: repo.unwrap_or_else(kpi::default_repo_name),
+        risk_tier,
+    }
 }
 
 fn format_lesson_context(memories: &[crate::memory::Memory]) -> String {
@@ -1249,9 +1437,10 @@ enum Classification {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_kpi_context, format_lesson_context, Classification, Manager};
+    use super::{
+        format_kpi_context, format_lesson_context, infer_kpi_prompt_scope, Classification, Manager,
+    };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
-    use crate::kpi::KpiSnapshot;
     use crate::memory::Memory;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1382,29 +1571,37 @@ mod tests {
 
     #[test]
     fn format_kpi_context_contains_expected_metrics() {
-        let snapshot = KpiSnapshot {
-            lane: "delivery".to_string(),
-            repo: "athena".to_string(),
-            risk_tier: "medium".to_string(),
-            captured_at: "2026-03-01 12:00:00".to_string(),
-            task_success_rate: 0.75,
-            verification_pass_rate: 0.8,
-            rollback_rate: 0.1,
-            mean_time_to_fix_secs: None,
-            tasks_started: 20,
-            tasks_succeeded: 15,
-            tasks_failed: 5,
-            verifications_total: 10,
-            verifications_passed: 8,
-            rollbacks: 2,
-        };
-
-        let section = format_kpi_context("delivery", "athena", "medium", &snapshot);
+        let section = format_kpi_context(
+            "athena",
+            Some("delivery"),
+            Some("medium"),
+            0.75,
+            0.8,
+            0.1,
+            20,
+        );
         assert!(section.contains("athena/delivery/medium"));
         assert!(section.contains("success_rate=75.0%"));
         assert!(section.contains("verification_pass=80.0%"));
         assert!(section.contains("rollback_rate=10.0%"));
         assert!(section.contains("tasks_started=20"));
+    }
+
+    #[test]
+    fn infer_kpi_prompt_scope_extracts_lane_repo_risk() {
+        let recent = vec![("user".to_string(), "please use lane delivery".to_string())];
+        let scope = infer_kpi_prompt_scope("for repo: athena risk: high", &recent);
+        assert_eq!(scope.lane.as_deref(), Some("delivery"));
+        assert_eq!(scope.repo, "athena");
+        assert_eq!(scope.risk_tier.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn infer_kpi_prompt_scope_defaults_to_all_when_not_specified() {
+        let scope = infer_kpi_prompt_scope("just do the thing", &[]);
+        assert!(scope.lane.is_none());
+        assert!(scope.risk_tier.is_none());
+        assert!(!scope.repo.is_empty());
     }
 
     #[test]

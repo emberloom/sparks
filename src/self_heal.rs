@@ -38,6 +38,24 @@ pub fn has_test_failures(test_output: &str) -> bool {
         || test_output.contains("error[E")
 }
 
+pub fn has_test_success_markers(test_output: &str) -> bool {
+    let lower = test_output.to_lowercase();
+    lower.contains("test result: ok")
+        || lower.contains("0 failed")
+        || lower.contains("all checks passed")
+        || lower.contains("build succeeded")
+}
+
+pub fn infer_verification_success(test_output: &str) -> Option<bool> {
+    if has_test_failures(test_output) {
+        return Some(false);
+    }
+    if has_test_success_markers(test_output) {
+        return Some(true);
+    }
+    None
+}
+
 pub fn classify_test_failure_category(test_output: &str) -> &'static str {
     if test_output.contains("error[E0308]")
         || test_output.contains("error[E0599]")
@@ -95,7 +113,10 @@ pub fn store_self_heal_outcome(
 }
 
 pub fn find_successful_fix_pattern(memory: &MemoryStore, error_category: &str) -> Option<String> {
-    let outcomes = memory.search("self_heal_outcome").ok()?;
+    let outcomes = memory
+        .list_by_category_recent("self_heal_outcome", 25, 30)
+        .or_else(|_| memory.search("self_heal_outcome"))
+        .ok()?;
     outcomes
         .into_iter()
         .filter(|m| m.category == "self_heal_outcome")
@@ -528,7 +549,7 @@ pub fn attempt_test_fix(test_output: &str, original_goal: &str) -> Option<TaskCo
 mod tests {
     use super::{
         classify_test_failure_category, decode_self_heal_outcome, encode_self_heal_outcome,
-        has_test_failures,
+        has_test_failures, infer_verification_success,
     };
 
     #[test]
@@ -557,5 +578,18 @@ mod tests {
         assert_eq!(decoded.0, "type_error");
         assert_eq!(decoded.1, "fix signature");
         assert!(decoded.2);
+    }
+
+    #[test]
+    fn infer_verification_success_detects_pass_fail_unknown() {
+        assert_eq!(
+            infer_verification_success("test result: ok. 10 passed; 0 failed"),
+            Some(true)
+        );
+        assert_eq!(
+            infer_verification_success("test result: FAILED. 1 passed; 1 failed"),
+            Some(false)
+        );
+        assert_eq!(infer_verification_success("verification summary"), None);
     }
 }

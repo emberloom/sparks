@@ -432,7 +432,12 @@ impl CodeStrategy {
                 .await?
             };
 
-            let success = !crate::self_heal::has_test_failures(&summary);
+            let success = crate::self_heal::infer_verification_success(&summary).unwrap_or(false);
+            if success == false && !crate::self_heal::has_test_failures(&summary) {
+                tracing::debug!(
+                    "CodeStrategy: self-heal verification result ambiguous, storing as unsuccessful"
+                );
+            }
             if let Some(memory) = contract.memory.as_ref() {
                 crate::self_heal::store_self_heal_outcome(
                     memory,

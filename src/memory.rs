@@ -382,6 +382,45 @@ impl MemoryStore {
         Ok(memories)
     }
 
+    /// List active memories in a category, newest first, optionally bounded by recency.
+    pub fn list_by_category_recent(
+        &self,
+        category: &str,
+        limit: usize,
+        within_days: i64,
+    ) -> Result<Vec<Memory>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, category, content, active, created_at FROM memories
+             WHERE active = 1
+               AND category = ?1
+               AND created_at >= datetime('now', ?2)
+             ORDER BY created_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                category,
+                format!("-{} days", within_days.max(1)),
+                limit as i64
+            ],
+            |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    category: row.get(1)?,
+                    content: row.get(2)?,
+                    active: row.get::<_, i32>(3)? != 0,
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        Ok(memories)
+    }
+
     /// Retire a memory (soft delete)
     pub fn retire(&self, id: &str) -> Result<bool> {
         let conn = self.conn()?;
@@ -685,8 +724,10 @@ impl MemoryStore {
 
     pub fn delete_scheduled_jobs_by_name(&self, name: &str) -> Result<usize> {
         let conn = self.conn()?;
-        let deleted =
-            conn.execute("DELETE FROM scheduled_jobs WHERE name = ?1", rusqlite::params![name])?;
+        let deleted = conn.execute(
+            "DELETE FROM scheduled_jobs WHERE name = ?1",
+            rusqlite::params![name],
+        )?;
         Ok(deleted as usize)
     }
 
@@ -1236,5 +1277,30 @@ mod tests {
     fn test_time_decay_factor_invalid() {
         let factor = time_decay_factor("not-a-date", 30.0);
         assert_eq!(factor, 1.0, "Invalid date should return 1.0 (no penalty)");
+    }
+
+    #[test]
+    fn test_list_by_category_recent_respects_window_and_limit() {
+        let store = setup_test_db();
+        store.store("self_heal_outcome", "recent 1", None).unwrap();
+        store.store("self_heal_outcome", "recent 2", None).unwrap();
+        let old_id = store.store("self_heal_outcome", "old", None).unwrap();
+        // Force one record to be outside recency window.
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE memories
+                 SET created_at = datetime('now', '-40 days')
+                 WHERE id = ?1",
+                rusqlite::params![old_id],
+            )
+            .unwrap();
+        }
+
+        let rows = store
+            .list_by_category_recent("self_heal_outcome", 1, 30)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_ne!(rows[0].content, "old");
     }
 }
