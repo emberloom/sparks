@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import re
 import sqlite3
@@ -720,6 +721,279 @@ def render_dashboard(
     return "\n".join(lines) + "\n"
 
 
+def resolve_output_format(output_format: str, out_file: Path) -> str:
+    if output_format in {"markdown", "html"}:
+        return output_format
+    return "html" if out_file.suffix.lower() == ".html" else "markdown"
+
+
+def _render_html_table(headers: list[str], rows: list[list[str]]) -> str:
+    header_html = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    body_html = []
+    for row in rows:
+        cols = "".join(f"<td>{html.escape(c)}</td>" for c in row)
+        body_html.append(f"<tr>{cols}</tr>")
+    return (
+        '<table border="1" cellpadding="6" cellspacing="0">'
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_html)}</tbody>"
+        "</table>"
+    )
+
+
+def render_dashboard_html(
+    history: list[dict],
+    kpis: list[dict],
+    kpi_trend: list[dict],
+    ghost_breakdown: list[dict],
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+    ghost_min_samples: int = 3,
+    task_cost_limit: int = 20,
+    token_cost_rows: list[dict] | None = None,
+    token_cost_summary: dict[str, Any] | None = None,
+) -> str:
+    if token_cost_rows is None:
+        token_cost_rows = []
+    if token_cost_summary is None:
+        token_cost_summary = {
+            "pricing_version_requested": DEFAULT_PRICING_VERSION,
+            "pricing_version_used": DEFAULT_PRICING_VERSION,
+            "total_cost_usd": 0.0,
+            "total_cost_known_provider_usd": 0.0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "unknown_provider_tasks": 0,
+            "unknown_pricing_tasks": 0,
+            "providers": [],
+        }
+
+    now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    parts: list[str] = [
+        "<!doctype html>",
+        "<html lang='en'><head><meta charset='utf-8'>",
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>",
+        "<title>Athena KPI + Eval Dashboard</title>",
+        "<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:1200px;margin:24px auto;padding:0 16px;line-height:1.4}h1,h2,h3{margin-top:28px}table{width:100%;border-collapse:collapse;margin:10px 0 20px}th,td{border:1px solid #d0d7de;padding:6px;text-align:left}code{background:#f6f8fa;padding:1px 4px;border-radius:4px}ul{margin-top:8px}</style>",
+        "</head><body>",
+        "<h1>Athena KPI + Eval Dashboard</h1>",
+        "<ul>",
+        f"<li>generated_utc: <code>{html.escape(now)}</code></li>",
+        f"<li>repo: <code>{html.escape(repo_name)}</code></li>",
+        f"<li>lane_filter: <code>{html.escape(lane_filter or 'all')}</code></li>",
+        f"<li>risk_filter: <code>{html.escape(risk_filter or 'all')}</code></li>",
+        "</ul>",
+    ]
+
+    smoke = latest_matching(history, lambda h: is_smoke_suite(str(h.get("suite", ""))))
+    parts.append("<h2>Latest Smoke Eval (Health)</h2>")
+    if smoke:
+        parts.append("<ul>")
+        parts.append(f"<li>suite: <code>{html.escape(str(smoke.get('suite', 'unknown')))}</code></li>")
+        parts.append(
+            f"<li>timestamp_utc: <code>{html.escape(str(smoke.get('timestamp_utc', 'unknown')))}</code></li>"
+        )
+        parts.append(f"<li>gate: <code>{'PASS' if smoke.get('gate_ok') else 'FAIL'}</code></li>")
+        parts.append(f"<li>overall_score: <code>{float(smoke.get('overall_score', 0)):.2f}</code></li>")
+        parts.append(f"<li>task_count: <code>{int(smoke.get('task_count', 0))}</code></li>")
+        parts.append("</ul>")
+    else:
+        parts.append("<p>no smoke eval history found</p>")
+
+    real = latest_matching(history, lambda h: not is_smoke_suite(str(h.get("suite", ""))))
+    parts.append("<h2>Latest Real Eval (Quality Gate)</h2>")
+    if real:
+        parts.append("<ul>")
+        parts.append(f"<li>suite: <code>{html.escape(str(real.get('suite', 'unknown')))}</code></li>")
+        parts.append(
+            f"<li>timestamp_utc: <code>{html.escape(str(real.get('timestamp_utc', 'unknown')))}</code></li>"
+        )
+        parts.append(f"<li>gate: <code>{'PASS' if real.get('gate_ok') else 'FAIL'}</code></li>")
+        parts.append(f"<li>overall_score: <code>{float(real.get('overall_score', 0)):.2f}</code></li>")
+        parts.append(f"<li>task_count: <code>{int(real.get('task_count', 0))}</code></li>")
+        parts.append("</ul>")
+    else:
+        parts.append("<p>no real quality-gate eval history found</p>")
+
+    parts.append("<h2>Eval Trend (All Suites)</h2>")
+    eval_rows: list[list[str]] = []
+    if history:
+        for h in history:
+            eval_rows.append(
+                [
+                    str(h.get("timestamp_utc", "?")),
+                    str(h.get("suite", "?")),
+                    "PASS" if h.get("gate_ok") else "FAIL",
+                    f"{float(h.get('overall_score', 0)):.2f}",
+                    str(int(h.get("task_count", 0))),
+                    f"{float(h.get('exec_success_rate', 0)):.2f}",
+                ]
+            )
+    else:
+        eval_rows.append(["-", "-", "-", "-", "-", "-"])
+    parts.append(
+        _render_html_table(
+            ["timestamp", "suite", "gate", "overall", "tasks", "exec_success_rate"],
+            eval_rows,
+        )
+    )
+
+    parts.append("<h2>KPI Trend (Snapshot History)</h2>")
+    parts.append("<ul>")
+    parts.append(
+        f"<li>task_success_trend: <code>{html.escape(summarize_rate_trend(kpi_trend, 'task_success_rate'))}</code></li>"
+    )
+    parts.append(
+        f"<li>verification_trend: <code>{html.escape(summarize_rate_trend(kpi_trend, 'verification_pass_rate'))}</code></li>"
+    )
+    parts.append(
+        f"<li>rollback_trend: <code>{html.escape(summarize_rate_trend(kpi_trend, 'rollback_rate'))}</code></li>"
+    )
+    parts.append("</ul>")
+    kpi_rows: list[list[str]] = []
+    if kpi_trend:
+        for r in kpi_trend:
+            kpi_rows.append(
+                [
+                    str(r["captured_at"]),
+                    str(r["lane"]),
+                    str(r["risk"]),
+                    f"{float(r['task_success_rate']) * 100.0:.1f}%",
+                    f"{float(r['verification_pass_rate']) * 100.0:.1f}%",
+                    f"{float(r['rollback_rate']) * 100.0:.1f}%",
+                    str(r["tasks_started"]),
+                ]
+            )
+    else:
+        kpi_rows.append(["-", "-", "-", "n/a", "n/a", "n/a", "0"])
+    parts.append(
+        _render_html_table(
+            ["captured_at", "lane", "risk", "task_success", "verification", "rollback", "started"],
+            kpi_rows,
+        )
+    )
+
+    parts.append("<h2>Current KPI Snapshot (from outcomes)</h2>")
+    kpi_snapshot_rows: list[list[str]] = []
+    if kpis:
+        for r in kpis:
+            kpi_snapshot_rows.append(
+                [
+                    str(r["lane"]),
+                    str(r["risk"]),
+                    str(r["started"]),
+                    str(r["succeeded"]),
+                    str(r["failed"]),
+                    str(r["task_success_rate"]),
+                    str(r["verification_pass_rate"]),
+                    str(r["rollback_rate"]),
+                    str(r["mean_time_to_fix"]),
+                ]
+            )
+    else:
+        kpi_snapshot_rows.append(["-", "-", "0", "0", "0", "n/a", "n/a", "n/a", "n/a"])
+    parts.append(
+        _render_html_table(
+            ["lane", "risk", "started", "succeeded", "failed", "task_success", "verification", "rollback", "mttf"],
+            kpi_snapshot_rows,
+        )
+    )
+
+    parts.append("<h2>Token Cost (Estimated)</h2>")
+    parts.append("<ul>")
+    parts.append(
+        f"<li>pricing_version: <code>{html.escape(str(token_cost_summary.get('pricing_version_used', DEFAULT_PRICING_VERSION)))}</code></li>"
+    )
+    parts.append(
+        f"<li>total_tokens: <code>{int(token_cost_summary.get('total_tokens', 0))}</code></li>"
+    )
+    parts.append(
+        f"<li>total_cost_usd: <code>{float(token_cost_summary.get('total_cost_usd', 0.0)):.6f}</code></li>"
+    )
+    parts.append("</ul>")
+    provider_rows: list[list[str]] = []
+    providers = token_cost_summary.get("providers", [])
+    if providers:
+        for p in providers:
+            prompt_tokens = int(p.get("prompt_tokens", 0))
+            completion_tokens = int(p.get("completion_tokens", 0))
+            provider_rows.append(
+                [
+                    str(p.get("provider", "unknown")),
+                    str(int(p.get("tasks", 0))),
+                    str(prompt_tokens),
+                    str(completion_tokens),
+                    str(prompt_tokens + completion_tokens),
+                    f"{float(p.get('cost_usd', 0.0)):.6f}",
+                    "known" if p.get("known_pricing", False) else "unknown",
+                ]
+            )
+    else:
+        provider_rows.append(["-", "0", "0", "0", "0", "0.000000", "n/a"])
+    parts.append("<h3>Aggregate by Provider</h3>")
+    parts.append(
+        _render_html_table(
+            ["provider", "tasks", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd", "pricing"],
+            provider_rows,
+        )
+    )
+    parts.append("<h3>Per-Task Cost (Recent)</h3>")
+    task_rows: list[list[str]] = []
+    if token_cost_rows:
+        for r in token_cost_rows[: max(1, task_cost_limit)]:
+            task_rows.append(
+                [
+                    str(r["timestamp_utc"]),
+                    str(r["suite"]),
+                    str(r["task_id"]),
+                    str(r["provider"]),
+                    str(r["prompt_tokens"]),
+                    str(r["completion_tokens"]),
+                    str(r["total_tokens"]),
+                    f"{float(r['cost_usd']):.6f}",
+                    "known" if r["known_pricing"] else "unknown",
+                ]
+            )
+    else:
+        task_rows.append(["-", "-", "-", "-", "0", "0", "0", "0.000000", "n/a"])
+    parts.append(
+        _render_html_table(
+            ["timestamp", "suite", "task", "provider", "prompt", "completion", "total", "cost_usd", "pricing"],
+            task_rows,
+        )
+    )
+
+    parts.append("<h2>Per-Ghost Performance</h2>")
+    parts.append(f"<p>sample_threshold: <code>&gt;= {max(1, ghost_min_samples)}</code></p>")
+    ghost_rows: list[list[str]] = []
+    if ghost_breakdown:
+        for row in ghost_breakdown:
+            ghost_rows.append(
+                [
+                    str(row["ghost"]),
+                    str(row["samples"]),
+                    str(row["succeeded"]),
+                    str(row["failed"]),
+                    str(row["rolled_back"]),
+                    str(row["success_rate"]),
+                    str(row["sample_flag"]),
+                ]
+            )
+    else:
+        ghost_rows.append(["-", "0", "0", "0", "0", "n/a", "n/a"])
+    parts.append(
+        _render_html_table(
+            ["ghost", "samples", "succeeded", "failed", "rolled_back", "success_rate", "sample_flag"],
+            ghost_rows,
+        )
+    )
+
+    parts.append("</body></html>")
+    return "".join(parts) + "\n"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Render combined KPI + eval dashboard.")
     p.add_argument("--config", default="config.toml")
@@ -745,6 +1019,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Minimum sample count for stable ghost-comparison labeling.",
+    )
+    p.add_argument(
+        "--output-format",
+        choices=["auto", "markdown", "html"],
+        default="auto",
+        help="Output format; auto uses file extension (.html -> html, otherwise markdown).",
     )
     p.add_argument("--out-file", default="eval/results/dashboard.md")
     return p.parse_args()
@@ -787,22 +1067,39 @@ def main() -> int:
         pricing_version=args.pricing_version,
     )
 
-    content = render_dashboard(
-        history,
-        kpis,
-        kpi_trend,
-        ghost_breakdown,
-        args.repo,
-        lane_filter=args.lane,
-        risk_filter=args.risk,
-        ghost_min_samples=args.ghost_min_samples,
-        task_cost_limit=args.task_cost_limit,
-        token_cost_rows=token_cost_rows,
-        token_cost_summary=token_cost_summary,
-    )
+    output_format = resolve_output_format(args.output_format, out_file)
+    if output_format == "html":
+        content = render_dashboard_html(
+            history,
+            kpis,
+            kpi_trend,
+            ghost_breakdown,
+            args.repo,
+            lane_filter=args.lane,
+            risk_filter=args.risk,
+            ghost_min_samples=args.ghost_min_samples,
+            task_cost_limit=args.task_cost_limit,
+            token_cost_rows=token_cost_rows,
+            token_cost_summary=token_cost_summary,
+        )
+    else:
+        content = render_dashboard(
+            history,
+            kpis,
+            kpi_trend,
+            ghost_breakdown,
+            args.repo,
+            lane_filter=args.lane,
+            risk_filter=args.risk,
+            ghost_min_samples=args.ghost_min_samples,
+            task_cost_limit=args.task_cost_limit,
+            token_cost_rows=token_cost_rows,
+            token_cost_summary=token_cost_summary,
+        )
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(content)
     print(f"dashboard={out_file}")
+    print(f"dashboard_format={output_format}")
     return 0
 
 

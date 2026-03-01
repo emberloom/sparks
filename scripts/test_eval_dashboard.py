@@ -218,6 +218,46 @@ class EvalDashboardTests(unittest.TestCase):
         self.assertGreater(summary["total_cost_usd"], 0.0)
         self.assertGreaterEqual(summary["unknown_pricing_tasks"], 1)
 
+    def test_resolve_output_format_auto(self) -> None:
+        self.assertEqual(
+            eval_dashboard.resolve_output_format("auto", Path("/tmp/dashboard.md")),
+            "markdown",
+        )
+        self.assertEqual(
+            eval_dashboard.resolve_output_format("auto", Path("/tmp/dashboard.html")),
+            "html",
+        )
+        self.assertEqual(
+            eval_dashboard.resolve_output_format("html", Path("/tmp/dashboard.md")),
+            "html",
+        )
+
+    def test_render_dashboard_html_contains_required_sections(self) -> None:
+        html_text = eval_dashboard.render_dashboard_html(
+            history=[],
+            kpis=[],
+            kpi_trend=[],
+            ghost_breakdown=[],
+            repo_name="athena",
+            token_cost_rows=[],
+            token_cost_summary={
+                "pricing_version_requested": "v1",
+                "pricing_version_used": "v1",
+                "total_cost_usd": 0.0,
+                "total_cost_known_provider_usd": 0.0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "total_tokens": 0,
+                "unknown_provider_tasks": 0,
+                "unknown_pricing_tasks": 0,
+                "providers": [],
+            },
+        )
+        self.assertIn("<!doctype html>", html_text.lower())
+        self.assertIn("KPI Trend (Snapshot History)", html_text)
+        self.assertIn("Per-Ghost Performance", html_text)
+        self.assertIn("Token Cost (Estimated)", html_text)
+
 
 if __name__ == "__main__":
     unittest.main()
