@@ -26,6 +26,7 @@ class CandidateSpec:
     source: str
     dispatch_context: str
     hypothesis: str
+    mutation_dimensions: dict[str, str]
 
 
 @dataclass
@@ -34,6 +35,7 @@ class CandidateResult:
     source: str
     hypothesis: str
     dispatch_context: str
+    mutation_dimensions: dict[str, str]
     command: list[str]
     exit_code: int
     report_json: str | None
@@ -197,42 +199,61 @@ def baseline_candidate_from_profile(profile: dict[str, Any]) -> CandidateSpec:
         source=f"baseline:{source}",
         dispatch_context=str(profile.get("dispatch_context") or ""),
         hypothesis=hypothesis,
+        mutation_dimensions={
+            "constraint_strictness": "baseline",
+            "soul_composition": "baseline",
+            "mutation_strategy": "baseline",
+        },
     )
 
 
 def static_mutation_candidates(base_context: str) -> list[CandidateSpec]:
-    return [
-        CandidateSpec(
-            candidate_id="mutation_plan_verify",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "Execution contract: return PLAN and EXECUTION sections. "
-                "Run required verification commands before final completion."
-            ),
-            hypothesis="Improve structure and verification compliance.",
+    raw: list[tuple[str, str, str, str]] = [
+        (
+            "mutation_plan_verify",
+            "plan_verify",
+            "Execution contract: return PLAN and EXECUTION sections. Run required verification commands before final completion.",
+            "Improve structure and verification compliance.",
         ),
-        CandidateSpec(
-            candidate_id="mutation_minimal_diff",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "Change policy: prefer smallest safe diff, preserve existing architecture, "
-                "and avoid unrelated edits."
-            ),
-            hypothesis="Reduce noisy diffs and improve diff-quality scores.",
+        (
+            "mutation_minimal_diff",
+            "minimal_diff",
+            "Change policy: prefer smallest safe diff, preserve existing architecture, and avoid unrelated edits.",
+            "Reduce noisy diffs and improve diff-quality scores.",
         ),
-        CandidateSpec(
-            candidate_id="mutation_blocker_evidence",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "If blocked, report deterministic evidence: command, exact stderr/stdout tail, "
-                "and one concrete next action."
-            ),
-            hypothesis="Improve failure diagnosability and recovery quality.",
+        (
+            "mutation_blocker_evidence",
+            "blocker_evidence",
+            "If blocked, report deterministic evidence: command, exact stderr/stdout tail, and one concrete next action.",
+            "Improve failure diagnosability and recovery quality.",
         ),
     ]
+    out: list[CandidateSpec] = []
+    for idx, (candidate_id, mutation_id, mutation_text, hypothesis) in enumerate(raw):
+        constraint_level = CONSTRAINT_STRICTNESS_LIBRARY[idx % len(CONSTRAINT_STRICTNESS_LIBRARY)][
+            0
+        ]
+        soul_level = SOUL_COMPOSITION_LIBRARY[idx % len(SOUL_COMPOSITION_LIBRARY)][0]
+        context = apply_mutation_axes(
+            base_context,
+            mutation_text,
+            constraint_level,
+            soul_level,
+        )
+        out.append(
+            CandidateSpec(
+                candidate_id=candidate_id,
+                source="mutation_static",
+                dispatch_context=context,
+                hypothesis=hypothesis,
+                mutation_dimensions={
+                    "mutation_strategy": mutation_id,
+                    "constraint_strictness": constraint_level,
+                    "soul_composition": soul_level,
+                },
+            )
+        )
+    return out
 
 
 def source_focus_hint(source: str) -> str:
@@ -249,6 +270,64 @@ def source_focus_hint(source: str) -> str:
     if source_key == "eval_history":
         return "Focus on improving gate pass outcomes without sacrificing verification rigor."
     return "Focus on measurable benchmark and safety improvements."
+
+
+CONSTRAINT_STRICTNESS_LIBRARY: list[tuple[str, str]] = [
+    (
+        "strict",
+        "Treat all declared constraints as mandatory and block completion when evidence is missing.",
+    ),
+    (
+        "balanced",
+        "Treat safety constraints as mandatory; optimize non-critical constraints when it improves verified outcomes.",
+    ),
+    (
+        "adaptive",
+        "Adapt non-critical constraint verbosity to task risk while preserving strict safety and verification floors.",
+    ),
+]
+
+SOUL_COMPOSITION_LIBRARY: list[tuple[str, str]] = [
+    (
+        "minimal",
+        "Use concise persona guidance: high signal, low verbosity, execution-first.",
+    ),
+    (
+        "balanced",
+        "Blend persona tone with operational rigor and explicit verification intent.",
+    ),
+    (
+        "context_rich",
+        "Use richer persona framing plus explicit mission/risk framing for complex tasks.",
+    ),
+]
+
+
+def validate_mutation_axes(constraint_level: str, soul_level: str) -> None:
+    allowed_constraints = {name for name, _ in CONSTRAINT_STRICTNESS_LIBRARY}
+    allowed_souls = {name for name, _ in SOUL_COMPOSITION_LIBRARY}
+    if constraint_level not in allowed_constraints:
+        raise ValueError(f"unsupported constraint strictness axis: {constraint_level}")
+    if soul_level not in allowed_souls:
+        raise ValueError(f"unsupported soul composition axis: {soul_level}")
+
+
+def apply_mutation_axes(
+    base_context: str,
+    mutation_text: str,
+    constraint_level: str,
+    soul_level: str,
+) -> str:
+    validate_mutation_axes(constraint_level, soul_level)
+    constraint_text = dict(CONSTRAINT_STRICTNESS_LIBRARY)[constraint_level]
+    soul_text = dict(SOUL_COMPOSITION_LIBRARY)[soul_level]
+    return (
+        f"{base_context}\n"
+        f"Mutation strategy: {mutation_text}\n"
+        f"Constraint strictness ({constraint_level}): {constraint_text}\n"
+        f"Soul composition ({soul_level}): {soul_text}\n"
+        "Safety floor: never bypass destructive-command, credential, or verification guardrails."
+    )
 
 
 BACKLOG_MUTATION_LIBRARY: list[tuple[str, str]] = [
@@ -296,13 +375,20 @@ def backlog_candidates(
         for m_idx, (mutation_id, mutation_text) in enumerate(BACKLOG_MUTATION_LIBRARY[:count], start=1):
             candidate_id = f"backlog_{idx}_{m_idx}_{mutation_id}_{title_slug}"
             hypothesis = f"Backlog hypothesis ({source}): {title}"
-            context = (
+            constraint_level = CONSTRAINT_STRICTNESS_LIBRARY[(idx + m_idx - 2) % len(CONSTRAINT_STRICTNESS_LIBRARY)][0]
+            soul_level = SOUL_COMPOSITION_LIBRARY[(idx * m_idx - 1) % len(SOUL_COMPOSITION_LIBRARY)][0]
+            base_ticket_context = (
                 f"{base_context}\n"
                 f"Backlog ticket source={source} risk={risk} score={score:.3f}: {title}\n"
                 f"Evidence: {evidence}\n"
                 f"Acceptance focus: {acceptance_focus}\n"
-                f"Source focus: {focus}\n"
-                f"Mutation strategy ({mutation_id}): {mutation_text}"
+                f"Source focus: {focus}"
+            )
+            context = apply_mutation_axes(
+                base_ticket_context,
+                f"Backlog mutation ({mutation_id}): {mutation_text}",
+                constraint_level,
+                soul_level,
             )
             out.append(
                 CandidateSpec(
@@ -310,6 +396,11 @@ def backlog_candidates(
                     source=f"backlog:{source}",
                     dispatch_context=context,
                     hypothesis=hypothesis,
+                    mutation_dimensions={
+                        "mutation_strategy": mutation_id,
+                        "constraint_strictness": constraint_level,
+                        "soul_composition": soul_level,
+                    },
                 )
             )
     return out
@@ -373,6 +464,7 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
             source=candidate.source,
             hypothesis=candidate.hypothesis,
             dispatch_context=candidate.dispatch_context,
+            mutation_dimensions=dict(candidate.mutation_dimensions),
             command=cmd,
             exit_code=0,
             report_json=None,
@@ -399,6 +491,7 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
         source=candidate.source,
         hypothesis=candidate.hypothesis,
         dispatch_context=candidate.dispatch_context,
+        mutation_dimensions=dict(candidate.mutation_dimensions),
         command=cmd,
         exit_code=p.returncode,
         report_json=report_path_text,

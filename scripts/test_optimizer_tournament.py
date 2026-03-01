@@ -44,6 +44,10 @@ class OptimizerTournamentTests(unittest.TestCase):
         self.assertEqual(len(candidates), 3)
         self.assertEqual(len({c.candidate_id for c in candidates}), 3)
         self.assertTrue(all(c.candidate_id.startswith("backlog_1_") for c in candidates))
+        self.assertTrue(
+            all("constraint_strictness" in c.mutation_dimensions for c in candidates)
+        )
+        self.assertTrue(all("soul_composition" in c.mutation_dimensions for c in candidates))
 
     def test_pick_winner_no_promotion_on_non_positive_delta(self) -> None:
         baseline = opt.CandidateResult(
@@ -51,6 +55,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="baseline",
             hypothesis="baseline",
             dispatch_context="[base]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -66,6 +71,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="mutation",
             hypothesis="mutation",
             dispatch_context="[m]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -88,6 +94,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="baseline",
             hypothesis="baseline",
             dispatch_context="[base]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -103,6 +110,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="mutation",
             hypothesis="mutation",
             dispatch_context="[m]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -119,6 +127,12 @@ class OptimizerTournamentTests(unittest.TestCase):
         self.assertEqual(winner.candidate_id, "mutation")
         self.assertTrue(promote)
         self.assertTrue(any(g["candidate_id"] == "mutation" and g["gate_ok"] for g in gates))
+
+    def test_validate_mutation_axes_rejects_unknown_values(self) -> None:
+        with self.assertRaises(ValueError):
+            opt.validate_mutation_axes("invalid", "minimal")
+        with self.assertRaises(ValueError):
+            opt.validate_mutation_axes("strict", "invalid")
 
 
 if __name__ == "__main__":
