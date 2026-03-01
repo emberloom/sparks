@@ -369,6 +369,9 @@ enum FeatureAction {
         /// Continue dispatching independent tasks after failures
         #[arg(long)]
         continue_on_failure: bool,
+        /// Revert commits from succeeded tasks when any task fails
+        #[arg(long)]
+        rollback_on_failure: bool,
         /// Resolve DAG and print execution plan without dispatching tasks
         #[arg(long)]
         dry_run: bool,
@@ -2808,7 +2811,16 @@ struct FeatureRunLedger {
     contract_path: String,
     tasks: Vec<FeatureTaskLedgerRow>,
     acceptance: Vec<FeatureAcceptanceLedgerRow>,
+    #[serde(default)]
+    rollback_commits: Vec<FeatureRollbackLedgerRow>,
     summary: FeatureRunSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureRollbackLedgerRow {
+    commit_sha: String,
+    reverted: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2878,6 +2890,7 @@ struct FeatureDispatchOptions {
     wait_secs: u64,
     outcome_grace_secs: Option<u64>,
     continue_on_failure: bool,
+    rollback_on_failure: bool,
     cli_tool: Option<String>,
     cli_model: Option<String>,
     lane: Option<String>,
@@ -3053,6 +3066,7 @@ async fn handle_feature(
             wait_secs,
             outcome_grace_secs,
             continue_on_failure,
+            rollback_on_failure,
             dry_run,
             cli_tool,
             cli_model,
@@ -3080,6 +3094,7 @@ async fn handle_feature(
                     wait_secs,
                     outcome_grace_secs,
                     continue_on_failure,
+                    rollback_on_failure,
                     cli_tool,
                     cli_model,
                     lane,
@@ -3103,6 +3118,18 @@ async fn handle_feature(
                 println!(
                     "feature_promotion_reasons={}",
                     ledger.summary.promotion_reasons.join(" | ")
+                );
+            }
+            if !ledger.rollback_commits.is_empty() {
+                let rollback_failed = ledger
+                    .rollback_commits
+                    .iter()
+                    .filter(|row| !row.reverted)
+                    .count();
+                println!(
+                    "feature_rollback_commits={} feature_rollback_failed={}",
+                    ledger.rollback_commits.len(),
+                    rollback_failed
                 );
             }
             if dispatch.aborted_on_failure {
@@ -3151,6 +3178,7 @@ async fn handle_feature(
                     wait_secs,
                     outcome_grace_secs,
                     continue_on_failure,
+                    rollback_on_failure: false,
                     cli_tool,
                     cli_model,
                     lane,
@@ -3389,14 +3417,32 @@ async fn run_feature_dispatch_flow(
 
     let batches = contract.execution_batches()?;
     println!(
-        "feature_id={} mode=dispatch batches={} continue_on_failure={}",
+        "feature_id={} mode=dispatch batches={} continue_on_failure={} rollback_on_failure={}",
         contract.feature_id,
         batches.len(),
-        opts.continue_on_failure
+        opts.continue_on_failure,
+        opts.rollback_on_failure
     );
 
     let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
         std::collections::HashMap::new();
+    let rollback_commit_tag = opts
+        .rollback_on_failure
+        .then(|| format!("athena-feature-run:{}", uuid::Uuid::new_v4()));
+    let rollback_repo_root = if opts.rollback_on_failure {
+        let repo_root = resolve_repo_root().await?;
+        ensure_clean_working_tree(&repo_root).await?;
+        Some(repo_root)
+    } else {
+        None
+    };
+    let mut rollback_last_head = if let Some(repo_root) = rollback_repo_root.as_ref() {
+        current_git_head(repo_root).await?
+    } else {
+        None
+    };
+    let mut rollback_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rollback_tracked_commits: Vec<String> = Vec::new();
     let mut predecessor_summaries: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut dispatch_ids: std::collections::HashMap<String, String> =
@@ -3450,6 +3496,10 @@ async fn run_feature_dispatch_flow(
                 task_wait,
                 opts.outcome_grace_secs,
             );
+            let mut context = build_feature_task_context(contract, task, &predecessor_summaries);
+            if let Some(tag) = rollback_commit_tag.as_deref() {
+                context = append_feature_rollback_commit_policy_context(context, tag);
+            }
             runnable.push(FeatureRunnableTask {
                 task: task.clone(),
                 lane,
@@ -3457,7 +3507,7 @@ async fn run_feature_dispatch_flow(
                 repo,
                 wait_secs: task_wait,
                 outcome_grace_secs: task_grace,
-                context: build_feature_task_context(contract, task, &predecessor_summaries),
+                context,
             });
         }
         if runnable.is_empty() {
@@ -3508,6 +3558,23 @@ async fn run_feature_dispatch_flow(
                 if let Some(summary) = outcome.result_summary.clone() {
                     predecessor_summaries.insert(outcome.task_id.clone(), summary);
                 }
+                if let Some(repo_root) = rollback_repo_root.as_ref() {
+                    let new_commits = track_feature_commits_since(
+                        repo_root,
+                        &mut rollback_last_head,
+                        &mut rollback_seen,
+                        rollback_commit_tag.as_deref(),
+                    )
+                    .await?;
+                    if !new_commits.is_empty() {
+                        println!(
+                            "task={} tracked_new_commits={}",
+                            outcome.task_id,
+                            new_commits.join(",")
+                        );
+                        rollback_tracked_commits.extend(new_commits);
+                    }
+                }
             }
             dispatch_ids.insert(outcome.task_id.clone(), outcome.dispatch_task_id);
             statuses.insert(outcome.task_id.clone(), outcome.status);
@@ -3541,7 +3608,23 @@ async fn run_feature_dispatch_flow(
         }
     }
 
-    let ledger = build_feature_run_ledger(
+    let rollback_commits = if failed > 0 && opts.rollback_on_failure {
+        if let Some(repo_root) = rollback_repo_root.as_ref() {
+            println!(
+                "feature_id={} rollback_on_failure=true failed_tasks={} tracked_commits={}",
+                contract.feature_id,
+                failed,
+                rollback_tracked_commits.len()
+            );
+            rollback_feature_commits(repo_root, &rollback_tracked_commits).await
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut ledger = build_feature_run_ledger(
         contract,
         contract_path,
         &statuses,
@@ -3550,6 +3633,7 @@ async fn run_feature_dispatch_flow(
         failed,
         skipped,
     );
+    ledger.rollback_commits = rollback_commits;
     let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
     Ok(FeatureDispatchRunArtifacts {
         ledger,
@@ -3689,6 +3773,167 @@ fn build_feature_task_context(
     context
 }
 
+fn append_feature_rollback_commit_policy_context(mut context: String, commit_tag: &str) -> String {
+    context.push_str(&format!("\n[feature_rollback_commit_tag:{}]", commit_tag));
+    context.push_str(
+        "\nIf you create git commits for this feature task, include the rollback tag in the commit message.",
+    );
+    context
+}
+
+async fn ensure_clean_working_tree(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let status = run_command_capture(repo_root, "git", &args(&["status", "--porcelain"]), 30).await;
+    if !command_succeeded(&status) {
+        anyhow::bail!(
+            "rollback-on-failure precheck failed: could not read git status ({})",
+            tail_text(&command_combined_output(&status), 300)
+        );
+    }
+    let dirty = status
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string());
+    if let Some(first) = dirty {
+        anyhow::bail!(
+            "rollback-on-failure requires a clean working tree; found local changes (first entry: '{}')",
+            first
+        );
+    }
+    Ok(())
+}
+
+async fn current_git_head(repo_root: &std::path::Path) -> anyhow::Result<Option<String>> {
+    let rev = run_command_capture(repo_root, "git", &args(&["rev-parse", "HEAD"]), 30).await;
+    if !command_succeeded(&rev) {
+        return Ok(None);
+    }
+    let sha = rev.stdout.trim();
+    if sha.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(sha.to_string()))
+    }
+}
+
+async fn track_feature_commits_since(
+    repo_root: &std::path::Path,
+    last_head: &mut Option<String>,
+    seen: &mut std::collections::HashSet<String>,
+    commit_tag: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(current_head) = current_git_head(repo_root).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(previous_head) = last_head.clone() else {
+        *last_head = Some(current_head);
+        return Ok(Vec::new());
+    };
+    if previous_head == current_head {
+        return Ok(Vec::new());
+    }
+    let list = run_command_capture(
+        repo_root,
+        "git",
+        &args(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..{}", previous_head, current_head),
+        ]),
+        30,
+    )
+    .await;
+    *last_head = Some(current_head);
+    if !command_succeeded(&list) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for line in list.stdout.lines() {
+        let sha = line.trim();
+        if sha.is_empty() {
+            continue;
+        }
+        if let Some(tag) = commit_tag {
+            if !commit_message_contains_tag(repo_root, sha, tag).await? {
+                continue;
+            }
+        }
+        if seen.insert(sha.to_string()) {
+            out.push(sha.to_string());
+        }
+    }
+    Ok(out)
+}
+
+async fn commit_message_contains_tag(
+    repo_root: &std::path::Path,
+    sha: &str,
+    tag: &str,
+) -> anyhow::Result<bool> {
+    let show = run_command_capture(
+        repo_root,
+        "git",
+        &args(&["show", "-s", "--format=%B", sha]),
+        30,
+    )
+    .await;
+    if !command_succeeded(&show) {
+        return Ok(false);
+    }
+    Ok(show.stdout.contains(tag))
+}
+
+async fn abort_git_revert_if_needed(repo_root: &std::path::Path) -> Option<String> {
+    let abort = run_command_capture(repo_root, "git", &args(&["revert", "--abort"]), 30).await;
+    if command_succeeded(&abort) {
+        return None;
+    }
+    let output = command_combined_output(&abort);
+    let lowered = output.to_ascii_lowercase();
+    if lowered.contains("no cherry-pick or revert in progress")
+        || lowered.contains("there is no merge to abort")
+    {
+        return None;
+    }
+    Some(tail_text(&output, 300))
+}
+
+async fn rollback_feature_commits(
+    repo_root: &std::path::Path,
+    commit_shas: &[String],
+) -> Vec<FeatureRollbackLedgerRow> {
+    let mut rows = Vec::new();
+    for sha in commit_shas.iter().rev() {
+        let revert =
+            run_command_capture(repo_root, "git", &args(&["revert", "--no-edit", sha]), 180).await;
+        if command_succeeded(&revert) {
+            println!("feature_rollback commit={} status=reverted", sha);
+            rows.push(FeatureRollbackLedgerRow {
+                commit_sha: sha.clone(),
+                reverted: true,
+                error: None,
+            });
+        } else {
+            let mut error = tail_text(&command_combined_output(&revert), 400);
+            if let Some(abort_error) = abort_git_revert_if_needed(repo_root).await {
+                error.push_str(&format!(" | revert_abort_failed: {}", abort_error));
+            }
+            println!(
+                "feature_rollback commit={} status=failed reason={}",
+                sha,
+                error.replace('\n', " ")
+            );
+            rows.push(FeatureRollbackLedgerRow {
+                commit_sha: sha.clone(),
+                reverted: false,
+                error: Some(error),
+            });
+        }
+    }
+    rows
+}
+
 fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::Result<()> {
     let batches = contract.execution_batches()?;
     let acceptance = contract.acceptance_coverage();
@@ -3800,20 +4045,8 @@ fn build_feature_run_ledger(
             satisfied,
         });
     }
-    let mut promotion_reasons = Vec::new();
-    if failed > 0 {
-        promotion_reasons.push(format!("{} task(s) failed", failed));
-    }
-    if skipped > 0 {
-        promotion_reasons.push(format!("{} task(s) skipped", skipped));
-    }
-    if !all_covered {
-        promotion_reasons.push("some acceptance criteria have no task coverage".to_string());
-    }
-    if !all_satisfied {
-        promotion_reasons
-            .push("some acceptance criteria have no succeeded mapped task".to_string());
-    }
+    let promotion_reasons =
+        feature_dispatch_promotion_reasons(failed, skipped, all_covered, all_satisfied);
 
     let tasks = contract
         .tasks
@@ -3839,6 +4072,7 @@ fn build_feature_run_ledger(
         contract_path: contract_path.display().to_string(),
         tasks,
         acceptance: acceptance_rows,
+        rollback_commits: Vec::new(),
         summary: FeatureRunSummary {
             succeeded,
             failed,
@@ -3849,6 +4083,28 @@ fn build_feature_run_ledger(
             promotion_reasons,
         },
     }
+}
+
+fn feature_dispatch_promotion_reasons(
+    failed: usize,
+    skipped: usize,
+    all_covered: bool,
+    all_satisfied: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if failed > 0 {
+        reasons.push(format!("{} task(s) failed", failed));
+    }
+    if skipped > 0 {
+        reasons.push(format!("{} task(s) skipped", skipped));
+    }
+    if !all_covered {
+        reasons.push("some acceptance criteria have no task coverage".to_string());
+    }
+    if !all_satisfied {
+        reasons.push("some acceptance criteria have no succeeded mapped task".to_string());
+    }
+    reasons
 }
 
 fn write_feature_ledger_artifacts(
@@ -3888,6 +4144,18 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
         out.push_str(&format!(
             "- promotion_reasons: {}\n",
             ledger.summary.promotion_reasons.join(" | ")
+        ));
+    }
+    if !ledger.rollback_commits.is_empty() {
+        let rollback_failed = ledger
+            .rollback_commits
+            .iter()
+            .filter(|row| !row.reverted)
+            .count();
+        out.push_str(&format!(
+            "- rollback_commits: total={} failed={}\n",
+            ledger.rollback_commits.len(),
+            rollback_failed
         ));
     }
     out.push('\n');
@@ -3932,6 +4200,19 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
             row.covered,
             row.satisfied
         ));
+    }
+    if !ledger.rollback_commits.is_empty() {
+        out.push_str("\n## Rollback Commits\n\n");
+        out.push_str("| commit_sha | reverted | error |\n");
+        out.push_str("|---|---|---|\n");
+        for row in &ledger.rollback_commits {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                row.commit_sha,
+                row.reverted,
+                row.error.clone().unwrap_or_else(|| "-".to_string())
+            ));
+        }
     }
     out
 }
@@ -5342,11 +5623,14 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_promotion_decision, build_feature_run_ledger, build_feature_task_context,
+        append_feature_rollback_commit_policy_context, build_feature_promotion_decision,
+        build_feature_run_ledger, build_feature_task_context, commit_message_contains_tag,
         build_self_build_review_checklist, classify_chat_command,
-        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
+        compute_feature_outcome_grace_secs, ensure_clean_working_tree,
+        evaluate_self_build_guardrails,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
+        render_feature_ledger_markdown, rollback_feature_commits, track_feature_commits_since,
         wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
         WaitForAutonomousOutcome,
     };
@@ -5354,7 +5638,7 @@ mod tests {
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
     };
     use crate::pulse::{Pulse, PulseSource, Urgency};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
     #[test]
@@ -5508,6 +5792,150 @@ mod tests {
         }
     }
 
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    struct TempRepo {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRepo {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn init_temp_git_repo() -> TempRepo {
+        let path = std::env::temp_dir().join(format!("athena-test-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp repo dir");
+        let repo = path.as_path();
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "athena-test@example.com"]);
+        run_git(repo, &["config", "user.name", "Athena Test"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "init"]);
+        TempRepo { path }
+    }
+
+    #[tokio::test]
+    async fn track_feature_commits_since_filters_to_owned_tagged_commits() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let mut last_head = Some(git_stdout(repo, &["rev-parse", "HEAD"]));
+        let mut seen = HashSet::new();
+        let tag = "athena-feature-run:test-123";
+
+        std::fs::write(repo.join("README.md"), "owned change\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned commit", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "unowned\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned commit"]);
+        let unowned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        let tracked = track_feature_commits_since(repo, &mut last_head, &mut seen, Some(tag))
+            .await
+            .expect("track commits");
+        assert_eq!(tracked, vec![owned_sha.clone()]);
+        assert!(!tracked.contains(&unowned_sha));
+        assert!(commit_message_contains_tag(repo, &owned_sha, tag)
+            .await
+            .expect("owned tag lookup"));
+        assert!(!commit_message_contains_tag(repo, &unowned_sha, tag)
+            .await
+            .expect("unowned tag lookup"));
+    }
+
+    #[tokio::test]
+    async fn rollback_feature_commits_reverts_owned_commit_without_touching_other_changes() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let tag = "athena-feature-run:test-rollback";
+
+        std::fs::write(repo.join("README.md"), "owned delta\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned delta", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "keep this\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned delta"]);
+
+        let rows = rollback_feature_commits(repo, &[owned_sha]).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].reverted);
+        assert!(rows[0].error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).expect("read reverted file"),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("notes.txt")).expect("read unowned file"),
+            "keep this\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_on_failure_requires_clean_working_tree() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        ensure_clean_working_tree(repo)
+            .await
+            .expect("clean repo should pass precheck");
+
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+        let err = ensure_clean_working_tree(repo)
+            .await
+            .expect_err("dirty repo should fail precheck");
+        let msg = err.to_string();
+        assert!(msg.contains("clean working tree"));
+    }
+
+    #[test]
+    fn rollback_commit_policy_context_includes_tag_and_instruction() {
+        let context = append_feature_rollback_commit_policy_context(
+            "base context".to_string(),
+            "athena-feature-run:test-ctx",
+        );
+        assert!(context.contains("[feature_rollback_commit_tag:athena-feature-run:test-ctx]"));
+        assert!(context.contains("include the rollback tag"));
+    }
+
     #[test]
     fn feature_ledger_marks_unsatisfied_acceptance() {
         let contract = sample_contract();
@@ -5547,6 +5975,42 @@ mod tests {
         );
         assert!(ledger.summary.acceptance_satisfied);
         assert!(ledger.summary.promotable);
+        assert!(ledger.rollback_commits.is_empty());
+    }
+
+    #[test]
+    fn feature_ledger_markdown_includes_rollback_section_when_present() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert("T2".to_string(), FeatureRunStatus::Failed("failed".to_string()));
+        let mut ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            1,
+            1,
+            0,
+        );
+        ledger.rollback_commits = vec![
+            super::FeatureRollbackLedgerRow {
+                commit_sha: "abc123".to_string(),
+                reverted: true,
+                error: None,
+            },
+            super::FeatureRollbackLedgerRow {
+                commit_sha: "def456".to_string(),
+                reverted: false,
+                error: Some("conflict".to_string()),
+            },
+        ];
+
+        let md = render_feature_ledger_markdown(&ledger);
+        assert!(md.contains("## Rollback Commits"));
+        assert!(md.contains("abc123"));
+        assert!(md.contains("def456"));
+        assert!(md.contains("conflict"));
     }
 
     #[test]
