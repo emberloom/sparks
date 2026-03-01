@@ -11,13 +11,14 @@ use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{ChatMessage, ChatResponse, LlmProvider, StreamEvent};
+use crate::memory::MemoryStore;
 use crate::tools::ToolRegistry;
 
 /// Channel for sending core events (status, stream chunks) to the frontend.
 pub type StatusSender = mpsc::Sender<CoreEvent>;
 
 /// A task contract passed from Manager to Executor
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TaskContract {
     pub context: String,
     pub goal: String,
@@ -30,6 +31,8 @@ pub struct TaskContract {
     pub cli_tool_preference: Option<String>,
     /// Whether the VERIFY phase should generate tests for changes
     pub test_generation: bool,
+    /// Optional memory store for storing and retrieving strategy outcomes
+    pub memory: Option<std::sync::Arc<MemoryStore>>,
 }
 
 /// Pluggable execution loop strategy
@@ -263,9 +266,8 @@ mod tests {
 
     #[test]
     fn parse_precheck_signal_accepts_valid_json() {
-        let parsed = parse_precheck_signal(
-            r#"{"needs_strategy": true, "reason": "multi-file change"}"#,
-        );
+        let parsed =
+            parse_precheck_signal(r#"{"needs_strategy": true, "reason": "multi-file change"}"#);
         assert!(parsed.is_some());
         let (needs_strategy, reason) = parsed.unwrap();
         assert!(needs_strategy);

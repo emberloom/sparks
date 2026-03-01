@@ -307,16 +307,8 @@ impl LoopStrategy for CodeStrategy {
         if contract.test_generation {
             if let Some(fix_summary) = self
                 .run_self_heal(
-                    contract,
-                    tools,
-                    docker,
-                    llm,
-                    executor,
-                    confirmer,
-                    status_tx,
-                    trace,
-                    use_native,
-                    &summary,
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                    use_native, &summary,
                 )
                 .await?
             {
@@ -326,7 +318,6 @@ impl LoopStrategy for CodeStrategy {
 
         Ok(summary)
     }
-
 }
 
 impl CodeStrategy {
@@ -346,7 +337,14 @@ impl CodeStrategy {
     ) -> Result<Option<String>> {
         let mut summary = initial_summary.to_string();
         for attempt in 0..MAX_SELF_HEAL_ATTEMPTS {
-            let Some(fix_contract) =
+            let error_category =
+                crate::self_heal::classify_test_failure_category(&summary).to_string();
+
+            let prior_success_pattern = contract.memory.as_ref().and_then(|memory| {
+                crate::self_heal::find_successful_fix_pattern(memory, &error_category)
+            });
+
+            let Some(mut fix_contract) =
                 crate::self_heal::attempt_test_fix(&summary, &contract.goal)
             else {
                 // No test failures detected. If a previous attempt already
@@ -357,6 +355,13 @@ impl CodeStrategy {
                 }
                 return Ok(None);
             };
+
+            if let Some(pattern) = prior_success_pattern {
+                fix_contract.context = format!(
+                    "{}\n\nRecent successful fix pattern for {}:\n{}",
+                    fix_contract.context, error_category, pattern
+                );
+            }
 
             tracing::warn!(
                 attempt = attempt + 1,
@@ -381,6 +386,14 @@ impl CodeStrategy {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
+                    if let Some(memory) = contract.memory.as_ref() {
+                        crate::self_heal::store_self_heal_outcome(
+                            memory,
+                            &error_category,
+                            &fix_contract.goal,
+                            false,
+                        );
+                    }
                     if let Some(s) = heal_span {
                         s.end(Some(&format!("failed: {}", e)));
                     }
@@ -418,6 +431,16 @@ impl CodeStrategy {
                 .instrument(tracing::info_span!("self_heal_verify"))
                 .await?
             };
+
+            let success = !crate::self_heal::has_test_failures(&summary);
+            if let Some(memory) = contract.memory.as_ref() {
+                crate::self_heal::store_self_heal_outcome(
+                    memory,
+                    &error_category,
+                    &fix_contract.goal,
+                    success,
+                );
+            }
             tracing::info!("CodeStrategy: self-heal cycle complete");
             if let Some(s) = heal_span {
                 s.end(Some("fixed"));
@@ -809,10 +832,18 @@ impl CodeStrategy {
 
             if allow_retry_rewrite && policy.fallback && idx + 1 == candidates.len() {
                 if let Some(output) = retry_with_prompt_rewrite(
-                    tool_name, tool, docker, llm, &full_prompt,
-                    &contract.context, &exploration.files, &result.output,
+                    tool_name,
+                    tool,
+                    docker,
+                    llm,
+                    &full_prompt,
+                    &contract.context,
+                    &exploration.files,
+                    &result.output,
                     &mut failures,
-                ).await? {
+                )
+                .await?
+                {
                     return Ok(output);
                 }
             }

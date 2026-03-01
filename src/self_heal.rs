@@ -1,4 +1,5 @@
 use crate::error::AthenaError;
+use crate::memory::MemoryStore;
 use crate::strategy::TaskContract;
 use serde_json::Value;
 
@@ -16,7 +17,96 @@ fn make_contract(
         tools_doc: None,
         cli_tool_preference: None,
         test_generation: false,
+        memory: None,
     }
+}
+
+fn truncate_for_memory(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+pub fn has_test_failures(test_output: &str) -> bool {
+    test_output.contains("test result: FAILED")
+        || test_output.contains("FAILED")
+        || test_output.contains("error[E")
+}
+
+pub fn classify_test_failure_category(test_output: &str) -> &'static str {
+    if test_output.contains("error[E0308]")
+        || test_output.contains("error[E0599]")
+        || test_output.contains("TypeError")
+    {
+        "type_error"
+    } else if test_output.contains("error[E0432]")
+        || test_output.contains("error[E0433]")
+        || test_output.contains("ImportError")
+    {
+        "import_error"
+    } else if test_output.contains("panicked at") || test_output.contains("panic!") {
+        "panic"
+    } else if test_output.contains("assertion `")
+        || test_output.contains("assert_eq!")
+        || test_output.contains("assertion failed")
+    {
+        "assertion_failure"
+    } else {
+        "general_test_failure"
+    }
+}
+
+pub fn encode_self_heal_outcome(
+    error_category: &str,
+    fix_attempted: &str,
+    success: bool,
+) -> String {
+    serde_json::json!({
+        "error_category": error_category,
+        "fix_attempted": truncate_for_memory(fix_attempted, 400),
+        "success": success
+    })
+    .to_string()
+}
+
+pub fn decode_self_heal_outcome(content: &str) -> Option<(String, String, bool)> {
+    let json: serde_json::Value = serde_json::from_str(content).ok()?;
+    let category = json.get("error_category")?.as_str()?.to_string();
+    let fix_attempted = json.get("fix_attempted")?.as_str()?.to_string();
+    let success = json.get("success")?.as_bool()?;
+    Some((category, fix_attempted, success))
+}
+
+pub fn store_self_heal_outcome(
+    memory: &MemoryStore,
+    error_category: &str,
+    fix_attempted: &str,
+    success: bool,
+) {
+    let content = encode_self_heal_outcome(error_category, fix_attempted, success);
+    if let Err(e) = memory.store("self_heal_outcome", &content, None) {
+        tracing::warn!("Failed to store self-heal outcome memory: {}", e);
+    }
+}
+
+pub fn find_successful_fix_pattern(memory: &MemoryStore, error_category: &str) -> Option<String> {
+    let outcomes = memory.search("self_heal_outcome").ok()?;
+    outcomes
+        .into_iter()
+        .filter(|m| m.category == "self_heal_outcome")
+        .find_map(|m| {
+            let (category, fix_attempted, success) = decode_self_heal_outcome(&m.content)?;
+            if category == error_category && success {
+                Some(fix_attempted)
+            } else {
+                None
+            }
+        })
 }
 
 /// Handles web_fetch, file_edit, shell permission, shell command-not-found, and file I/O errors.
@@ -81,8 +171,7 @@ fn fix_tool_error_io(
             vec![
                 "Read the file before attempting to edit.".to_string(),
                 "Ensure the new `old_string` is unique within the file.".to_string(),
-                "Preserve the original `new_string` — only fix the `old_string`."
-                    .to_string(),
+                "Preserve the original `new_string` — only fix the `old_string`.".to_string(),
             ],
             "You are a senior Rust developer ghost, specialized in precise \
              code edits. Your goal is to retry a failed file_edit with a \
@@ -110,8 +199,7 @@ fn fix_tool_error_io(
         ))
     } else if original_tool_name == "shell"
         && (message_lower.contains("command not found")
-            || (message_lower.contains("not found")
-                && !message_lower.contains("no such file")))
+            || (message_lower.contains("not found") && !message_lower.contains("no such file")))
     {
         let context = format!(
             "The tool '{}' failed because a command was not found when called with parameters: {}.\nError message: {}",
@@ -145,8 +233,7 @@ fn fix_tool_error_build(
     params_pretty: &str,
 ) -> Option<TaskContract> {
     if (original_tool_name == "file_read" || original_tool_name == "file_write")
-        && (message_lower.contains("no such file")
-            || message_lower.contains("not found"))
+        && (message_lower.contains("no such file") || message_lower.contains("not found"))
     {
         let context = format!(
             "The tool '{}' failed because a file was not found when called with parameters: {}.\nError message: {}",
@@ -311,12 +398,7 @@ pub fn attempt_fix(
                 original_tool_params,
             )
             .or_else(|| {
-                fix_tool_error_build(
-                    message,
-                    &message_lower,
-                    original_tool_name,
-                    &params_pretty,
-                )
+                fix_tool_error_build(message, &message_lower, original_tool_name, &params_pretty)
             })
         }
         AthenaError::Timeout(seconds) => {
@@ -370,10 +452,7 @@ pub fn attempt_fix(
 /// Analyzes test output and attempts to generate a corrective task.
 /// Called when the VERIFY phase detects test failures.
 pub fn attempt_test_fix(test_output: &str, original_goal: &str) -> Option<TaskContract> {
-    if !test_output.contains("test result: FAILED")
-        && !test_output.contains("FAILED")
-        && !test_output.contains("error[E")
-    {
+    if !has_test_failures(test_output) {
         return None;
     }
 
@@ -443,4 +522,40 @@ pub fn attempt_test_fix(test_output: &str, original_goal: &str) -> Option<TaskCo
          and apply targeted fixes."
             .to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_test_failure_category, decode_self_heal_outcome, encode_self_heal_outcome,
+        has_test_failures,
+    };
+
+    #[test]
+    fn has_test_failures_detects_key_patterns() {
+        assert!(has_test_failures("test result: FAILED. 1 passed; 1 failed"));
+        assert!(has_test_failures("error[E0308]: mismatched types"));
+        assert!(!has_test_failures("test result: ok. 2 passed; 0 failed"));
+    }
+
+    #[test]
+    fn classify_test_failure_category_detects_type_and_import() {
+        assert_eq!(
+            classify_test_failure_category("error[E0308]: mismatched types"),
+            "type_error"
+        );
+        assert_eq!(
+            classify_test_failure_category("error[E0432]: unresolved import"),
+            "import_error"
+        );
+    }
+
+    #[test]
+    fn self_heal_outcome_round_trip() {
+        let encoded = encode_self_heal_outcome("type_error", "fix signature", true);
+        let decoded = decode_self_heal_outcome(&encoded).expect("decode should succeed");
+        assert_eq!(decoded.0, "type_error");
+        assert_eq!(decoded.1, "fix signature");
+        assert!(decoded.2);
+    }
 }
