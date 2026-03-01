@@ -134,6 +134,8 @@ const MIGRATIONS: &[&str] = &[
         ON ticket_intake_log(provider, created_at DESC);",
     // v13: add issue_number for webhook/write-back support
     "ALTER TABLE ticket_intake_log ADD COLUMN issue_number TEXT;",
+    // v14: persist CI monitor status for ticket write-back chain
+    "ALTER TABLE ticket_intake_log ADD COLUMN ci_monitor_status TEXT;",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

@@ -22,7 +22,10 @@ pub fn spawn_ticket_status_sync(
         return;
     }
 
-    let writeback_count = providers.values().filter(|p| p.supports_writeback()).count();
+    let writeback_count = providers
+        .values()
+        .filter(|p| p.supports_writeback())
+        .count();
     if writeback_count == 0 {
         observer.log(
             ObserverCategory::TicketIntake,
@@ -119,11 +122,31 @@ async fn sync_record(
         );
     }
 
-    let new_status = if comment_result.is_ok() && status_result.is_ok() {
-        "synced"
-    } else {
-        "sync_failed"
-    };
+    let mut ci_followup_result: std::result::Result<(), crate::error::AthenaError> = Ok(());
+    if item.provider.starts_with("linear:") {
+        if let Some(ci_status) = item
+            .ci_monitor_status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let ci_message = format!("Athena CI monitor update\nStatus: {}", ci_status);
+            ci_followup_result = provider.post_comment(&ticket, &ci_message).await;
+            if let Err(e) = &ci_followup_result {
+                observer.log(
+                    ObserverCategory::TicketIntake,
+                    format!("Ticket sync CI follow-up failed: {}", e),
+                );
+            }
+        }
+    }
+
+    let new_status =
+        if comment_result.is_ok() && status_result.is_ok() && ci_followup_result.is_ok() {
+            "synced"
+        } else {
+            "sync_failed"
+        };
     let _ = store.update_status(&item.dedup_key, new_status);
 }
 
@@ -155,6 +178,14 @@ fn format_sync_comment(item: &crate::ticket_intake::store::TicketSyncRecord) -> 
     if let Some(err) = item.task_error.as_ref() {
         lines.push(format!("Error: {}", truncate(err, 200)));
     }
+    if let Some(ci_status) = item
+        .ci_monitor_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(format!("CI monitor: {}", ci_status));
+    }
 
     lines.join("\n")
 }
@@ -178,7 +209,6 @@ fn repo_from_provider(provider: &str) -> String {
         .unwrap_or_default()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +221,7 @@ mod tests {
             external_id: "42".to_string(),
             issue_number: Some("7".to_string()),
             title: "Fix bug".to_string(),
+            ci_monitor_status: None,
             task_status: status.to_string(),
             task_goal: goal.to_string(),
             task_error: None,
@@ -227,7 +258,7 @@ mod tests {
         // Multi-byte UTF-8: each char is 3 bytes
         let s = "áéíóú"; // 5 × 2-byte chars = 10 bytes
         let result = truncate(s, 3); // cut at byte 3
-        // Must not panic and result must be valid UTF-8
+                                     // Must not panic and result must be valid UTF-8
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
     }
 
@@ -277,6 +308,15 @@ mod tests {
         let comment = format_sync_comment(&record);
         assert!(!comment.contains("Finished:"));
         assert!(!comment.contains("Error:"));
+        assert!(!comment.contains("CI monitor:"));
+    }
+
+    #[test]
+    fn format_sync_comment_includes_ci_monitor_status_when_present() {
+        let mut record = make_record("succeeded", "Deploy");
+        record.ci_monitor_status = Some("post_merge_passed".to_string());
+        let comment = format_sync_comment(&record);
+        assert!(comment.contains("CI monitor: post_merge_passed"));
     }
 
     // --- build_sync_ticket ---

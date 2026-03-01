@@ -245,6 +245,7 @@ impl AthenaCore {
             rx,
             manager,
             auto_rx,
+            config.clone(),
             activity.clone(),
             knobs.clone(),
             observer.clone(),
@@ -277,7 +278,11 @@ impl AthenaCore {
 
 async fn init_llm_stack(
     config: &Config,
-) -> Result<(Arc<dyn LlmProvider>, Arc<dyn LlmProvider>, Option<Arc<Embedder>>)> {
+) -> Result<(
+    Arc<dyn LlmProvider>,
+    Arc<dyn LlmProvider>,
+    Option<Arc<Embedder>>,
+)> {
     let (llm, selected_provider) = connect_main_llm(config).await?;
     let orchestrator = connect_orchestrator(config, &selected_provider, &llm).await?;
     let embedder = init_embedder_opt(config).await;
@@ -293,6 +298,7 @@ fn spawn_core_loops(
     rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
     auto_rx: mpsc::Receiver<AutonomousTask>,
+    config: Config,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
@@ -316,6 +322,7 @@ fn spawn_core_loops(
     spawn_autonomous_task_consumer(
         auto_rx,
         manager,
+        config,
         observer,
         pulse_bus,
         memory,
@@ -572,9 +579,7 @@ fn init_cron_engine(
     auto_tx: mpsc::Sender<AutonomousTask>,
     knobs: SharedKnobs,
 ) -> Arc<CronEngine> {
-    let cron_engine = Arc::new(CronEngine::new(
-        memory, observer, auto_tx, knobs,
-    ));
+    let cron_engine = Arc::new(CronEngine::new(memory, observer, auto_tx, knobs));
     cron_engine.clone().spawn_tick_loop();
     cron_engine
 }
@@ -734,13 +739,7 @@ async fn handle_core_request(
         }
     }
 
-    proactive::maybe_schedule_reentry(
-        knobs,
-        observer,
-        memory,
-        session_key,
-        persona_soul,
-    );
+    proactive::maybe_schedule_reentry(knobs, observer, memory, session_key, persona_soul);
 }
 
 fn spawn_status_bridge(
@@ -757,6 +756,7 @@ fn spawn_status_bridge(
 fn spawn_autonomous_task_consumer(
     mut auto_rx: mpsc::Receiver<AutonomousTask>,
     manager: Arc<Manager>,
+    config: Config,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
@@ -766,6 +766,7 @@ fn spawn_autonomous_task_consumer(
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
             let manager = manager.clone();
+            let config = config.clone();
             let observer = observer.clone();
             let pulse_bus = pulse_bus.clone();
             let memory = memory.clone();
@@ -775,6 +776,7 @@ fn spawn_autonomous_task_consumer(
                 execute_autonomous_task(
                     task,
                     manager,
+                    config,
                     observer,
                     pulse_bus,
                     memory,
@@ -790,6 +792,7 @@ fn spawn_autonomous_task_consumer(
 async fn execute_autonomous_task(
     task: AutonomousTask,
     manager: Arc<Manager>,
+    config: Config,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
@@ -808,25 +811,20 @@ async fn execute_autonomous_task(
     log_autonomous_dispatch(&observer, &task, &ghost_label);
     introspect::inc_active_tasks();
 
-    if mock_ticket_intake_dispatch && task.lane == "ticket_intake" {
-        observer.log(
-            ObserverCategory::AutonomousTask,
-            format!(
-                "Mock dispatch enabled for ticket intake task [{}]: skipping execution",
-                task_id
-            ),
-        );
-        handle_autonomous_task_success(
-            &task,
-            &task_id,
-            &ghost_label,
-            &goal_summary,
-            "Mock dispatch: ticket intake task auto-completed without ghost execution.".to_string(),
-            &observer,
-            &pulse_bus,
-            &memory,
-            &outcome_store,
-        );
+    if maybe_handle_mock_ticket_intake_dispatch(
+        mock_ticket_intake_dispatch,
+        &task,
+        &task_id,
+        &ghost_label,
+        &goal_summary,
+        &config,
+        &observer,
+        &pulse_bus,
+        &memory,
+        &outcome_store,
+    )
+    .await
+    {
         introspect::dec_active_tasks();
         return;
     }
@@ -837,17 +835,21 @@ async fn execute_autonomous_task(
         .execute_task(&task.goal, &task.context, task.ghost.as_deref(), &confirmer)
         .await
     {
-        Ok(result) => handle_autonomous_task_success(
-            &task,
-            &task_id,
-            &ghost_label,
-            &goal_summary,
-            result,
-            &observer,
-            &pulse_bus,
-            &memory,
-            &outcome_store,
-        ),
+        Ok(result) => {
+            handle_autonomous_task_success(
+                &task,
+                &task_id,
+                &ghost_label,
+                &goal_summary,
+                result,
+                &config,
+                &observer,
+                &pulse_bus,
+                &memory,
+                &outcome_store,
+            )
+            .await
+        }
         Err(e) => handle_autonomous_task_failure(
             &task,
             &task_id,
@@ -863,6 +865,45 @@ async fn execute_autonomous_task(
         ),
     }
     introspect::dec_active_tasks();
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn maybe_handle_mock_ticket_intake_dispatch(
+    mock_ticket_intake_dispatch: bool,
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    config: &Config,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) -> bool {
+    if !(mock_ticket_intake_dispatch && task.lane == "ticket_intake") {
+        return false;
+    }
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!(
+            "Mock dispatch enabled for ticket intake task [{}]: skipping execution",
+            task_id
+        ),
+    );
+    handle_autonomous_task_success(
+        task,
+        task_id,
+        ghost_label,
+        goal_summary,
+        "Mock dispatch: ticket intake task auto-completed without ghost execution.".to_string(),
+        config,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+    )
+    .await;
+    true
 }
 
 fn record_autonomous_task_start(
@@ -895,17 +936,26 @@ fn log_autonomous_dispatch(observer: &ObserverHandle, task: &AutonomousTask, gho
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_autonomous_task_success(
+async fn handle_autonomous_task_success(
     task: &AutonomousTask,
     task_id: &str,
     ghost_label: &str,
     goal_summary: &str,
-    result: String,
+    mut result: String,
+    config: &Config,
     observer: &ObserverHandle,
     pulse_bus: &PulseBus,
     memory: &MemoryStore,
     outcome_store: &TaskOutcomeStore,
 ) {
+    if task.lane == "ticket_intake" {
+        if let Some(ci_status) =
+            run_ticket_ci_monitor(task_id, &result, config, observer, outcome_store).await
+        {
+            result.push_str(&format!("\n\n[ci_monitor_status:{}]", ci_status));
+        }
+    }
+
     let (verification_total, verification_passed) =
         infer_verification_counters(&task.goal, Some(&result), true);
     let rolled_back = infer_rollback_flag(&task.goal, Some(&result));
@@ -1029,6 +1079,68 @@ fn handle_autonomous_task_failure(
         format!("Failure pulse emitted for task_id={}", task_id),
     );
     pulse_bus.send(pulse);
+}
+
+async fn run_ticket_ci_monitor(
+    task_id: &str,
+    result: &str,
+    config: &Config,
+    observer: &ObserverHandle,
+    outcome_store: &TaskOutcomeStore,
+) -> Option<String> {
+    let dedup_key = task_id.strip_prefix("ticket:")?;
+    let pr_url = extract_pull_request_url(result)?;
+    let _ = outcome_store.update_ticket_ci_monitor_status(dedup_key, "monitoring");
+    observer.log(
+        ObserverCategory::TicketIntake,
+        format!(
+            "Ticket intake CI monitor started task_id={} pr_url={}",
+            task_id, pr_url
+        ),
+    );
+
+    let repo_root = std::env::current_dir().ok()?;
+    let report = crate::ci_monitor::monitor_pr_ci(
+        &pr_url,
+        None,
+        &repo_root,
+        config,
+        false,
+        false,
+        crate::ci_monitor::CI_POLL_INTERVAL_SECS,
+        crate::ci_monitor::CI_POLL_TIMEOUT_SECS,
+        0,
+    )
+    .await;
+    let mut ci_status = report.final_status.clone();
+    if report.post_merge_status != "not_merged" && report.post_merge_status != "not_checked" {
+        ci_status = format!("{} / {}", report.final_status, report.post_merge_status);
+    }
+    if let Some(url) = report.revert_pr_url.as_deref() {
+        ci_status.push_str(&format!(" (revert_pr={})", url));
+    }
+    if let Err(e) = outcome_store.update_ticket_ci_monitor_status(dedup_key, &ci_status) {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!(
+                "Ticket intake CI monitor status persist failed task_id={} error={}",
+                task_id, e
+            ),
+        );
+    }
+    observer.log(
+        ObserverCategory::TicketIntake,
+        format!(
+            "Ticket intake CI monitor finished task_id={} status={}",
+            task_id, ci_status
+        ),
+    );
+    Some(ci_status)
+}
+
+fn extract_pull_request_url(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+").ok()?;
+    re.find(text).map(|m| m.as_str().to_string())
 }
 
 fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) -> (u64, u64) {
@@ -1365,13 +1477,9 @@ fn build_ticket_intake_providers(
     let mut providers: HashMap<String, Arc<dyn ticket_intake::TicketProvider>> = HashMap::new();
 
     let read_env = |key: &str| -> Option<String> {
-        std::env::var(key).ok().and_then(|v| {
-            if v.trim().is_empty() {
-                None
-            } else {
-                Some(v)
-            }
-        })
+        std::env::var(key)
+            .ok()
+            .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
     };
 
     let clean_opt = |value: &Option<String>| -> Option<String> {
@@ -1403,8 +1511,8 @@ fn build_ticket_intake_providers(
 
         match provider.as_str() {
             "github" => {
-                let token_env = clean_opt(&source.token_env)
-                    .unwrap_or_else(|| "GH_TOKEN".to_string());
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "GH_TOKEN".to_string());
                 let Some(token) = read_env(&token_env) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
@@ -1427,8 +1535,8 @@ fn build_ticket_intake_providers(
                 providers.insert(provider.name(), provider);
             }
             "gitlab" => {
-                let token_env = clean_opt(&source.token_env)
-                    .unwrap_or_else(|| "GITLAB_TOKEN".to_string());
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "GITLAB_TOKEN".to_string());
                 let Some(token) = read_env(&token_env) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
@@ -1451,8 +1559,8 @@ fn build_ticket_intake_providers(
                 providers.insert(provider.name(), provider);
             }
             "linear" => {
-                let token_env = clean_opt(&source.token_env)
-                    .unwrap_or_else(|| "LINEAR_API_KEY".to_string());
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "LINEAR_API_KEY".to_string());
                 let Some(token) = read_env(&token_env) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
@@ -1475,37 +1583,28 @@ fn build_ticket_intake_providers(
                 providers.insert(provider.name(), provider);
             }
             "jira" => {
-                let token_env = clean_opt(&source.token_env)
-                    .unwrap_or_else(|| "JIRA_API_TOKEN".to_string());
-                let email_env = clean_opt(&source.email_env)
-                    .unwrap_or_else(|| "JIRA_EMAIL".to_string());
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "JIRA_API_TOKEN".to_string());
+                let email_env =
+                    clean_opt(&source.email_env).unwrap_or_else(|| "JIRA_EMAIL".to_string());
                 let Some(token) = read_env(&token_env) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
-                        format!(
-                            "Ticket intake jira:{} skipped: missing {}",
-                            repo, token_env
-                        ),
+                        format!("Ticket intake jira:{} skipped: missing {}", repo, token_env),
                     );
                     continue;
                 };
                 let Some(email) = read_env(&email_env) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
-                        format!(
-                            "Ticket intake jira:{} skipped: missing {}",
-                            repo, email_env
-                        ),
+                        format!("Ticket intake jira:{} skipped: missing {}", repo, email_env),
                     );
                     continue;
                 };
                 let Some(base_url) = clean_opt(&source.api_base) else {
                     observer.log(
                         ObserverCategory::TicketIntake,
-                        format!(
-                            "Ticket intake jira:{} skipped: missing api_base",
-                            repo
-                        ),
+                        format!("Ticket intake jira:{} skipped: missing api_base", repo),
                     );
                     continue;
                 };

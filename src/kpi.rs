@@ -129,6 +129,24 @@ impl TaskOutcomeStore {
         )?;
         Ok(updated)
     }
+
+    pub fn update_ticket_ci_monitor_status(
+        &self,
+        dedup_key: &str,
+        ci_monitor_status: &str,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+        conn.execute(
+            "UPDATE ticket_intake_log
+             SET ci_monitor_status = ?2
+             WHERE dedup_key = ?1",
+            params![dedup_key, ci_monitor_status],
+        )?;
+        Ok(())
+    }
 }
 
 fn parse_sqlite_datetime(ts: &str) -> Option<DateTime<Utc>> {
