@@ -261,6 +261,53 @@ def query_kpi_snapshot_trend(
     ]
 
 
+def query_ghost_breakdown(
+    conn: sqlite3.Connection,
+    repo_name: str,
+    lane_filter: str | None = None,
+    risk_filter: str | None = None,
+    min_samples: int = 3,
+) -> list[dict]:
+    threshold = max(1, min_samples)
+    sql = """
+        SELECT
+            COALESCE(NULLIF(TRIM(ghost), ''), 'unknown') AS ghost_name,
+            COALESCE(SUM(CASE WHEN status IN ('succeeded','failed','rolled_back') THEN 1 ELSE 0 END), 0) samples,
+            COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) succeeded,
+            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) failed,
+            COALESCE(SUM(CASE WHEN status = 'rolled_back' THEN 1 ELSE 0 END), 0) rolled_back
+        FROM autonomous_task_outcomes
+        WHERE repo = ?
+    """
+    params: list[str] = [repo_name]
+    if lane_filter:
+        sql += " AND lane = ?"
+        params.append(lane_filter)
+    if risk_filter:
+        sql += " AND risk_tier = ?"
+        params.append(risk_filter)
+    sql += " GROUP BY ghost_name HAVING samples > 0 ORDER BY samples DESC, ghost_name ASC"
+
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    out: list[dict] = []
+    for ghost_name, samples, succeeded, failed, rolled_back in rows:
+        sample_count = int(samples or 0)
+        succeeded_count = int(succeeded or 0)
+        out.append(
+            {
+                "ghost": str(ghost_name),
+                "samples": sample_count,
+                "succeeded": succeeded_count,
+                "failed": int(failed or 0),
+                "rolled_back": int(rolled_back or 0),
+                "success_rate": pct(succeeded_count, sample_count),
+                "sample_flag": "ok" if sample_count >= threshold else f"low-sample(<{threshold})",
+                "meets_threshold": sample_count >= threshold,
+            }
+        )
+    return out
+
+
 def summarize_rate_trend(rows: list[dict], key: str) -> str:
     if not rows:
         return "n/a (no data)"
@@ -283,9 +330,11 @@ def render_dashboard(
     history: list[dict],
     kpis: list[dict],
     kpi_trend: list[dict],
+    ghost_breakdown: list[dict],
     repo_name: str,
     lane_filter: str | None = None,
     risk_filter: str | None = None,
+    ghost_min_samples: int = 3,
 ) -> str:
     now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = []
@@ -376,6 +425,24 @@ def render_dashboard(
     else:
         lines.append("| - | - | 0 | 0 | 0 | n/a | n/a | n/a | n/a |")
     lines.append("")
+
+    lines.append("## Per-Ghost Performance")
+    lines.append("")
+    lines.append(f"- sample_threshold: `>= {max(1, ghost_min_samples)}`")
+    lines.append("| ghost | samples | succeeded | failed | rolled_back | success_rate | sample_flag |")
+    lines.append("|---|---:|---:|---:|---:|---:|---|")
+    if ghost_breakdown:
+        for row in ghost_breakdown:
+            lines.append(
+                f"| `{row['ghost']}` | {row['samples']} | {row['succeeded']} | {row['failed']} | "
+                f"{row['rolled_back']} | {row['success_rate']} | `{row['sample_flag']}` |"
+            )
+        if not any(bool(r.get("meets_threshold")) for r in ghost_breakdown):
+            lines.append("")
+            lines.append("- sparse data: no ghosts meet the stable-sample threshold yet")
+    else:
+        lines.append("| - | 0 | 0 | 0 | 0 | n/a | n/a |")
+    lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -388,6 +455,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-file", default="eval/results/history.jsonl")
     p.add_argument("--history-limit", type=int, default=20)
     p.add_argument("--kpi-trend-limit", type=int, default=20)
+    p.add_argument(
+        "--ghost-min-samples",
+        type=int,
+        default=3,
+        help="Minimum sample count for stable ghost-comparison labeling.",
+    )
     p.add_argument("--out-file", default="eval/results/dashboard.md")
     return p.parse_args()
 
@@ -415,15 +488,24 @@ def main() -> int:
         risk_filter=args.risk,
         limit=args.kpi_trend_limit,
     )
+    ghost_breakdown = query_ghost_breakdown(
+        conn,
+        args.repo,
+        lane_filter=args.lane,
+        risk_filter=args.risk,
+        min_samples=args.ghost_min_samples,
+    )
     conn.close()
 
     content = render_dashboard(
         history,
         kpis,
         kpi_trend,
+        ghost_breakdown,
         args.repo,
         lane_filter=args.lane,
         risk_filter=args.risk,
+        ghost_min_samples=args.ghost_min_samples,
     )
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(content)
