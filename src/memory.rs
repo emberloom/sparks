@@ -421,6 +421,52 @@ impl MemoryStore {
         Ok(memories)
     }
 
+    /// List active memories from any of the provided categories, newest first,
+    /// bounded by an exact recency window in hours.
+    pub fn list_by_categories_recent_hours(
+        &self,
+        categories: &[&str],
+        limit: usize,
+        within_hours: i64,
+    ) -> Result<Vec<Memory>> {
+        if categories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn()?;
+        let placeholders = std::iter::repeat_n("?", categories.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, category, content, active, created_at FROM memories
+             WHERE active = 1
+               AND category IN ({})
+               AND created_at >= datetime('now', ?{})
+             ORDER BY created_at DESC
+             LIMIT ?{}",
+            placeholders,
+            categories.len() + 1,
+            categories.len() + 2
+        );
+        let mut values: Vec<String> = categories.iter().map(|c| (*c).to_string()).collect();
+        values.push(format!("-{} hours", within_hours.max(1)));
+        values.push(limit.to_string());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                content: row.get(2)?,
+                active: row.get::<_, i32>(3)? != 0,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        Ok(memories)
+    }
+
     /// Retire a memory (soft delete)
     pub fn retire(&self, id: &str) -> Result<bool> {
         let conn = self.conn()?;
@@ -1302,5 +1348,35 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_ne!(rows[0].content, "old");
+    }
+
+    #[test]
+    fn test_list_by_categories_recent_hours_filters_categories_and_window() {
+        let store = setup_test_db();
+        let recent_refactor = store
+            .store("refactoring_failed", "recent refactor fail", None)
+            .unwrap();
+        let old_code = store
+            .store("code_change_failed", "old code fail", None)
+            .unwrap();
+        let recent_other = store.store("other", "recent other", None).unwrap();
+
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE memories
+                 SET created_at = datetime('now', '-60 hours')
+                 WHERE id = ?1",
+                rusqlite::params![old_code],
+            )
+            .unwrap();
+        }
+
+        let rows = store
+            .list_by_categories_recent_hours(&["code_change_failed", "refactoring_failed"], 10, 48)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, recent_refactor);
+        assert_ne!(rows[0].id, recent_other);
     }
 }
