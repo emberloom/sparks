@@ -3260,12 +3260,49 @@ fn verify_check_in_profile(check: &feature_contract::VerificationCheck, profile:
     }
 }
 
-fn feature_batch_max_parallelism() -> usize {
-    std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
+fn feature_batch_configured_parallelism_from_raw(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 4))
         .unwrap_or(2)
+}
+
+fn feature_batch_configured_parallelism() -> usize {
+    feature_batch_configured_parallelism_from_raw(
+        std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY").ok().as_deref(),
+    )
+}
+
+fn feature_batch_dynamic_parallelism(
+    configured: usize,
+    metrics: Option<&crate::introspect::SystemMetrics>,
+) -> (usize, String) {
+    let configured = configured.clamp(1, 4);
+    let Some(metrics) = metrics else {
+        return (configured, "metrics_unavailable".to_string());
+    };
+
+    if metrics.active_containers > 4 {
+        return (
+            1,
+            format!("active_containers={} > 4", metrics.active_containers),
+        );
+    }
+
+    if metrics.total_memory_bytes == 0 || metrics.rss_bytes == 0 {
+        return (configured, "rss_unavailable".to_string());
+    }
+
+    let rss_pct = (metrics.rss_bytes as f64 / metrics.total_memory_bytes as f64) * 100.0;
+    if rss_pct > 80.0 {
+        return (1, format!("rss_pct={:.1} > 80", rss_pct));
+    }
+    if rss_pct > 60.0 {
+        return (
+            configured.min(2),
+            format!("rss_pct={:.1} > 60 -> min(2, configured)", rss_pct),
+        );
+    }
+    (configured, format!("rss_pct={:.1} <= 60", rss_pct))
 }
 
 fn latest_eval_gate_status(
@@ -3423,6 +3460,29 @@ async fn run_feature_dispatch_flow(
         opts.continue_on_failure,
         opts.rollback_on_failure
     );
+    let configured_parallelism = feature_batch_configured_parallelism();
+    let metrics_snapshot = handle.metrics.read().ok().map(|m| m.clone());
+    let (dispatch_parallelism, parallelism_reason) =
+        feature_batch_dynamic_parallelism(configured_parallelism, metrics_snapshot.as_ref());
+    let metrics_for_log = metrics_snapshot.unwrap_or_default();
+    let rss_pct = if metrics_for_log.total_memory_bytes > 0 && metrics_for_log.rss_bytes > 0 {
+        Some((metrics_for_log.rss_bytes as f64 / metrics_for_log.total_memory_bytes as f64) * 100.0)
+    } else {
+        None
+    };
+    println!(
+        "feature_id={} batch concurrency={} (dynamic) configured={} reason={} rss_bytes={} total_memory_bytes={} rss_pct={} active_containers={}",
+        contract.feature_id,
+        dispatch_parallelism,
+        configured_parallelism,
+        parallelism_reason,
+        metrics_for_log.rss_bytes,
+        metrics_for_log.total_memory_bytes,
+        rss_pct
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_else(|| "-".to_string()),
+        metrics_for_log.active_containers
+    );
 
     let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
         std::collections::HashMap::new();
@@ -3514,7 +3574,7 @@ async fn run_feature_dispatch_flow(
             continue;
         }
 
-        let max_parallel = std::cmp::min(feature_batch_max_parallelism(), runnable.len()).max(1);
+        let max_parallel = std::cmp::min(dispatch_parallelism, runnable.len()).max(1);
         println!(
             "batch={} runnable={} max_parallel={}",
             idx + 1,
@@ -5627,7 +5687,8 @@ mod tests {
         build_feature_run_ledger, build_feature_task_context, commit_message_contains_tag,
         build_self_build_review_checklist, classify_chat_command,
         compute_feature_outcome_grace_secs, ensure_clean_working_tree,
-        evaluate_self_build_guardrails,
+        evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
+        feature_batch_dynamic_parallelism,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
         plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
         render_feature_ledger_markdown, rollback_feature_commits, track_feature_commits_since,
@@ -5637,6 +5698,7 @@ mod tests {
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
     };
+    use crate::introspect::SystemMetrics;
     use crate::pulse::{Pulse, PulseSource, Urgency};
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
@@ -5934,6 +5996,77 @@ mod tests {
         );
         assert!(context.contains("[feature_rollback_commit_tag:athena-feature-run:test-ctx]"));
         assert!(context.contains("include the rollback tag"));
+    }
+
+    #[test]
+    fn feature_batch_configured_parallelism_clamps_values() {
+        assert_eq!(feature_batch_configured_parallelism_from_raw(None), 2);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("0")), 1);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("2")), 2);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("9")), 4);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("bad")), 2);
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_high_rss_forces_one() {
+        let metrics = SystemMetrics {
+            rss_bytes: 9_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 1);
+        assert!(reason.contains("rss_pct"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_high_container_count_forces_one() {
+        let metrics = SystemMetrics {
+            active_containers: 5,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 1);
+        assert!(reason.contains("active_containers"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_medium_rss_caps_to_two() {
+        let metrics = SystemMetrics {
+            rss_bytes: 7_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 2);
+        assert!(reason.contains("> 60"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_healthy_uses_configured() {
+        let metrics = SystemMetrics {
+            rss_bytes: 3_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, Some(&metrics));
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("<= 60"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_metrics_unavailable_falls_back() {
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, None);
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("unavailable"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_missing_memory_metrics_falls_back() {
+        let metrics = SystemMetrics::default();
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, Some(&metrics));
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("rss_unavailable"));
     }
 
     #[test]

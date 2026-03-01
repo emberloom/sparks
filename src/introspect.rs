@@ -16,6 +16,8 @@ use crate::tool_usage::ToolUsageStore;
 pub struct SystemMetrics {
     /// Process resident set size in bytes.
     pub rss_bytes: u64,
+    /// Total system memory in bytes.
+    pub total_memory_bytes: u64,
     /// Process CPU usage as a percentage (0.0–100.0).
     pub cpu_percent: f32,
     /// Number of active Docker containers (Athena-managed).
@@ -40,6 +42,7 @@ impl Default for SystemMetrics {
     fn default() -> Self {
         Self {
             rss_bytes: 0,
+            total_memory_bytes: 0,
             cpu_percent: 0.0,
             active_containers: 0,
             active_tasks: 0,
@@ -57,9 +60,10 @@ impl SystemMetrics {
     /// Format a compact summary for injection into prompts.
     pub fn summary(&self) -> String {
         format!(
-            "System: RSS={:.1}MB CPU={:.1}% containers={} tasks={} uptime={}s \
+            "System: RSS={:.1}MB total_mem={:.1}MB CPU={:.1}% containers={} tasks={} uptime={}s \
              error_rate={:.2} tool_fail={:.2} llm_latency={}ms memories={} db={:.1}MB",
             self.rss_bytes as f64 / 1_048_576.0,
+            self.total_memory_bytes as f64 / 1_048_576.0,
             self.cpu_percent,
             self.active_containers,
             self.active_tasks,
@@ -229,12 +233,14 @@ pub fn spawn_metrics_collector(
             }
 
             // Refresh process info
+            sys.refresh_memory();
             sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
             let (rss, cpu) = sys
                 .process(pid)
                 .map(|p| (p.memory(), p.cpu_usage()))
                 .unwrap_or((0, 0.0));
+            let total_memory = sys.total_memory();
 
             // Container count — count via bollard if available, else 0
             let active_containers = count_containers().await;
@@ -273,6 +279,7 @@ pub fn spawn_metrics_collector(
 
             let new_metrics = SystemMetrics {
                 rss_bytes: rss,
+                total_memory_bytes: total_memory,
                 cpu_percent: cpu,
                 active_containers,
                 active_tasks,
