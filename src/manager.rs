@@ -30,6 +30,8 @@ struct DirectStep {
 const KPI_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
 const KPI_GHOST_MIN_SAMPLES: u64 = 3;
 const KPI_GHOST_TOP_LIMIT: usize = 3;
+const KPI_TOOL_MIN_SAMPLES: u64 = 3;
+const KPI_TOOL_TOP_LIMIT: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KpiPromptScope {
@@ -334,6 +336,7 @@ impl Manager {
                     soul: ghost.soul.clone(),
                     tools_doc: self.tools_doc.clone(),
                     cli_tool_preference: cli_pref,
+                    cli_tool_routing_order: Vec::new(),
                     test_generation: is_self_dev,
                     memory: Some(self.memory.clone()),
                 };
@@ -404,6 +407,8 @@ impl Manager {
         goal: &str,
         context: &str,
         ghost_name: Option<&str>,
+        lane: Option<&str>,
+        repo: Option<&str>,
         confirmer: &dyn Confirmer,
     ) -> Result<String> {
         // If no ghost specified, use the orchestrator to classify
@@ -466,6 +471,7 @@ impl Manager {
         let enriched_context = format!("{}{}{}", context, metrics_ctx, structure_ctx);
 
         let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
+        let cli_tool_routing_order = self.resolve_cli_tool_routing_order(lane, repo).await;
         let contract = TaskContract {
             context: enriched_context,
             goal: goal.to_string(),
@@ -473,6 +479,7 @@ impl Manager {
             soul: ghost.soul.clone(),
             tools_doc: self.tools_doc.clone(),
             cli_tool_preference: cli_pref,
+            cli_tool_routing_order,
             test_generation: ghost.name == "coder",
             memory: Some(self.memory.clone()),
         };
@@ -1124,6 +1131,43 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             expires_at: Instant::now() + KPI_CONTEXT_CACHE_TTL,
         });
         value
+    }
+
+    async fn resolve_cli_tool_routing_order(
+        &self,
+        lane: Option<&str>,
+        repo: Option<&str>,
+    ) -> Vec<String> {
+        let config = self.config.clone();
+        let lane = lane.map(|v| v.to_string());
+        let repo = repo
+            .map(|v| v.to_string())
+            .unwrap_or_else(kpi::default_repo_name);
+        tokio::task::spawn_blocking(move || {
+            let conn = match kpi::open_connection(&config) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::debug!("Skipping CLI tool routing context: {}", e);
+                    return Vec::new();
+                }
+            };
+            match kpi::query_cli_tool_success_rates(
+                &conn,
+                &repo,
+                lane.as_deref(),
+                KPI_TOOL_MIN_SAMPLES,
+                KPI_TOOL_TOP_LIMIT,
+            ) {
+                Ok(rows) => rows.into_iter().map(|row| row.tool_name).collect(),
+                Err(e) => {
+                    tracing::debug!("Skipping CLI tool success-rate query: {}", e);
+                    Vec::new()
+                }
+            }
+        })
+        .await
+        .ok()
+        .unwrap_or_default()
     }
 
     fn build_lesson_context(&self) -> String {

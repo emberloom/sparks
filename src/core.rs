@@ -831,10 +831,7 @@ async fn execute_autonomous_task(
 
     let (verification_total_on_fail, _) = infer_verification_counters(&task.goal, None, false);
     let rolled_back_on_fail = infer_rollback_flag(&task.goal, None);
-    match manager
-        .execute_task(&task.goal, &task.context, task.ghost.as_deref(), &confirmer)
-        .await
-    {
+    match run_manager_autonomous_task(&manager, &task, &confirmer).await {
         Ok(result) => {
             handle_autonomous_task_success(
                 &task,
@@ -865,6 +862,23 @@ async fn execute_autonomous_task(
         ),
     }
     introspect::dec_active_tasks();
+}
+
+async fn run_manager_autonomous_task(
+    manager: &Manager,
+    task: &AutonomousTask,
+    confirmer: &dyn Confirmer,
+) -> Result<String> {
+    manager
+        .execute_task(
+            &task.goal,
+            &task.context,
+            task.ghost.as_deref(),
+            Some(&task.lane),
+            Some(&task.repo),
+            confirmer,
+        )
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -955,6 +969,10 @@ async fn handle_autonomous_task_success(
             result.push_str(&format!("\n\n[ci_monitor_status:{}]", ci_status));
         }
     }
+    let cli_tool_used = extract_cli_tool_used_marker(&result);
+    if cli_tool_used.is_some() {
+        result = strip_cli_tool_used_marker(&result);
+    }
 
     let (verification_total, verification_passed) =
         infer_verification_counters(&task.goal, Some(&result), true);
@@ -966,6 +984,7 @@ async fn handle_autonomous_task_success(
         verification_passed,
         rolled_back,
         None,
+        cli_tool_used.as_deref(),
     );
     observer.log(
         ObserverCategory::AutonomousTask,
@@ -1045,30 +1064,38 @@ fn handle_autonomous_task_failure(
     memory: &MemoryStore,
     outcome_store: &TaskOutcomeStore,
 ) {
+    let err_text = err.to_string();
+    let cli_tool_used = extract_cli_tool_used_marker(&err_text);
+    let clean_error = strip_cli_tool_used_marker(&err_text);
     let _ = outcome_store.record_finish(
         task_id,
         "failed",
         verification_total,
         0,
         rolled_back,
-        Some(&err.to_string()),
+        Some(&clean_error),
+        cli_tool_used.as_deref(),
     );
     observer.log(
         ObserverCategory::AutonomousTask,
-        format!("Failed: {} — {}", ghost_label, err),
+        format!("Failed: {} — {}", ghost_label, clean_error),
     );
-    tracing::error!(ghost = %ghost_label, error = %err, "Autonomous task failed");
+    tracing::error!(
+        ghost = %ghost_label,
+        error = %clean_error,
+        "Autonomous task failed"
+    );
 
     let outcome = format!(
         "Autonomous task FAILED [{}]: {}\nError: {}",
-        ghost_label, goal_summary, err,
+        ghost_label, goal_summary, clean_error,
     );
     let _ = memory.store(failure_category(goal_summary), &outcome, None);
 
     let pulse = Pulse::new(
         crate::pulse::PulseSource::AutonomousTask,
         crate::pulse::Urgency::High,
-        format!("Task failed [{}]: {}", ghost_label, err),
+        format!("Task failed [{}]: {}", ghost_label, clean_error),
     )
     .with_task_id(task_id.to_string())
     .with_target(task.target.clone())
@@ -1141,6 +1168,20 @@ async fn run_ticket_ci_monitor(
 fn extract_pull_request_url(text: &str) -> Option<String> {
     let re = regex::Regex::new(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+").ok()?;
     re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn extract_cli_tool_used_marker(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"\[athena_cli_tool_used:([a-zA-Z0-9_]+)\]").ok()?;
+    let captures = re.captures(text)?;
+    captures.get(1).map(|m| m.as_str().to_string())
+}
+
+fn strip_cli_tool_used_marker(text: &str) -> String {
+    let re = match regex::Regex::new(r"\s*\[athena_cli_tool_used:[a-zA-Z0-9_]+\]") {
+        Ok(re) => re,
+        Err(_) => return text.to_string(),
+    };
+    re.replace_all(text, "").trim().to_string()
 }
 
 fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) -> (u64, u64) {

@@ -16,6 +16,7 @@ fn make_contract(
         soul: Some(soul),
         tools_doc: None,
         cli_tool_preference: None,
+        cli_tool_routing_order: Vec::new(),
         test_generation: false,
         memory: None,
     }

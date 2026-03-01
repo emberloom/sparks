@@ -136,6 +136,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE ticket_intake_log ADD COLUMN issue_number TEXT;",
     // v14: persist CI monitor status for ticket write-back chain
     "ALTER TABLE ticket_intake_log ADD COLUMN ci_monitor_status TEXT;",
+    // v15: record selected coding CLI for tool-level routing KPIs
+    "ALTER TABLE autonomous_task_outcomes ADD COLUMN cli_tool_used TEXT;",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

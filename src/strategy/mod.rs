@@ -29,6 +29,8 @@ pub struct TaskContract {
     pub tools_doc: Option<String>,
     /// Preferred CLI tool for code strategy (from runtime knob)
     pub cli_tool_preference: Option<String>,
+    /// Historical routing order for CLI tools (best-performing first).
+    pub cli_tool_routing_order: Vec<String>,
     /// Whether the VERIFY phase should generate tests for changes
     pub test_generation: bool,
     /// Optional memory store for storing and retrieving strategy outcomes

@@ -143,6 +143,32 @@ fn build_execution_prompt(
     parts.join("\n\n")
 }
 
+fn build_cli_candidate_order(
+    preferred: Option<&str>,
+    routed: &[String],
+    available: &[&str],
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Some(pref) = preferred.filter(|pref| available.contains(pref)) {
+        candidates.push(pref.to_string());
+    }
+
+    for tool in routed {
+        if available.contains(&tool.as_str()) && !candidates.iter().any(|c| c == tool) {
+            candidates.push(tool.clone());
+        }
+    }
+
+    for &name in CODING_TOOLS {
+        if available.contains(&name) && !candidates.iter().any(|c| c == name) {
+            candidates.push(name.to_string());
+        }
+    }
+
+    candidates
+}
+
 /// Attempt a prompt-rewrite retry when the coding tool fails on the last candidate.
 async fn retry_with_prompt_rewrite(
     tool_name: &str,
@@ -721,19 +747,16 @@ impl CodeStrategy {
         exploration: &ExplorationResult,
         allow_retry_rewrite: bool,
     ) -> Result<String> {
-        let mut candidates: Vec<&str> = Vec::new();
-        if let Some(pref) = contract
-            .cli_tool_preference
-            .as_deref()
-            .filter(|pref| tools.get(pref).is_some())
-        {
-            candidates.push(pref);
-        }
-        for &name in CODING_TOOLS {
-            if tools.get(name).is_some() && !candidates.contains(&name) {
-                candidates.push(name);
-            }
-        }
+        let available: Vec<&str> = CODING_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| tools.get(name).is_some())
+            .collect();
+        let candidates = build_cli_candidate_order(
+            contract.cli_tool_preference.as_deref(),
+            &contract.cli_tool_routing_order,
+            &available,
+        );
         if candidates.is_empty() {
             return Err(AthenaError::Tool(
                 "No coding CLI tool available (need claude_code, codex, or opencode)".into(),
@@ -745,7 +768,7 @@ impl CodeStrategy {
         let full_prompt = build_execution_prompt(exploration, contract, &ripple_section);
         let mut failures: Vec<String> = Vec::new();
 
-        for (idx, &tool_name) in candidates.iter().enumerate() {
+        for (idx, tool_name) in candidates.iter().enumerate() {
             if tool_name == "claude_code" && std::env::var_os("CLAUDECODE").is_some() {
                 let msg = "Skipping claude_code: running inside a Claude Code session";
                 tracing::warn!("{}", msg);
@@ -753,7 +776,7 @@ impl CodeStrategy {
                 continue;
             }
 
-            let tool = match tools.get(tool_name) {
+            let tool = match tools.get(tool_name.as_str()) {
                 Some(t) => t,
                 None => {
                     failures.push(format!("{}: not available", tool_name));
@@ -778,7 +801,10 @@ impl CodeStrategy {
 
             if result.success {
                 tracing::info!(tool = tool_name, "EXECUTE: coding tool succeeded");
-                return Ok(result.output);
+                return Ok(format!(
+                    "{}\n\n[athena_cli_tool_used:{}]",
+                    result.output, tool_name
+                ));
             }
             let policy = parse_cli_failure_policy(&result.output);
 
@@ -796,7 +822,12 @@ impl CodeStrategy {
                     "EXECUTE: retrying same coding tool based on policy"
                 );
                 match tool.execute(docker, &params).await {
-                    Ok(retry_once) if retry_once.success => return Ok(retry_once.output),
+                    Ok(retry_once) if retry_once.success => {
+                        return Ok(format!(
+                            "{}\n\n[athena_cli_tool_used:{}]",
+                            retry_once.output, tool_name
+                        ))
+                    }
                     Ok(retry_once) => {
                         let retry_policy = parse_cli_failure_policy(&retry_once.output);
                         failures.push(format!(
@@ -807,14 +838,15 @@ impl CodeStrategy {
                         ));
                         if !retry_policy.fallback {
                             return Err(AthenaError::Tool(format!(
-                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
                                 tool_name,
                                 retry_policy.code,
                                 failures
                                     .iter()
                                     .map(|f| format!("- {}", f))
                                     .collect::<Vec<_>>()
-                                    .join("\n")
+                                    .join("\n"),
+                                tool_name
                             )));
                         }
                     }
@@ -824,14 +856,15 @@ impl CodeStrategy {
 
             if !policy.fallback {
                 return Err(AthenaError::Tool(format!(
-                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
                     tool_name,
                     policy.code,
                     failures
                         .iter()
                         .map(|f| format!("- {}", f))
                         .collect::<Vec<_>>()
-                        .join("\n")
+                        .join("\n"),
+                    tool_name
                 )));
             }
 
@@ -849,18 +882,22 @@ impl CodeStrategy {
                 )
                 .await?
                 {
-                    return Ok(output);
+                    return Ok(format!(
+                        "{}\n\n[athena_cli_tool_used:{}]",
+                        output, tool_name
+                    ));
                 }
             }
         }
 
         Err(AthenaError::Tool(format!(
-            "All coding CLI tools failed.\n{}",
+            "All coding CLI tools failed.\n{}\n[athena_cli_tool_used:{}]",
             failures
                 .iter()
                 .map(|f| format!("- {}", f))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            candidates.first().map(String::as_str).unwrap_or("unknown")
         )))
     }
 
@@ -1382,7 +1419,7 @@ INSTRUCTIONS:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli_failure_policy, CliFailurePolicy};
+    use super::{build_cli_candidate_order, parse_cli_failure_policy, CliFailurePolicy};
 
     #[test]
     fn parse_cli_failure_policy_defaults_for_plain_text() {
@@ -1439,5 +1476,50 @@ mod tests {
         assert_eq!(a.code, "invalid_request");
         assert!(!a.retry_same);
         assert!(!a.fallback);
+    }
+
+    #[test]
+    fn build_cli_candidate_order_prefers_routed_when_no_explicit_preference() {
+        let routed = vec!["opencode".to_string(), "codex".to_string()];
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(None, &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "opencode".to_string(),
+                "codex".to_string(),
+                "claude_code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cli_candidate_order_explicit_preference_wins_tiebreak() {
+        let routed = vec!["opencode".to_string(), "codex".to_string()];
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(Some("codex"), &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "codex".to_string(),
+                "opencode".to_string(),
+                "claude_code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cli_candidate_order_cold_start_falls_back_to_defaults() {
+        let routed: Vec<String> = Vec::new();
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(None, &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "claude_code".to_string(),
+                "codex".to_string(),
+                "opencode".to_string()
+            ]
+        );
     }
 }
