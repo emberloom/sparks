@@ -32,6 +32,19 @@ const KPI_GHOST_MIN_SAMPLES: u64 = 3;
 const KPI_GHOST_TOP_LIMIT: usize = 3;
 const KPI_TOOL_MIN_SAMPLES: u64 = 3;
 const KPI_TOOL_TOP_LIMIT: usize = 3;
+const TOKEN_BUDGET_PRECHECK_RATIO: f64 = 0.70;
+const TOKEN_ESTIMATOR_CONFIDENCE_FLOOR: f64 = 0.50;
+const TOKEN_BUDGET_CONTEXT_SOFT_CHARS: usize = 24_000;
+const TOKEN_BUDGET_CONTEXT_HARD_CHARS: usize = 12_000;
+const TOKEN_BUDGET_GOAL_CHUNK_WORDS: usize = 120;
+
+#[derive(Debug, Clone)]
+struct TokenBudgetEstimate {
+    estimated_tokens: usize,
+    threshold_tokens: usize,
+    confidence: f64,
+    oversize: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KpiPromptScope {
@@ -329,7 +342,7 @@ impl Manager {
 
                 let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
                 let is_self_dev = ghost_name == "coder" || goal.to_lowercase().contains("refactor");
-                let contract = TaskContract {
+                let contract = self.prepare_contract_for_token_budget(TaskContract {
                     context,
                     goal,
                     constraints: vec![],
@@ -339,7 +352,7 @@ impl Manager {
                     cli_tool_routing_order: Vec::new(),
                     test_generation: is_self_dev,
                     memory: Some(self.memory.clone()),
-                };
+                });
 
                 // Send delegation status if we have a sender
                 if let Some(tx) = status_tx {
@@ -472,7 +485,7 @@ impl Manager {
 
         let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
         let cli_tool_routing_order = self.resolve_cli_tool_routing_order(lane, repo).await;
-        let contract = TaskContract {
+        let contract = self.prepare_contract_for_token_budget(TaskContract {
             context: enriched_context,
             goal: goal.to_string(),
             constraints: vec![],
@@ -482,7 +495,7 @@ impl Manager {
             cli_tool_routing_order,
             test_generation: ghost.name == "coder",
             memory: Some(self.memory.clone()),
-        };
+        });
 
         // Start Langfuse trace for autonomous task
         let lf_trace = self.langfuse.as_ref().map(|lf| {
@@ -1096,6 +1109,28 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         }
     }
 
+    fn prepare_contract_for_token_budget(&self, contract: TaskContract) -> TaskContract {
+        let context_window = usize::try_from(self.llm.context_window())
+            .ok()
+            .unwrap_or(128_000)
+            .max(8_192);
+        let estimate = estimate_token_budget(&contract, context_window);
+        if !estimate.oversize {
+            return contract;
+        }
+
+        let adjusted = apply_token_budget_strategy(&contract, context_window, &estimate);
+        let adjusted_estimate = estimate_token_budget(&adjusted, context_window);
+        tracing::warn!(
+            estimated_tokens_before = estimate.estimated_tokens,
+            estimated_tokens_after = adjusted_estimate.estimated_tokens,
+            threshold_tokens = estimate.threshold_tokens,
+            confidence = estimate.confidence,
+            "Pre-dispatch token budget strategy applied"
+        );
+        adjusted
+    }
+
     async fn build_kpi_context(
         &self,
         user_input: &str,
@@ -1382,6 +1417,138 @@ fn load_ghost_success_context(conn: &rusqlite::Connection, scope: &KpiPromptScop
     }
 }
 
+fn estimate_text_tokens_and_confidence(text: &str) -> (usize, f64) {
+    let total_chars = text.chars().count();
+    if total_chars == 0 {
+        return (0, 1.0);
+    }
+    let ascii_chars = text.chars().filter(|c| c.is_ascii()).count();
+    let ascii_ratio = ascii_chars as f64 / total_chars as f64;
+    let divisor = if ascii_ratio >= 0.95 {
+        4.0
+    } else if ascii_ratio >= 0.80 {
+        3.0
+    } else {
+        2.0
+    };
+    let confidence = if ascii_ratio >= 0.95 {
+        0.90
+    } else if ascii_ratio >= 0.80 {
+        0.70
+    } else {
+        0.40
+    };
+    (((total_chars as f64) / divisor).ceil() as usize, confidence)
+}
+
+fn estimate_token_budget(contract: &TaskContract, context_window: usize) -> TokenBudgetEstimate {
+    let fields = [
+        contract.goal.as_str(),
+        contract.context.as_str(),
+        contract.soul.as_deref().unwrap_or_default(),
+        contract.tools_doc.as_deref().unwrap_or_default(),
+    ];
+    let mut weighted_confidence = 0.0;
+    let mut total_chars = 0usize;
+    let mut estimated_tokens = 0usize;
+    for field in fields {
+        let chars = field.chars().count();
+        let (tokens, confidence) = estimate_text_tokens_and_confidence(field);
+        estimated_tokens += tokens;
+        weighted_confidence += confidence * chars as f64;
+        total_chars += chars;
+    }
+    let confidence = if total_chars == 0 {
+        1.0
+    } else {
+        weighted_confidence / total_chars as f64
+    };
+    let threshold_tokens = ((context_window as f64) * TOKEN_BUDGET_PRECHECK_RATIO) as usize;
+    TokenBudgetEstimate {
+        estimated_tokens,
+        threshold_tokens,
+        confidence,
+        oversize: estimated_tokens > threshold_tokens,
+    }
+}
+
+fn take_first_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn take_last_chars(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    text.chars().skip(total - max_chars).collect()
+}
+
+fn compress_text_for_budget(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let head_chars = ((max_chars as f64) * 0.7) as usize;
+    let tail_chars = max_chars.saturating_sub(head_chars);
+    let omitted = total.saturating_sub(head_chars + tail_chars);
+    format!(
+        "{}\n\n[token_budget_compressed: omitted {} chars]\n\n{}",
+        take_first_chars(text, head_chars),
+        omitted,
+        take_last_chars(text, tail_chars)
+    )
+}
+
+fn split_goal_for_budget(goal: &str, chunk_words: usize) -> String {
+    let words: Vec<&str> = goal.split_whitespace().collect();
+    if words.len() <= chunk_words {
+        return goal.to_string();
+    }
+    let chunks: Vec<String> = words
+        .chunks(chunk_words.max(1))
+        .enumerate()
+        .map(|(idx, chunk)| format!("Stage {}: {}", idx + 1, chunk.join(" ")))
+        .collect();
+    format!(
+        "Execute in staged chunks due to token budget:\n{}",
+        chunks
+            .into_iter()
+            .map(|line| format!("- {}", line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn apply_token_budget_strategy(
+    contract: &TaskContract,
+    context_window: usize,
+    estimate: &TokenBudgetEstimate,
+) -> TaskContract {
+    if !estimate.oversize {
+        return contract.clone();
+    }
+
+    let mut adjusted = contract.clone();
+    if estimate.confidence < TOKEN_ESTIMATOR_CONFIDENCE_FLOOR {
+        adjusted.context =
+            compress_text_for_budget(&adjusted.context, TOKEN_BUDGET_CONTEXT_HARD_CHARS);
+        adjusted
+            .context
+            .push_str("\n\n[token_budget_fallback:low_confidence]");
+        return adjusted;
+    }
+
+    adjusted.context = compress_text_for_budget(&adjusted.context, TOKEN_BUDGET_CONTEXT_SOFT_CHARS);
+    let after_soft = estimate_token_budget(&adjusted, context_window);
+    if after_soft.oversize {
+        adjusted.goal = split_goal_for_budget(&adjusted.goal, TOKEN_BUDGET_GOAL_CHUNK_WORDS);
+        adjusted.context =
+            compress_text_for_budget(&adjusted.context, TOKEN_BUDGET_CONTEXT_HARD_CHARS);
+    }
+    adjusted
+}
+
 fn format_kpi_context(
     repo: &str,
     lane: Option<&str>,
@@ -1538,12 +1705,13 @@ enum Classification {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_ghost_success_context, format_kpi_context, format_lesson_context,
-        infer_kpi_prompt_scope, Classification, Manager,
+        apply_token_budget_strategy, estimate_token_budget, format_ghost_success_context,
+        format_kpi_context, format_lesson_context, infer_kpi_prompt_scope, Classification, Manager,
     };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
     use crate::kpi::GhostSuccessRate;
     use crate::memory::Memory;
+    use crate::strategy::TaskContract;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -1564,6 +1732,20 @@ mod tests {
             tools.insert((*name).to_string(), DynamicTool::new(def, None));
         }
         tools
+    }
+
+    fn make_contract(goal: &str, context: &str) -> TaskContract {
+        TaskContract {
+            context: context.to_string(),
+            goal: goal.to_string(),
+            constraints: Vec::new(),
+            soul: None,
+            tools_doc: None,
+            cli_tool_preference: None,
+            cli_tool_routing_order: Vec::new(),
+            test_generation: false,
+            memory: None,
+        }
     }
 
     #[test]
@@ -1732,6 +1914,38 @@ mod tests {
     fn format_ghost_success_context_empty_when_no_rows() {
         let section = format_ghost_success_context(&[]);
         assert!(section.is_empty());
+    }
+
+    #[test]
+    fn estimate_token_budget_marks_oversize_when_above_threshold() {
+        let contract = make_contract("Implement feature", &"A".repeat(30_000));
+        let estimate = estimate_token_budget(&contract, 8_192);
+        assert!(estimate.oversize);
+        assert!(estimate.estimated_tokens > estimate.threshold_tokens);
+    }
+
+    #[test]
+    fn apply_token_budget_strategy_splits_and_compresses_for_oversize() {
+        let contract = make_contract(&"word ".repeat(400), &"B".repeat(40_000));
+        let estimate = estimate_token_budget(&contract, 8_192);
+        assert!(estimate.oversize);
+        let adjusted = apply_token_budget_strategy(&contract, 8_192, &estimate);
+        assert!(adjusted.context.contains("[token_budget_compressed:"));
+        assert!(adjusted
+            .goal
+            .contains("Execute in staged chunks due to token budget:"));
+    }
+
+    #[test]
+    fn apply_token_budget_strategy_uses_low_confidence_fallback() {
+        let contract = make_contract("Fix bug", &"你好".repeat(20_000));
+        let estimate = estimate_token_budget(&contract, 8_192);
+        assert!(estimate.oversize);
+        assert!(estimate.confidence < 0.5);
+        let adjusted = apply_token_budget_strategy(&contract, 8_192, &estimate);
+        assert!(adjusted
+            .context
+            .contains("[token_budget_fallback:low_confidence]"));
     }
 
     #[test]
