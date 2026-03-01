@@ -134,6 +134,46 @@ class OptimizerTournamentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             opt.validate_mutation_axes("strict", "invalid")
 
+    def test_generate_specialized_ghost_profiles_filters_incomplete(self) -> None:
+        good = opt.CandidateResult(
+            candidate_id="candidate_good",
+            source="backlog:runtime_failures",
+            hypothesis="good",
+            dispatch_context="[ctx]",
+            mutation_dimensions={
+                "constraint_strictness": "strict",
+                "soul_composition": "balanced",
+            },
+            command=[],
+            exit_code=0,
+            report_json=None,
+            gate_ok=True,
+            overall_score=0.95,
+            exec_success_rate=1.0,
+            avg_task_overall=0.94,
+            task_count=3,
+            error=None,
+        )
+        bad = opt.CandidateResult(
+            candidate_id="candidate_bad",
+            source="backlog:runtime_failures",
+            hypothesis="bad",
+            dispatch_context="[ctx]",
+            mutation_dimensions={"constraint_strictness": "strict"},
+            command=[],
+            exit_code=0,
+            report_json=None,
+            gate_ok=True,
+            overall_score=0.90,
+            exec_success_rate=1.0,
+            avg_task_overall=0.90,
+            task_count=3,
+            error=None,
+        )
+        profiles = opt.generate_specialized_ghost_profiles([good, bad], "20260301T000000Z")
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0]["source_candidate_id"], "candidate_good")
+
 
 if __name__ == "__main__":
     unittest.main()

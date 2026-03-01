@@ -89,6 +89,11 @@ def parse_args() -> argparse.Namespace:
         help="Persist winner context to active profile when gates + positive delta pass.",
     )
     p.add_argument(
+        "--generated-profiles-json",
+        default="eval/results/ghost-profiles-latest.json",
+        help="Path for generated specialized ghost profile metadata artifact.",
+    )
+    p.add_argument(
         "--fail-on-baseline-gate",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -598,6 +603,80 @@ def write_active_profile(
     return profile
 
 
+def specialization_hint(source: str) -> str:
+    source_lower = source.lower()
+    if "runtime_failures" in source_lower:
+        return "failure_recovery"
+    if "maintainability" in source_lower:
+        return "maintainability_refactor"
+    if "tool_usage" in source_lower:
+        return "tool_reliability"
+    if "eval_history" in source_lower:
+        return "evaluation_rigor"
+    return "general_optimization"
+
+
+def validate_generated_profile(profile: dict[str, Any]) -> bool:
+    required = [
+        "profile_id",
+        "ghost_name",
+        "source_candidate_id",
+        "dispatch_context",
+        "specialization",
+        "created_at_utc",
+    ]
+    for key in required:
+        value = profile.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    dimensions = profile.get("mutation_dimensions")
+    if not isinstance(dimensions, dict):
+        return False
+    for axis in ("constraint_strictness", "soul_composition"):
+        value = dimensions.get(axis)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    return True
+
+
+def generate_specialized_ghost_profiles(
+    results: list[CandidateResult],
+    ts: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (
+            r
+            for r in results
+            if r.candidate_id != "baseline" and r.exit_code == 0 and r.gate_ok
+        ),
+        key=lambda r: (r.overall_score, r.exec_success_rate, r.avg_task_overall),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for candidate in ranked[: max(0, limit)]:
+        profile = {
+            "profile_id": f"generated_{candidate.candidate_id}",
+            "ghost_name": "coder",
+            "source_candidate_id": candidate.candidate_id,
+            "source": candidate.source,
+            "dispatch_context": candidate.dispatch_context,
+            "hypothesis": candidate.hypothesis,
+            "specialization": specialization_hint(candidate.source),
+            "mutation_dimensions": dict(candidate.mutation_dimensions),
+            "metrics": {
+                "overall_score": candidate.overall_score,
+                "exec_success_rate": candidate.exec_success_rate,
+                "avg_task_overall": candidate.avg_task_overall,
+                "task_count": candidate.task_count,
+            },
+            "created_at_utc": ts,
+        }
+        if validate_generated_profile(profile):
+            out.append(profile)
+    return out
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Athena Optimizer Tournament",
@@ -646,6 +725,14 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- reason: {reason}")
     lines.append(
         f"- active_profile_json: `{payload['promotion_execution'].get('active_profile_json', '-')}`"
+    )
+    lines.append("")
+    lines.append("## Generated Ghost Profiles")
+    lines.append(
+        f"- count: `{payload['generated_profiles']['count']}`"
+    )
+    lines.append(
+        f"- artifact: `{payload['generated_profiles']['path']}`"
     )
     lines.append("")
     return "\n".join(lines)
@@ -709,6 +796,7 @@ def main() -> int:
     out_md = out_dir / f"optimizer-tournament-{ts}.md"
     latest_json = out_dir / "optimizer-tournament-latest.json"
     latest_md = out_dir / "optimizer-tournament-latest.md"
+    generated_profiles_path = (repo / args.generated_profiles_json).resolve()
 
     promotion_execution = {
         "enabled": bool(args.promote_profile),
@@ -739,6 +827,16 @@ def main() -> int:
                 "promotion criteria not met (non-regression gates and/or positive delta)"
             )
 
+    generated_profiles = generate_specialized_ghost_profiles(results, ts)
+    generated_profiles_payload = {
+        "schema_version": 1,
+        "generated_at_utc": ts,
+        "source": "optimizer_tournament",
+        "profiles": generated_profiles,
+    }
+    generated_profiles_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_profiles_path.write_text(json.dumps(generated_profiles_payload, indent=2))
+
     payload = {
         "timestamp_utc": ts,
         "suite": args.suite,
@@ -759,6 +857,10 @@ def main() -> int:
             "regression_gates": gates,
         },
         "promotion_execution": promotion_execution,
+        "generated_profiles": {
+            "count": len(generated_profiles),
+            "path": str(generated_profiles_path),
+        },
     }
 
     out_json.write_text(json.dumps(payload, indent=2))
