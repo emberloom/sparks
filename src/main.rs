@@ -1630,11 +1630,23 @@ fn evaluate_self_build_guardrails(
         .join("\n");
     let secret_assignment = regex::Regex::new(
         r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
-    )
-    .unwrap_or_else(|e| panic!("Invalid secret assignment regex: {}", e));
-    let token_like = regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#)
-        .unwrap_or_else(|e| panic!("Invalid token regex: {}", e));
-    if secret_assignment.is_match(&added_lines) || token_like.is_match(&added_lines) {
+    );
+    let token_like = regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#);
+    let secret_assignment_match = match secret_assignment {
+        Ok(re) => re.is_match(&added_lines),
+        Err(e) => {
+            tracing::error!("Self-build guardrail regex compile failed: {}", e);
+            true
+        }
+    };
+    let token_like_match = match token_like {
+        Ok(re) => re.is_match(&added_lines),
+        Err(e) => {
+            tracing::error!("Self-build token regex compile failed: {}", e);
+            true
+        }
+    };
+    if secret_assignment_match || token_like_match {
         details.push(guardrail_violation(
             "secret_like_diff",
             "detected secret-like material in added diff lines",
@@ -3798,7 +3810,13 @@ fn compute_feature_outcome_grace_secs(
 }
 
 fn clip_feature_result_summary(summary: &str) -> Option<String> {
-    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut normalized = String::with_capacity(summary.len());
+    for token in summary.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(token);
+    }
     if normalized.is_empty() {
         return None;
     }
@@ -4529,13 +4547,14 @@ fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
 }
 
 fn tail_text(input: &str, max_chars: usize) -> String {
-    let mut chars = input.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if let Some((start, _)) = input.char_indices().nth_back(max_chars - 1) {
+        input[start..].trim().to_string()
+    } else {
         return input.trim().to_string();
     }
-    let start = chars.len() - max_chars;
-    chars.drain(..start);
-    chars.into_iter().collect::<String>().trim().to_string()
 }
 
 fn build_feature_promotion_decision(

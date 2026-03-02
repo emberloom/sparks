@@ -2344,10 +2344,14 @@ fn chat_message_to_wire(msg: &ChatMessage) -> Option<Value> {
 // ---------------------------------------------------------------------------
 
 /// Static regex for trailing comma cleanup (compiled once)
-static TRAILING_COMMA_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r",\s*([}\]])")
-        .unwrap_or_else(|e| panic!("Invalid trailing comma regex: {}", e))
-});
+static TRAILING_COMMA_RE: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| match regex::Regex::new(r",\s*([}\]])") {
+        Ok(re) => Some(re),
+        Err(e) => {
+            tracing::error!("Invalid trailing comma regex: {}", e);
+            None
+        }
+    });
 
 /// Sanitize common LLM JSON errors:
 /// - \' → ' (invalid JSON escape, common in shell-influenced output)
@@ -2357,7 +2361,9 @@ fn sanitize_json(text: &str) -> String {
     // Fix invalid \' escape (single quotes don't need escaping in JSON)
     out = out.replace("\\'", "'");
     // Fix trailing commas: , } or , ]
-    out = TRAILING_COMMA_RE.replace_all(&out, "$1").to_string();
+    if let Some(re) = TRAILING_COMMA_RE.as_ref() {
+        out = re.replace_all(&out, "$1").to_string();
+    }
     out
 }
 

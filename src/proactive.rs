@@ -455,7 +455,11 @@ pub fn spawn_idle_musings(
             let indices = randomness::sample_indices(count, memories.len());
             let sampled: Vec<String> = indices
                 .into_iter()
-                .map(|i| format!("- [{}] {}", memories[i].category, memories[i].content))
+                .filter_map(|i| {
+                    memories
+                        .get(i)
+                        .map(|m| format!("- [{}] {}", m.category, m.content))
+                })
                 .collect();
 
             let prompt = format!(
