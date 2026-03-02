@@ -250,7 +250,7 @@ pub fn spawn_memory_scanner(
     tokio::spawn(async move {
         loop {
             let (interval, spontaneity, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.memory_scan_interval_secs,
                     k.spontaneity,
@@ -269,7 +269,7 @@ pub fn spawn_memory_scanner(
 
             // Re-check knobs
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.memory_scan_enabled {
                     continue;
                 }
@@ -399,7 +399,7 @@ pub fn spawn_idle_musings(
             tokio::time::sleep(randomness::jitter_interval(300, 0.3)).await;
 
             let (threshold, spontaneity, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.idle_threshold_secs,
                     k.spontaneity,
@@ -551,7 +551,7 @@ pub fn maybe_schedule_reentry(
 ) {
     // Read knobs for probability gate
     let (spontaneity, enabled, all, delay_secs, jitter) = {
-        let k = knobs.read().unwrap();
+        let k = knobs.read().unwrap_or_else(|e| e.into_inner());
         (
             k.spontaneity,
             k.conversation_reentry_enabled,
@@ -763,7 +763,7 @@ pub fn spawn_code_indexer(
 
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.code_indexer_interval_secs,
                     k.code_indexer_enabled,
@@ -781,7 +781,7 @@ pub fn spawn_code_indexer(
 
             // Re-check knobs after sleep
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.code_indexer_enabled {
                     continue;
                 }
@@ -856,7 +856,7 @@ pub fn spawn_refactoring_scanner(
 
         loop {
             let (interval, enabled, all, spontaneity) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.refactoring_scan_interval_secs,
                     k.refactoring_scan_enabled,
@@ -875,7 +875,7 @@ pub fn spawn_refactoring_scanner(
 
             // Re-check
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.refactoring_scan_enabled {
                     continue;
                 }

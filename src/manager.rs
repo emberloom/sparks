@@ -437,7 +437,8 @@ impl Manager {
             return self.handle(goal, &session, confirmer, None).await;
         }
 
-        let ghost_name = ghost_name.unwrap();
+        let ghost_name =
+            ghost_name.ok_or_else(|| AthenaError::Tool("Missing ghost name".to_string()))?;
         let ghost = self
             .ghosts
             .iter()
@@ -485,7 +486,6 @@ impl Manager {
         };
 
         let enriched_context = format!("{}{}{}", context, metrics_ctx, structure_ctx);
-
         let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
         let cli_tool_routing_order = self.resolve_cli_tool_routing_order(lane, repo).await;
         let contract = self.prepare_contract_for_token_budget(TaskContract {
@@ -881,7 +881,10 @@ impl Manager {
 
         // No event stream (CLI) — return full output
         if outputs.len() == 1 {
-            Ok(outputs.into_iter().next().unwrap().1)
+            match outputs.into_iter().next() {
+                Some((_, output)) => Ok(output),
+                None => Ok(String::new()),
+            }
         } else {
             let summary: Vec<String> = outputs
                 .iter()

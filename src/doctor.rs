@@ -965,7 +965,14 @@ fn render_funnel_report(
     warn_count: usize,
     fixes: &[String],
 ) {
-    print_report(&snap.db_path, reports, overall, fail_count, warn_count, fixes);
+    print_report(
+        &snap.db_path,
+        reports,
+        overall,
+        fail_count,
+        warn_count,
+        fixes,
+    );
 }
 
 pub async fn run_funnel_health(config: &Config, skip_llm: bool) -> anyhow::Result<CheckStatus> {

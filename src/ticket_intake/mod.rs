@@ -39,7 +39,7 @@ pub fn spawn_ticket_intake(
 
         loop {
             let (enabled, interval) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.ticket_intake_enabled, k.ticket_intake_interval_secs)
             };
 
@@ -52,7 +52,7 @@ pub fn spawn_ticket_intake(
             tokio::time::sleep(sleep_dur).await;
 
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.ticket_intake_enabled {
                     continue;
                 }
@@ -124,10 +124,7 @@ pub fn spawn_ticket_intake(
                 if dispatched > 0 || skipped > 0 {
                     observer.log(
                         ObserverCategory::TicketIntake,
-                        format!(
-                            "{}: dispatched {}, skipped {}",
-                            name, dispatched, skipped
-                        ),
+                        format!("{}: dispatched {}, skipped {}", name, dispatched, skipped),
                     );
                 }
             }

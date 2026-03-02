@@ -347,7 +347,10 @@ impl LoopStrategy for CodeStrategy {
 }
 
 impl CodeStrategy {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "signature kept explicit for orchestration wiring"
+    )]
     async fn run_self_heal(
         &self,
         contract: &TaskContract,

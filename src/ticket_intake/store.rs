@@ -119,5 +119,4 @@ impl TicketIntakeStore {
         )?;
         Ok(())
     }
-
 }

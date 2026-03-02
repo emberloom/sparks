@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::json;
+use serde_json::Value;
 
 use crate::error::{AthenaError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
@@ -93,10 +93,7 @@ impl TicketProvider for JiraProvider {
             self.project_key, label
         );
 
-        let url = format!(
-            "{}/rest/api/3/search",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/rest/api/3/search", self.base_url.trim_end_matches('/'));
         let auth = STANDARD.encode(format!("{}:{}", self.email, self.api_token));
 
         let resp = self
@@ -232,8 +229,14 @@ impl TicketProvider for JiraProvider {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if ["done", "closed", "resolved"].iter().any(|k| name.contains(k) || target.contains(k)) {
-                chosen = t.get("id").and_then(|id| id.as_str()).map(|s| s.to_string());
+            if ["done", "closed", "resolved"]
+                .iter()
+                .any(|k| name.contains(k) || target.contains(k))
+            {
+                chosen = t
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string());
                 if chosen.is_some() {
                     break;
                 }

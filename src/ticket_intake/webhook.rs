@@ -79,7 +79,10 @@ pub async fn spawn_ticket_intake_webhook(
     Ok(())
 }
 
-fn load_webhook_secrets(config: &TicketIntakeWebhookConfig, observer: &ObserverHandle) -> WebhookSecrets {
+fn load_webhook_secrets(
+    config: &TicketIntakeWebhookConfig,
+    observer: &ObserverHandle,
+) -> WebhookSecrets {
     let mut secrets = WebhookSecrets::default();
     secrets.github = read_env_opt(config.github_secret_env.as_deref(), observer, "github");
     secrets.gitlab = read_env_opt(config.gitlab_secret_env.as_deref(), observer, "gitlab");
@@ -89,7 +92,9 @@ fn load_webhook_secrets(config: &TicketIntakeWebhookConfig, observer: &ObserverH
 }
 
 fn read_env_opt(env_key: Option<&str>, observer: &ObserverHandle, label: &str) -> Option<String> {
-    let Some(key) = env_key else { return None; };
+    let Some(key) = env_key else {
+        return None;
+    };
     match std::env::var(key) {
         Ok(val) if !val.trim().is_empty() => Some(val),
         _ => {
@@ -135,7 +140,12 @@ async fn handle_github(
         return StatusCode::OK;
     };
 
-    let labels = payload.issue.labels.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    let labels = payload
+        .issue
+        .labels
+        .iter()
+        .map(|l| l.name.clone())
+        .collect::<Vec<_>>();
     if !labels_match(&labels, &source.filter_label) {
         return StatusCode::OK;
     }
@@ -267,7 +277,10 @@ async fn handle_jira(
     dispatch_ticket(&state, ticket).await
 }
 
-fn build_linear_ticket(state: &WebhookState, payload: LinearWebhookPayload) -> Option<ExternalTicket> {
+fn build_linear_ticket(
+    state: &WebhookState,
+    payload: LinearWebhookPayload,
+) -> Option<ExternalTicket> {
     if payload.r#type.as_deref() != Some("Issue") {
         return None;
     }
@@ -286,7 +299,11 @@ fn linear_team_key(data: &Value) -> String {
         .and_then(|t| t.get("key"))
         .and_then(|k| k.as_str())
         .map(|s| s.to_string())
-        .or_else(|| data.get("teamId").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        .or_else(|| {
+            data.get("teamId")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -447,7 +464,11 @@ fn provider_key(provider: &str, repo: &str) -> String {
     format!("{}:{}", provider.to_lowercase(), repo)
 }
 
-fn match_source(sources: &[TicketIntakeSourceConfig], provider: &str, repo: &str) -> Option<TicketIntakeSourceConfig> {
+fn match_source(
+    sources: &[TicketIntakeSourceConfig],
+    provider: &str,
+    repo: &str,
+) -> Option<TicketIntakeSourceConfig> {
     sources
         .iter()
         .find(|s| s.provider.eq_ignore_ascii_case(provider) && s.repo == repo)
@@ -472,12 +493,14 @@ fn match_source_candidates(
 }
 
 fn labels_match(labels: &[String], filter_label: &Option<String>) -> bool {
-    let Some(filter) = filter_label.as_ref().map(|l| l.trim()).filter(|l| !l.is_empty()) else {
+    let Some(filter) = filter_label
+        .as_ref()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+    else {
         return true;
     };
-    labels
-        .iter()
-        .any(|l| l.eq_ignore_ascii_case(filter))
+    labels.iter().any(|l| l.eq_ignore_ascii_case(filter))
 }
 
 fn verify_github(state: &WebhookState, headers: &HeaderMap, body: &[u8]) -> bool {
@@ -562,16 +585,28 @@ fn build_gitlab_repo_candidates(project: &GlProject) -> Vec<String> {
 }
 
 fn extract_linear_labels(data: &Value) -> Vec<String> {
-    if let Some(nodes) = data.get("labels").and_then(|l| l.get("nodes")).and_then(|n| n.as_array()) {
+    if let Some(nodes) = data
+        .get("labels")
+        .and_then(|l| l.get("nodes"))
+        .and_then(|n| n.as_array())
+    {
         return nodes
             .iter()
-            .filter_map(|n| n.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|n| {
+                n.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
     }
     if let Some(arr) = data.get("labels").and_then(|l| l.as_array()) {
         return arr
             .iter()
-            .filter_map(|n| n.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|n| {
+                n.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
     }
     Vec::new()
@@ -703,7 +738,6 @@ struct JiraProject {
     key: Option<String>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,13 +825,22 @@ mod tests {
 
     #[test]
     fn labels_match_is_case_insensitive() {
-        assert!(labels_match(&["Athena".to_string()], &Some("athena".to_string())));
-        assert!(labels_match(&["ATHENA".to_string()], &Some("Athena".to_string())));
+        assert!(labels_match(
+            &["Athena".to_string()],
+            &Some("athena".to_string())
+        ));
+        assert!(labels_match(
+            &["ATHENA".to_string()],
+            &Some("Athena".to_string())
+        ));
     }
 
     #[test]
     fn labels_match_returns_false_when_label_absent() {
-        assert!(!labels_match(&["other".to_string()], &Some("athena".to_string())));
+        assert!(!labels_match(
+            &["other".to_string()],
+            &Some("athena".to_string())
+        ));
     }
 
     // --- extract_linear_labels ---
@@ -857,7 +900,10 @@ mod tests {
 
     #[test]
     fn build_gitlab_repo_candidates_handles_missing_fields() {
-        let project = GlProject { id: None, path_with_namespace: None };
+        let project = GlProject {
+            id: None,
+            path_with_namespace: None,
+        };
         assert!(build_gitlab_repo_candidates(&project).is_empty());
     }
 
@@ -904,7 +950,9 @@ mod tests {
         use hmac::Mac;
 
         let body = b"hello world";
-        let bad_sig = hex::decode("deadbeef00000000000000000000000000000000000000000000000000000000").unwrap();
+        let bad_sig =
+            hex::decode("deadbeef00000000000000000000000000000000000000000000000000000000")
+                .unwrap();
         let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
         mac.update(body);
         assert!(mac.verify_slice(&bad_sig).is_err());

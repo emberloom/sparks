@@ -1,7 +1,6 @@
-
+mod ci_monitor;
 mod config;
 mod confirm;
-mod ci_monitor;
 mod core;
 mod db;
 mod docker;
@@ -27,9 +26,9 @@ mod profiles;
 mod pulse;
 mod randomness;
 mod scheduler;
+mod secrets;
 mod self_heal;
 mod strategy;
-mod secrets;
 #[cfg(feature = "telegram")]
 mod telegram;
 mod ticket_intake;
@@ -487,11 +486,13 @@ fn format_epoch(epoch_secs: i64) -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "athena=info"
+            .parse()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    });
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "athena=info".parse().unwrap()),
-        )
+        .with_env_filter(env_filter)
         .with_target(false)
         .with_ansi(std::io::stderr().is_terminal())
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
@@ -727,10 +728,7 @@ fn handle_secrets(action: SecretsAction) -> anyhow::Result<()> {
             for status in report.statuses {
                 let env = if status.in_env { "set" } else { "unset" };
                 let keyring = if status.in_keyring { "set" } else { "unset" };
-                println!(
-                    "{:<24} env={} keyring={}",
-                    status.key, env, keyring
-                );
+                println!("{:<24} env={} keyring={}", status.key, env, keyring);
             }
             if let Some(err) = report.error {
                 println!("keyring_error={}", err);
@@ -1633,9 +1631,9 @@ fn evaluate_self_build_guardrails(
     let secret_assignment = regex::Regex::new(
         r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
     )
-    .unwrap();
-    let token_like =
-        regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#).unwrap();
+    .unwrap_or_else(|e| panic!("Invalid secret assignment regex: {}", e));
+    let token_like = regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#)
+        .unwrap_or_else(|e| panic!("Invalid token regex: {}", e));
     if secret_assignment.is_match(&added_lines) || token_like.is_match(&added_lines) {
         details.push(guardrail_violation(
             "secret_like_diff",
@@ -2398,14 +2396,10 @@ async fn collect_worktree_changed_files(worktree: &Path) -> Vec<String> {
     }
 }
 
-async fn collect_self_build_git_artifacts(
-    worktree: &Path,
-) -> (String, Vec<String>, String) {
-    let diff_run =
-        run_command_capture(worktree, "git", &args(&["diff", "--no-color"]), 120).await;
+async fn collect_self_build_git_artifacts(worktree: &Path) -> (String, Vec<String>, String) {
+    let diff_run = run_command_capture(worktree, "git", &args(&["diff", "--no-color"]), 120).await;
     let diff_text = command_combined_output(&diff_run);
-    let numstat_run =
-        run_command_capture(worktree, "git", &args(&["diff", "--numstat"]), 60).await;
+    let numstat_run = run_command_capture(worktree, "git", &args(&["diff", "--numstat"]), 60).await;
     let diff_numstat = if command_succeeded(&numstat_run) {
         numstat_run
             .stdout
@@ -2434,8 +2428,7 @@ async fn run_self_build_maintenance(
     let specs = maintenance_command_specs(profile);
     let mut rows = Vec::new();
     for spec in specs {
-        let run =
-            run_command_capture(worktree, spec.program, &spec.args, spec.timeout_secs).await;
+        let run = run_command_capture(worktree, spec.program, &spec.args, spec.timeout_secs).await;
         let status = if run.timed_out {
             "timeout"
         } else if run.exit_code == Some(0) {
@@ -2488,7 +2481,10 @@ fn print_self_build_summary(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn run_self_build(
     config: Config,
     memory: Arc<MemoryStore>,
@@ -2581,8 +2577,7 @@ async fn run_self_build(
     } else {
         None
     };
-    let mut dispatch_status =
-        resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
+    let mut dispatch_status = resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
     let mut dispatch_attempts = 1u8;
     let mut noop_retry_used = false;
     let mut changed_files = collect_worktree_changed_files(&worktree).await;
@@ -2608,8 +2603,7 @@ async fn run_self_build(
         } else {
             None
         };
-        dispatch_status =
-            resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
+        dispatch_status = resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
         changed_files = collect_worktree_changed_files(&worktree).await;
     }
     let dispatch_summary = SelfBuildDispatchSummary {
@@ -2626,10 +2620,8 @@ async fn run_self_build(
         stderr_tail: tail_text(&dispatch_run.stderr, 1200),
     };
 
-    let (diff_text, diff_numstat, branch_name) =
-        collect_self_build_git_artifacts(&worktree).await;
-    let maintenance_rows =
-        run_self_build_maintenance(&worktree, &maintenance_profile).await;
+    let (diff_text, diff_numstat, branch_name) = collect_self_build_git_artifacts(&worktree).await;
+    let maintenance_rows = run_self_build_maintenance(&worktree, &maintenance_profile).await;
 
     let guardrails =
         evaluate_self_build_guardrails(&changed_files, &diff_text, &dispatch_output, &branch_name);
@@ -2686,25 +2678,25 @@ async fn run_self_build(
         println!("auto-enabling CI monitor for promote_mode=auto");
     }
 
-    let ci_monitor = if monitor_ci_enabled
-        && promotion_execution.status == "pr_opened"
-        && promotion_execution.pr_url.is_some()
-    {
-        let pr_url = promotion_execution.pr_url.as_ref().unwrap();
-        Some(
-            ci_monitor::monitor_pr_ci(
-                pr_url,
-                promotion_execution.branch.as_deref(),
-                &base_repo,
-                &config,
-                promote_mode == SelfBuildPromoteMode::Auto,
-                true,
-                ci_monitor::CI_POLL_INTERVAL_SECS,
-                ci_monitor::CI_POLL_TIMEOUT_SECS,
-                ci_monitor::CI_HEAL_MAX_ATTEMPTS,
+    let ci_monitor = if monitor_ci_enabled && promotion_execution.status == "pr_opened" {
+        if let Some(pr_url) = promotion_execution.pr_url.as_deref() {
+            Some(
+                ci_monitor::monitor_pr_ci(
+                    pr_url,
+                    promotion_execution.branch.as_deref(),
+                    &base_repo,
+                    &config,
+                    promote_mode == SelfBuildPromoteMode::Auto,
+                    true,
+                    ci_monitor::CI_POLL_INTERVAL_SECS,
+                    ci_monitor::CI_POLL_TIMEOUT_SECS,
+                    ci_monitor::CI_HEAL_MAX_ATTEMPTS,
+                )
+                .await,
             )
-            .await,
-        )
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -2745,7 +2737,13 @@ async fn run_self_build(
     };
 
     let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;
-    print_self_build_summary(&ledger, &json_path, &md_path, &review_json_path, &review_md_path);
+    print_self_build_summary(
+        &ledger,
+        &json_path,
+        &md_path,
+        &review_json_path,
+        &review_md_path,
+    );
 
     let memory_category = if ledger.critic.passed {
         "self_build_run"
@@ -3293,7 +3291,9 @@ fn feature_batch_configured_parallelism_from_raw(raw: Option<&str>) -> usize {
 
 fn feature_batch_configured_parallelism() -> usize {
     feature_batch_configured_parallelism_from_raw(
-        std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY").ok().as_deref(),
+        std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY")
+            .ok()
+            .as_deref(),
     )
 }
 
@@ -4942,7 +4942,7 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
     let engine = handle
         .cron_engine
         .as_ref()
-        .expect("Cron engine not initialized");
+        .ok_or_else(|| anyhow::anyhow!("Cron engine not initialized"))?;
     match action {
         JobsAction::List => {
             let jobs = engine.list_jobs()?;
@@ -5389,11 +5389,11 @@ fn handle_set_command(input: &str, handle: &core::CoreHandle) {
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts.len() {
         1 => {
-            let k = handle.knobs.read().unwrap();
+            let k = handle.knobs.read().unwrap_or_else(|e| e.into_inner());
             println!("{}", k.display());
         }
         3 => {
-            let mut k = handle.knobs.write().unwrap();
+            let mut k = handle.knobs.write().unwrap_or_else(|e| e.into_inner());
             match k.set(parts[1], parts[2]) {
                 Ok(msg) => {
                     println!("{}", msg);
@@ -5485,7 +5485,12 @@ fn handle_model_command(input: &str, handle: &core::CoreHandle) -> bool {
 
 fn handle_cli_model_command(input: &str, handle: &core::CoreHandle) -> bool {
     if input == "/cli_model" {
-        let model = handle.knobs.read().unwrap().cli_model.clone();
+        let model = handle
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
         if model.is_empty() {
             println!("CLI tool model: default (tool decides)");
         } else {
@@ -5495,7 +5500,7 @@ fn handle_cli_model_command(input: &str, handle: &core::CoreHandle) -> bool {
     }
     if let Some(arg) = input.strip_prefix("/cli_model ") {
         let arg = arg.trim();
-        let mut k = handle.knobs.write().unwrap();
+        let mut k = handle.knobs.write().unwrap_or_else(|e| e.into_inner());
         match k.set("cli_model", arg) {
             Ok(msg) => println!("{}", msg),
             Err(e) => eprintln!("Error: {}", e),
@@ -5708,16 +5713,15 @@ async fn run_chat(
 mod tests {
     use super::{
         append_feature_rollback_commit_policy_context, build_feature_promotion_decision,
-        build_feature_run_ledger, build_feature_task_context, commit_message_contains_tag,
-        build_self_build_review_checklist, classify_chat_command,
-        compute_feature_outcome_grace_secs, ensure_clean_working_tree,
-        evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
-        feature_batch_dynamic_parallelism, resolve_self_build_ci_monitor,
+        build_feature_run_ledger, build_feature_task_context, build_self_build_review_checklist,
+        classify_chat_command, commit_message_contains_tag, compute_feature_outcome_grace_secs,
+        ensure_clean_working_tree, evaluate_self_build_guardrails,
+        feature_batch_configured_parallelism_from_raw, feature_batch_dynamic_parallelism,
         latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
-        plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
-        render_feature_ledger_markdown, rollback_feature_commits, track_feature_commits_since,
-        wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
-        WaitForAutonomousOutcome,
+        plan_self_build_promotion, pulse_matches_task_id, render_feature_ledger_markdown,
+        resolve_self_build_ci_monitor, rollback_feature_commits, run_feature_verify,
+        track_feature_commits_since, wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus,
+        SelfBuildPromoteMode, WaitForAutonomousOutcome,
     };
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
@@ -6029,7 +6033,10 @@ mod tests {
         assert_eq!(feature_batch_configured_parallelism_from_raw(Some("0")), 1);
         assert_eq!(feature_batch_configured_parallelism_from_raw(Some("2")), 2);
         assert_eq!(feature_batch_configured_parallelism_from_raw(Some("9")), 4);
-        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("bad")), 2);
+        assert_eq!(
+            feature_batch_configured_parallelism_from_raw(Some("bad")),
+            2
+        );
     }
 
     #[test]
@@ -6104,7 +6111,8 @@ mod tests {
 
     #[test]
     fn resolve_self_build_ci_monitor_non_auto_defaults_off() {
-        let (enabled, source) = resolve_self_build_ci_monitor(SelfBuildPromoteMode::Pr, false, false);
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Pr, false, false);
         assert!(!enabled);
         assert_eq!(source, "default_off");
     }
@@ -6172,7 +6180,10 @@ mod tests {
         let contract = sample_contract();
         let mut statuses = HashMap::new();
         statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
-        statuses.insert("T2".to_string(), FeatureRunStatus::Failed("failed".to_string()));
+        statuses.insert(
+            "T2".to_string(),
+            FeatureRunStatus::Failed("failed".to_string()),
+        );
         let mut ledger = build_feature_run_ledger(
             &contract,
             Path::new("eval/feature-contract-example.yaml"),

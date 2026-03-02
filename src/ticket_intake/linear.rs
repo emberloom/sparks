@@ -253,20 +253,14 @@ impl TicketProvider for LinearProvider {
             .map_err(|e| AthenaError::Tool(format!("Linear parse failed: {}", e)))?;
 
         if let Some(errors) = payload.errors {
-            let messages = errors
-                .into_iter()
-                .map(|e| e.message)
-                .collect::<Vec<_>>();
+            let messages = errors.into_iter().map(|e| e.message).collect::<Vec<_>>();
             return Err(AthenaError::Tool(format!(
                 "Linear API errors: {}",
                 messages.join("; ")
             )));
         }
 
-        let issues = payload
-            .data
-            .map(|d| d.issues.nodes)
-            .unwrap_or_default();
+        let issues = payload.data.map(|d| d.issues.nodes).unwrap_or_default();
 
         let tickets = issues
             .into_iter()
@@ -292,9 +286,7 @@ impl TicketProvider for LinearProvider {
             "query": LINEAR_COMMENT_MUTATION,
             "variables": { "issueId": ticket.external_id, "body": message }
         });
-        self.post_graphql(payload)
-            .await
-            .map(|_| ())
+        self.post_graphql(payload).await.map(|_| ())
     }
 
     async fn update_status(&self, ticket: &ExternalTicket, status: &str) -> Result<()> {

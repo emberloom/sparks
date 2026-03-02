@@ -65,7 +65,7 @@ pub fn spawn_heartbeat_loop(
     tokio::spawn(async move {
         loop {
             let (interval, jitter, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.heartbeat_interval_secs,
                     k.heartbeat_jitter,
@@ -84,7 +84,7 @@ pub fn spawn_heartbeat_loop(
 
             // Re-check knobs after sleeping
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.heartbeat_enabled {
                     continue;
                 }

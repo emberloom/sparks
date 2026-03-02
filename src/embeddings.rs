@@ -273,7 +273,12 @@ mod tests {
                 .into_iter()
                 .map(|(m, score)| (m.content, score))
                 .collect();
-            results.push(evaluate_bench_query(case, &hybrid, &semantic, &memory_contents));
+            results.push(evaluate_bench_query(
+                case,
+                &hybrid,
+                &semantic,
+                &memory_contents,
+            ));
         }
 
         // ── Print report ───────────────────────────────────────────
@@ -312,7 +317,7 @@ mod tests {
         category: &'static str,
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     struct QueryResult {
         query: String,
         category: String,
@@ -335,67 +340,211 @@ mod tests {
     fn build_bench_corpus() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
             // ── [PL] Programming Languages cluster (5 confusable) ──
-            ("fact",   "pl",   "I prefer Python over Go for scripting tasks"),                           // 0
-            ("fact",   "pl",   "I use Rust for systems programming and CLI tools"),                      // 1
-            ("fact",   "pl",   "TypeScript is my go-to for frontend web development"),                   // 2
-            ("fact",   "pl",   "I learned Java in college but rarely use it now"),                        // 3
-            ("fact",   "pl",   "I write shell scripts in Bash for automation"),                           // 4
+            ("fact", "pl", "I prefer Python over Go for scripting tasks"), // 0
+            (
+                "fact",
+                "pl",
+                "I use Rust for systems programming and CLI tools",
+            ), // 1
+            (
+                "fact",
+                "pl",
+                "TypeScript is my go-to for frontend web development",
+            ), // 2
+            (
+                "fact",
+                "pl",
+                "I learned Java in college but rarely use it now",
+            ), // 3
+            ("fact", "pl", "I write shell scripts in Bash for automation"), // 4
             // ── [DB] Database cluster (4 confusable) ────────────────
-            ("pref",   "db",   "My preferred database is PostgreSQL for relational data"),               // 5
-            ("fact",   "db",   "I use Redis for caching and session storage"),                            // 6
-            ("fact",   "db",   "MongoDB is our document store for user profiles"),                        // 7
-            ("fact",   "db",   "We run SQLite for local development and testing"),                        // 8
+            (
+                "pref",
+                "db",
+                "My preferred database is PostgreSQL for relational data",
+            ), // 5
+            ("fact", "db", "I use Redis for caching and session storage"), // 6
+            (
+                "fact",
+                "db",
+                "MongoDB is our document store for user profiles",
+            ), // 7
+            (
+                "fact",
+                "db",
+                "We run SQLite for local development and testing",
+            ), // 8
             // ── [FD] Food cluster (5 confusable) ────────────────────
-            ("fact",   "fd",   "My favorite food is sushi, especially salmon nigiri"),                    // 9
-            ("fact",   "fd",   "I'm allergic to peanuts and tree nuts"),                                  // 10
-            ("fact",   "fd",   "I drink oat milk lattes every morning"),                                  // 11
-            ("fact",   "fd",   "My go-to lunch is a burrito from the taqueria on Mission St"),            // 12
-            ("fact",   "fd",   "I'm trying to eat less red meat for health reasons"),                     // 13
+            (
+                "fact",
+                "fd",
+                "My favorite food is sushi, especially salmon nigiri",
+            ), // 9
+            ("fact", "fd", "I'm allergic to peanuts and tree nuts"), // 10
+            ("fact", "fd", "I drink oat milk lattes every morning"), // 11
+            (
+                "fact",
+                "fd",
+                "My go-to lunch is a burrito from the taqueria on Mission St",
+            ), // 12
+            (
+                "fact",
+                "fd",
+                "I'm trying to eat less red meat for health reasons",
+            ), // 13
             // ── [GEO] Geography/Weather cluster (4 confusable) ──────
-            ("fact",   "geo",  "The weather is usually foggy in SF during summer"),                       // 14
-            ("fact",   "geo",  "I grew up in Portland, Oregon where it rains constantly"),                // 15
-            ("fact",   "geo",  "I moved to San Francisco three years ago for work"),                      // 16
-            ("fact",   "geo",  "I want to visit Tokyo next spring for the cherry blossoms"),              // 17
+            (
+                "fact",
+                "geo",
+                "The weather is usually foggy in SF during summer",
+            ), // 14
+            (
+                "fact",
+                "geo",
+                "I grew up in Portland, Oregon where it rains constantly",
+            ), // 15
+            (
+                "fact",
+                "geo",
+                "I moved to San Francisco three years ago for work",
+            ), // 16
+            (
+                "fact",
+                "geo",
+                "I want to visit Tokyo next spring for the cherry blossoms",
+            ), // 17
             // ── [HW] Hardware/Setup cluster (4 confusable) ──────────
-            ("fact",   "hw",   "My laptop runs macOS with 32GB of RAM and M2 Pro chip"),                  // 18
-            ("fact",   "hw",   "I have a 27-inch 4K monitor on my desk at home"),                         // 19
-            ("fact",   "hw",   "My mechanical keyboard is a Keychron Q1 with brown switches"),            // 20
-            ("fact",   "hw",   "I use AirPods Pro for noise cancellation during focus time"),             // 21
+            (
+                "fact",
+                "hw",
+                "My laptop runs macOS with 32GB of RAM and M2 Pro chip",
+            ), // 18
+            (
+                "fact",
+                "hw",
+                "I have a 27-inch 4K monitor on my desk at home",
+            ), // 19
+            (
+                "fact",
+                "hw",
+                "My mechanical keyboard is a Keychron Q1 with brown switches",
+            ), // 20
+            (
+                "fact",
+                "hw",
+                "I use AirPods Pro for noise cancellation during focus time",
+            ), // 21
             // ── [ED] Education cluster (3 confusable) ───────────────
-            ("fact",   "ed",   "I studied computer science at MIT"),                                      // 22
-            ("fact",   "ed",   "I took Andrew Ng's machine learning course on Coursera"),                 // 23
-            ("fact",   "ed",   "I'm currently reading Designing Data-Intensive Applications"),            // 24
+            ("fact", "ed", "I studied computer science at MIT"), // 22
+            (
+                "fact",
+                "ed",
+                "I took Andrew Ng's machine learning course on Coursera",
+            ), // 23
+            (
+                "fact",
+                "ed",
+                "I'm currently reading Designing Data-Intensive Applications",
+            ), // 24
             // ── [PET] Pets cluster (3 confusable) ───────────────────
-            ("fact",   "pet",  "I have a golden retriever named Max who is 4 years old"),                 // 25
-            ("fact",   "pet",  "My cat Luna likes to sleep on my keyboard"),                              // 26
-            ("fact",   "pet",  "We adopted Max from a rescue shelter in Oakland"),                        // 27
+            (
+                "fact",
+                "pet",
+                "I have a golden retriever named Max who is 4 years old",
+            ), // 25
+            ("fact", "pet", "My cat Luna likes to sleep on my keyboard"), // 26
+            (
+                "fact",
+                "pet",
+                "We adopted Max from a rescue shelter in Oakland",
+            ), // 27
             // ── [ML] Machine Learning cluster (4 confusable) ────────
-            ("lesson", "ml",   "Neural networks use gradient descent for training"),                      // 28
-            ("lesson", "ml",   "Transformer models use self-attention instead of recurrence"),            // 29
-            ("lesson", "ml",   "Random forests often outperform neural nets on tabular data"),            // 30
-            ("lesson", "ml",   "Fine-tuning a pretrained LLM requires much less data than training from scratch"), // 31
+            (
+                "lesson",
+                "ml",
+                "Neural networks use gradient descent for training",
+            ), // 28
+            (
+                "lesson",
+                "ml",
+                "Transformer models use self-attention instead of recurrence",
+            ), // 29
+            (
+                "lesson",
+                "ml",
+                "Random forests often outperform neural nets on tabular data",
+            ), // 30
+            (
+                "lesson",
+                "ml",
+                "Fine-tuning a pretrained LLM requires much less data than training from scratch",
+            ), // 31
             // ── [FIT] Fitness/Health cluster (4 confusable) ─────────
-            ("fact",   "fit",  "I enjoy hiking in Marin County on weekends"),                             // 32
-            ("fact",   "fit",  "I run 5K three times a week in Golden Gate Park"),                        // 33
-            ("fact",   "fit",  "I usually wake up at 7am and meditate for 10 minutes"),                   // 34
-            ("fact",   "fit",  "I've been doing yoga every Tuesday and Thursday evening"),                // 35
+            ("fact", "fit", "I enjoy hiking in Marin County on weekends"), // 32
+            (
+                "fact",
+                "fit",
+                "I run 5K three times a week in Golden Gate Park",
+            ), // 33
+            (
+                "fact",
+                "fit",
+                "I usually wake up at 7am and meditate for 10 minutes",
+            ), // 34
+            (
+                "fact",
+                "fit",
+                "I've been doing yoga every Tuesday and Thursday evening",
+            ), // 35
             // ── [WRK] Work/Career cluster (4 confusable) ────────────
-            ("fact",   "wrk",  "I work at a startup in San Francisco as a senior engineer"),              // 36
-            ("fact",   "wrk",  "The project deadline is March 15th for the v2 launch"),                   // 37
-            ("fact",   "wrk",  "Our team uses two-week sprints with Monday standups"),                    // 38
-            ("fact",   "wrk",  "The API rate limit is 100 requests per minute"),                          // 39
+            (
+                "fact",
+                "wrk",
+                "I work at a startup in San Francisco as a senior engineer",
+            ), // 36
+            (
+                "fact",
+                "wrk",
+                "The project deadline is March 15th for the v2 launch",
+            ), // 37
+            (
+                "fact",
+                "wrk",
+                "Our team uses two-week sprints with Monday standups",
+            ), // 38
+            (
+                "fact",
+                "wrk",
+                "The API rate limit is 100 requests per minute",
+            ), // 39
             // ── [TOOL] Dev Tools cluster (5 confusable) ─────────────
-            ("fact",   "tool", "I use VS Code as my primary code editor"),                                // 40
-            ("fact",   "tool", "I switched from vim to Neovim last year"),                                // 41
-            ("fact",   "tool", "Git and GitHub are essential to my workflow"),                             // 42
-            ("fact",   "tool", "I use Docker for local development environments"),                        // 43
-            ("fact",   "tool", "My terminal emulator is Warp with the Catppuccin theme"),                 // 44
+            ("fact", "tool", "I use VS Code as my primary code editor"), // 40
+            ("fact", "tool", "I switched from vim to Neovim last year"), // 41
+            (
+                "fact",
+                "tool",
+                "Git and GitHub are essential to my workflow",
+            ), // 42
+            (
+                "fact",
+                "tool",
+                "I use Docker for local development environments",
+            ), // 43
+            (
+                "fact",
+                "tool",
+                "My terminal emulator is Warp with the Catppuccin theme",
+            ), // 44
             // ── [MISC] Miscellaneous (5 unrelated) ──────────────────
-            ("fact",   "misc", "My phone number ends in 4242"),                                           // 45
-            ("fact",   "misc", "I listen to lo-fi hip hop while coding"),                                 // 46
-            ("fact",   "misc", "The office WiFi password is taped under the router"),                     // 47
-            ("fact",   "misc", "I prefer dark mode in every application"),                                // 48
-            ("fact",   "misc", "My Spotify wrapped top artist was Tycho"),                                // 49
+            ("fact", "misc", "My phone number ends in 4242"), // 45
+            ("fact", "misc", "I listen to lo-fi hip hop while coding"), // 46
+            (
+                "fact",
+                "misc",
+                "The office WiFi password is taped under the router",
+            ), // 47
+            ("fact", "misc", "I prefer dark mode in every application"), // 48
+            ("fact", "misc", "My Spotify wrapped top artist was Tycho"), // 49
         ]
     }
 
@@ -828,7 +977,11 @@ mod tests {
         let hit_5 = compute_hit(&retrieved_5);
 
         let rr = if case.expected.is_empty() {
-            if top_first > 0.4 { 0.0 } else { 1.0 }
+            if top_first > 0.4 {
+                0.0
+            } else {
+                1.0
+            }
         } else {
             let mut first_rank = 0usize;
             for (rank, idx) in retrieved_5.iter().enumerate() {
@@ -836,7 +989,11 @@ mod tests {
                     first_rank = rank + 1;
                 }
             }
-            if first_rank > 0 { 1.0 / first_rank as f32 } else { 0.0 }
+            if first_rank > 0 {
+                1.0 / first_rank as f32
+            } else {
+                0.0
+            }
         };
 
         let distractor_count = retrieved_5
@@ -926,8 +1083,14 @@ mod tests {
         );
 
         let categories = [
-            "disambig", "semantic", "exact", "multi",
-            "negative", "cross", "tricky", "paraphrase",
+            "disambig",
+            "semantic",
+            "exact",
+            "multi",
+            "negative",
+            "cross",
+            "tricky",
+            "paraphrase",
         ];
         let mut totals = Totals::default();
 
@@ -995,7 +1158,10 @@ mod tests {
         println!("  DISTRACTOR ANALYSIS (disambig + paraphrase + exact)");
         println!(
             "  Queries with distractors in top-5: {}/{}",
-            disambig_results.iter().filter(|r| r.distractor_count > 0).count(),
+            disambig_results
+                .iter()
+                .filter(|r| r.distractor_count > 0)
+                .count(),
             disambig_results.len()
         );
         println!(
@@ -1008,9 +1174,21 @@ mod tests {
         let overall_hit3 = totals.hit3 as f32 / totals.n as f32;
         let overall_mrr = totals.rr / totals.n as f32;
         let overall_hit1 = totals.hit1 as f32 / totals.n as f32;
-        assert!(overall_hit3 >= 0.75, "FAIL: Hit@3 = {:.0}% (threshold 75%)", overall_hit3 * 100.0);
-        assert!(overall_mrr >= 0.60, "FAIL: MRR = {:.3} (threshold 0.60)", overall_mrr);
-        assert!(overall_hit1 >= 0.55, "FAIL: Hit@1 = {:.0}% (threshold 55%)", overall_hit1 * 100.0);
+        assert!(
+            overall_hit3 >= 0.75,
+            "FAIL: Hit@3 = {:.0}% (threshold 75%)",
+            overall_hit3 * 100.0
+        );
+        assert!(
+            overall_mrr >= 0.60,
+            "FAIL: MRR = {:.3} (threshold 0.60)",
+            overall_mrr
+        );
+        assert!(
+            overall_hit1 >= 0.55,
+            "FAIL: Hit@1 = {:.0}% (threshold 55%)",
+            overall_hit1 * 100.0
+        );
         println!("  All assertions passed:");
         println!("    Hit@1 {:.0}% >= 55%", overall_hit1 * 100.0);
         println!("    Hit@3 {:.0}% >= 75%", overall_hit3 * 100.0);

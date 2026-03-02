@@ -939,7 +939,7 @@ mod tests {
             .fail_task_if_started("t2", "dispatch wait timeout")
             .unwrap());
 
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
         let t1: (String, Option<String>) = conn
             .query_row(
                 "SELECT status, error FROM autonomous_task_outcomes WHERE task_id='t1'",
@@ -979,7 +979,7 @@ mod tests {
             .unwrap();
         assert_eq!(changed, 1);
 
-        let conn = store.conn.lock().unwrap();
+        let conn = store.conn.lock().unwrap_or_else(|e| e.into_inner());
         let old: String = conn
             .query_row(
                 "SELECT status FROM autonomous_task_outcomes WHERE task_id='old-started'",

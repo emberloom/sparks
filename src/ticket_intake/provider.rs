@@ -31,13 +31,22 @@ impl ExternalTicket {
             .map(|l| l.to_lowercase())
             .collect::<Vec<_>>();
 
-        if label_hint.iter().any(|l| l.contains("critical") || l.contains("p0")) {
+        if label_hint
+            .iter()
+            .any(|l| l.contains("critical") || l.contains("p0"))
+        {
             return "critical".to_string();
         }
-        if label_hint.iter().any(|l| l.contains("high") || l.contains("p1")) {
+        if label_hint
+            .iter()
+            .any(|l| l.contains("high") || l.contains("p1"))
+        {
             return "high".to_string();
         }
-        if label_hint.iter().any(|l| l.contains("low") || l.contains("p3")) {
+        if label_hint
+            .iter()
+            .any(|l| l.contains("low") || l.contains("p3"))
+        {
             return "low".to_string();
         }
 
@@ -78,11 +87,7 @@ impl ExternalTicket {
             self.labels.join(", ")
         };
         let priority = self.priority.clone().unwrap_or_else(|| "none".to_string());
-        let number = self
-            .number
-            .as_ref()
-            .map(|n| n.as_str())
-            .unwrap_or("n/a");
+        let number = self.number.as_ref().map(|n| n.as_str()).unwrap_or("n/a");
         let author = self
             .author
             .as_ref()

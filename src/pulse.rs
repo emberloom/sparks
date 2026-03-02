@@ -192,7 +192,7 @@ pub fn spawn_pulse_consumer(
             );
 
             let gate = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 PulseGate {
                     tolerance: k.pulse_tolerance,
                     quiet_hours: k.quiet_hours,

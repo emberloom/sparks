@@ -131,9 +131,8 @@ pub fn keyring_report() -> KeyringReport {
 pub fn set_secret(key: &str) -> Result<()> {
     let spec = find_spec(key)?;
     let prompt = format!("Enter value for {}: ", spec.key);
-    let value = prompt_password(prompt).map_err(|e| {
-        AthenaError::Tool(format!("Failed to read secret from stdin: {}", e))
-    })?;
+    let value = prompt_password(prompt)
+        .map_err(|e| AthenaError::Tool(format!("Failed to read secret from stdin: {}", e)))?;
     if value.trim().is_empty() {
         return Err(AthenaError::Tool("Secret cannot be empty".to_string()));
     }
@@ -163,7 +162,6 @@ pub fn find_spec(key: &str) -> Result<SecretSpec> {
         .find(|spec| spec.key == key)
         .ok_or_else(|| AthenaError::Tool(format!("Unknown secret key: {}", key)))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -199,7 +197,11 @@ mod tests {
     fn known_secrets_keys_are_non_empty() {
         for spec in KNOWN_SECRETS {
             assert!(!spec.key.is_empty(), "Empty key in KNOWN_SECRETS");
-            assert!(!spec.env.is_empty(), "Empty env var in KNOWN_SECRETS for key {}", spec.key);
+            assert!(
+                !spec.env.is_empty(),
+                "Empty env var in KNOWN_SECRETS for key {}",
+                spec.key
+            );
         }
     }
 

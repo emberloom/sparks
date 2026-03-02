@@ -15,7 +15,7 @@ pub struct Memory {
     pub category: String,
     pub content: String,
     // Filtering by active is done in SQL (WHERE active = 1); not read in Rust
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub active: bool,
     pub created_at: String,
 }

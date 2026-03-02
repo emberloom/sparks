@@ -99,8 +99,9 @@ impl OuathAuth {
             })?;
         }
 
-        let body = serde_json::to_string_pretty(tokens)
-            .map_err(|e| AthenaError::Internal(format!("Failed to serialize Ouath tokens: {}", e)))?;
+        let body = serde_json::to_string_pretty(tokens).map_err(|e| {
+            AthenaError::Internal(format!("Failed to serialize Ouath tokens: {}", e))
+        })?;
         std::fs::write(&self.token_path, body).map_err(|e| {
             AthenaError::Config(format!(
                 "Failed to write Ouath token file {}: {}",
@@ -112,17 +113,14 @@ impl OuathAuth {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.token_path,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .map_err(|e| {
-                AthenaError::Config(format!(
-                    "Failed to set permissions on Ouath token file {}: {}",
-                    self.token_path.display(),
-                    e
-                ))
-            })?;
+            std::fs::set_permissions(&self.token_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    AthenaError::Config(format!(
+                        "Failed to set permissions on Ouath token file {}: {}",
+                        self.token_path.display(),
+                        e
+                    ))
+                })?;
         }
 
         let mut write = self.cached.write().await;
@@ -131,26 +129,28 @@ impl OuathAuth {
     }
 
     pub async fn ensure_valid_tokens(&self) -> Result<OuathTokens> {
-        let tokens = self
-            .load_tokens()
-            .await?
-            .ok_or_else(|| AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into()))?;
+        let tokens = self.load_tokens().await?.ok_or_else(|| {
+            AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into())
+        })?;
 
         if !tokens.expired(60) {
             return Ok(tokens);
         }
 
-        let refreshed = self.refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref()).await?;
+        let refreshed = self
+            .refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref())
+            .await?;
         self.save_tokens(&refreshed).await?;
         Ok(refreshed)
     }
 
     pub async fn force_refresh(&self) -> Result<OuathTokens> {
-        let tokens = self
-            .load_tokens()
-            .await?
-            .ok_or_else(|| AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into()))?;
-        let refreshed = self.refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref()).await?;
+        let tokens = self.load_tokens().await?.ok_or_else(|| {
+            AthenaError::Config("Ouath not authenticated. Run `athena ouath login`.".into())
+        })?;
+        let refreshed = self
+            .refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref())
+            .await?;
         self.save_tokens(&refreshed).await?;
         Ok(refreshed)
     }
@@ -209,7 +209,11 @@ impl OuathAuth {
         Ok(())
     }
 
-    async fn refresh_tokens(&self, refresh_token: &str, old_account_id: Option<&str>) -> Result<OuathTokens> {
+    async fn refresh_tokens(
+        &self,
+        refresh_token: &str,
+        old_account_id: Option<&str>,
+    ) -> Result<OuathTokens> {
         let client_id = oauth_client_id();
         let token_url = oauth_token_url();
         let params = [
@@ -231,7 +235,9 @@ impl OuathAuth {
         let body: TokenResponse = resp.json().await?;
         let expires_at = chrono::Utc::now().timestamp() + body.expires_in;
         let access_token = body.access_token;
-        let refresh_token = body.refresh_token.unwrap_or_else(|| refresh_token.to_string());
+        let refresh_token = body
+            .refresh_token
+            .unwrap_or_else(|| refresh_token.to_string());
 
         let tokens = OuathTokens {
             access_token,
@@ -347,9 +353,8 @@ fn build_authorize_url(
     code_challenge: &str,
     state: &str,
 ) -> Result<String> {
-    let mut url = url::Url::parse(auth_url).map_err(|e| {
-        AthenaError::Config(format!("Invalid Ouath auth URL {}: {}", auth_url, e))
-    })?;
+    let mut url = url::Url::parse(auth_url)
+        .map_err(|e| AthenaError::Config(format!("Invalid Ouath auth URL {}: {}", auth_url, e)))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -375,10 +380,13 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         ))
     })?;
 
-    let (mut socket, _) = timeout(Duration::from_secs(DEFAULT_CALLBACK_TIMEOUT_SECS), listener.accept())
-        .await
-        .map_err(|_| AthenaError::Timeout(DEFAULT_CALLBACK_TIMEOUT_SECS))?
-        .map_err(|e| AthenaError::Config(format!("Ouath callback listener failed: {}", e)))?;
+    let (mut socket, _) = timeout(
+        Duration::from_secs(DEFAULT_CALLBACK_TIMEOUT_SECS),
+        listener.accept(),
+    )
+    .await
+    .map_err(|_| AthenaError::Timeout(DEFAULT_CALLBACK_TIMEOUT_SECS))?
+    .map_err(|e| AthenaError::Config(format!("Ouath callback listener failed: {}", e)))?;
 
     let mut buf = [0u8; 4096];
     let n = socket.read(&mut buf).await.map_err(|e| {
@@ -390,9 +398,8 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
-    let parsed = url::Url::parse(&format!("http://localhost{}", path)).map_err(|e| {
-        AthenaError::Config(format!("Failed to parse Ouath callback URL: {}", e))
-    })?;
+    let parsed = url::Url::parse(&format!("http://localhost{}", path))
+        .map_err(|e| AthenaError::Config(format!("Failed to parse Ouath callback URL: {}", e)))?;
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;
     for (k, v) in parsed.query_pairs() {
@@ -423,12 +430,11 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
-        return Err(AthenaError::Config(
-            "Ouath callback state mismatch".into(),
-        ));
+        return Err(AthenaError::Config("Ouath callback state mismatch".into()));
     }
 
-    let body = "<html><body><h3>Ouath login complete.</h3><p>You can close this window.</p></body></html>";
+    let body =
+        "<html><body><h3>Ouath login complete.</h3><p>You can close this window.</p></body></html>";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
@@ -470,9 +476,9 @@ async fn exchange_code_for_tokens(
 
     Ok(OuathTokens {
         access_token: body.access_token,
-        refresh_token: body
-            .refresh_token
-            .ok_or_else(|| AthenaError::Config("Ouath token response missing refresh_token".into()))?,
+        refresh_token: body.refresh_token.ok_or_else(|| {
+            AthenaError::Config("Ouath token response missing refresh_token".into())
+        })?,
         expires_at,
         chatgpt_account_id: None,
     })

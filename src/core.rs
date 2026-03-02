@@ -292,7 +292,10 @@ fn init_core_channel() -> (mpsc::Sender<CoreRequest>, mpsc::Receiver<CoreRequest
     mpsc::channel::<CoreRequest>(32)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_core_loops(
     rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
@@ -428,7 +431,10 @@ fn init_pulse_bus(
     (pulse_bus, delivered_rx)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_housekeeping_loops(
     config: &Config,
     memory: Arc<MemoryStore>,
@@ -607,7 +613,10 @@ fn init_metrics_collector(
     metrics
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn build_manager(
     config: &Config,
     merged_ghosts: Vec<GhostConfig>,
@@ -650,7 +659,10 @@ fn build_manager(
     manager
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_core_event_loop(
     mut rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
@@ -680,7 +692,10 @@ fn spawn_core_event_loop(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn handle_core_request(
     req: CoreRequest,
     manager: Arc<Manager>,
@@ -881,7 +896,10 @@ async fn run_manager_autonomous_task(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn maybe_handle_mock_ticket_intake_dispatch(
     mock_ticket_intake_dispatch: bool,
     task: &AutonomousTask,
@@ -949,7 +967,10 @@ fn log_autonomous_dispatch(observer: &ObserverHandle, task: &AutonomousTask, gho
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn handle_autonomous_task_success(
     task: &AutonomousTask,
     task_id: &str,
@@ -1050,7 +1071,10 @@ async fn handle_autonomous_task_success(
     pulse_bus.send(pulse);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn handle_autonomous_task_failure(
     task: &AutonomousTask,
     task_id: &str,
@@ -1396,7 +1420,7 @@ fn load_ghost_profiles(config: &Config) -> Result<(Vec<GhostConfig>, Vec<GhostIn
 }
 
 fn init_langfuse_client(config: &Config, knobs: &SharedKnobs) -> SharedLangfuse {
-    let k = knobs.read().unwrap();
+    let k = knobs.read().unwrap_or_else(|e| e.into_inner());
     if !k.langfuse_enabled {
         return None;
     }
@@ -1449,7 +1473,7 @@ fn spawn_mood_drift_loop(
     tokio::spawn(async move {
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.mood_drift_interval_secs, k.mood_enabled, k.all_proactive)
             };
             if !all || !enabled {
@@ -1459,7 +1483,7 @@ fn spawn_mood_drift_loop(
             let dur = randomness::jitter_interval(interval, 0.2);
             tokio::time::sleep(dur).await;
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.mood_enabled {
                     continue;
                 }

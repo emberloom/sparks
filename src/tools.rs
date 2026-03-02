@@ -533,7 +533,8 @@ impl Tool for GlobTool {
 
 /// Strip HTML tags, decode common entities, and collapse whitespace
 fn strip_html(html: &str) -> String {
-    let re_tags = regex::Regex::new(r"<[^>]+>").unwrap();
+    let re_tags =
+        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|e| panic!("Invalid HTML tag regex: {}", e));
     let text = re_tags.replace_all(html, "");
 
     let text = text
@@ -544,7 +545,8 @@ fn strip_html(html: &str) -> String {
         .replace("&#39;", "'")
         .replace("&nbsp;", " ");
 
-    let re_ws = regex::Regex::new(r"\s+").unwrap();
+    let re_ws =
+        regex::Regex::new(r"\s+").unwrap_or_else(|e| panic!("Invalid whitespace regex: {}", e));
     let text = re_ws.replace_all(&text, " ");
     text.trim().to_string()
 }
@@ -591,7 +593,13 @@ impl WebFetchTool {
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("Athena/0.1")
             .build()
-            .expect("failed to build reqwest client");
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to build web_fetch client; using default client: {}",
+                    e
+                );
+                reqwest::Client::new()
+            });
         Self { client }
     }
 }
@@ -681,7 +689,13 @@ impl WebSearchTool {
             .timeout(std::time::Duration::from_secs(15))
             .user_agent("Athena/0.1")
             .build()
-            .expect("failed to build reqwest client");
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to build web_search client; using default client: {}",
+                    e
+                );
+                reqwest::Client::new()
+            });
         Self { client }
     }
 }
@@ -742,17 +756,23 @@ impl Tool for WebSearchTool {
 
         // Parse results from DuckDuckGo HTML
         let re_result =
-            regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#).unwrap();
+            regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
+                .unwrap_or_else(|e| panic!("Invalid web result regex: {}", e));
         let re_snippet =
-            regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#).unwrap();
+            regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#)
+                .unwrap_or_else(|e| panic!("Invalid web snippet regex: {}", e));
 
         let titles: Vec<(&str, &str)> = re_result
             .captures_iter(&body)
-            .map(|c| (c.get(1).unwrap().as_str(), c.get(2).unwrap().as_str()))
+            .filter_map(|c| {
+                let url = c.get(1)?.as_str();
+                let title = c.get(2)?.as_str();
+                Some((url, title))
+            })
             .collect();
         let snippets: Vec<&str> = re_snippet
             .captures_iter(&body)
-            .map(|c| c.get(1).unwrap().as_str())
+            .filter_map(|c| c.get(1).map(|m| m.as_str()))
             .collect();
 
         if titles.is_empty() {
@@ -1413,7 +1433,12 @@ impl Tool for ClaudeCodeTool {
             });
         }
         let prompt = build_cli_prompt(params)?;
-        let model = self.knobs.read().unwrap().cli_model.clone();
+        let model = self
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
         let mut args = vec![
             "-p",
             &prompt,
@@ -1469,7 +1494,12 @@ impl Tool for CodexTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
-        let model = self.knobs.read().unwrap().cli_model.clone();
+        let model = self
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
         let mut args = vec!["exec", "--full-auto"];
         if !model.is_empty() {
             args.push("--model");
@@ -1520,7 +1550,12 @@ impl Tool for OpenCodeTool {
 
     async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
         let prompt = build_cli_prompt(params)?;
-        let model = self.knobs.read().unwrap().cli_model.clone();
+        let model = self
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
         let mut args = vec!["run"];
         if !model.is_empty() {
             args.push("--model");
@@ -1610,19 +1645,19 @@ impl Tool for GhTool {
         }
 
         let token = self.resolve_token();
-        if token.is_none() {
+        let Some(token) = token else {
             return Ok(ToolResult {
                 success: false,
                 output: "gh: no GitHub token found. Set GH_TOKEN env var or configure [github] token in config.toml".into(),
             });
-        }
+        };
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(GH_TIMEOUT_SECS),
             Command::new("gh")
                 .args(&parts)
                 .current_dir(&self.workspace)
-                .env("GH_TOKEN", token.unwrap())
+                .env("GH_TOKEN", token)
                 .env("TERM", "dumb")
                 .env("NO_COLOR", "1")
                 .output(),

@@ -27,7 +27,7 @@ pub struct TokenUsage {
 pub struct TokenBudget {
     pub context_window: u64,
     // Not used in production logic; verified in tests
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub reserved_for_completion: u64,
     pub last_prompt_tokens: u64,
     pub total_completion_tokens: u64,
@@ -359,7 +359,7 @@ impl OuathClient {
     fn effective_model(&self) -> String {
         self.model_override
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| self.config.model.clone())
     }
@@ -495,9 +495,7 @@ impl OuathClient {
         });
 
         let Some(choice) = chat_resp.choices.into_iter().next() else {
-            return Err(AthenaError::Llm(
-                "Ouath returned empty choices".into(),
-            ));
+            return Err(AthenaError::Llm("Ouath returned empty choices".into()));
         };
 
         if let Some(tool_calls) = choice.message.tool_calls {
@@ -533,7 +531,9 @@ impl OuathClient {
         tools: &[ToolSchema],
     ) -> Result<(ChatResponse, Option<TokenUsage>)> {
         if self.config.url.contains("chatgpt.com") || self.config.url.contains("backend-api") {
-            let rx = self.chat_with_tools_stream_responses(messages, tools).await?;
+            let rx = self
+                .chat_with_tools_stream_responses(messages, tools)
+                .await?;
             return collect_stream_response(rx).await;
         }
 
@@ -674,7 +674,10 @@ impl LlmProvider for OuathClient {
     }
 
     fn set_model_override(&self, model: Option<String>) {
-        *self.model_override.write().unwrap() = model;
+        *self
+            .model_override
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = model;
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
@@ -738,7 +741,10 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
                 "role": "user",
                 "content": [{"type": "input_text", "text": s}],
             })),
-            ChatMessage::Assistant { content, tool_calls } => {
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 if let Some(text) = content {
                     input.push(serde_json::json!({
                         "role": "assistant",
@@ -756,7 +762,10 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
                     }
                 }
             }
-            ChatMessage::Tool { tool_call_id, content } => {
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => {
                 input.push(serde_json::json!({
                     "type": "tool_output",
                     "tool_call_id": tool_call_id,
@@ -1108,9 +1117,7 @@ impl OuathClient {
                     if let Some(event_type) = parsed.get("type").and_then(|v| v.as_str()) {
                         match event_type {
                             "response.output_text.delta" => {
-                                if let Some(delta) =
-                                    parsed.get("delta").and_then(|v| v.as_str())
-                                {
+                                if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
                                     if !delta.is_empty() {
                                         text_emitted = true;
                                         let _ = tx.send(StreamEvent::TextDelta(delta.into())).await;
@@ -1238,8 +1245,11 @@ fn apply_tool_item(partials: &mut HashMap<String, OuathPartialToolCall>, item: &
     if !is_tool_call_item(item) {
         return;
     }
-    let id = extract_tool_call_id(item).unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
-    let entry = partials.entry(id.clone()).or_insert_with(|| OuathPartialToolCall::new(id));
+    let id = extract_tool_call_id(item)
+        .unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
+    let entry = partials
+        .entry(id.clone())
+        .or_insert_with(|| OuathPartialToolCall::new(id));
     if entry.name.is_empty() {
         if let Some(name) = extract_tool_call_name(item) {
             entry.name = name;
@@ -1258,7 +1268,9 @@ fn apply_tool_delta(
     let id = item_id
         .or_else(|| extract_tool_call_id(delta))
         .unwrap_or_else(|| format!("ouath-call-{}", uuid::Uuid::new_v4()));
-    let entry = partials.entry(id.clone()).or_insert_with(|| OuathPartialToolCall::new(id));
+    let entry = partials
+        .entry(id.clone())
+        .or_insert_with(|| OuathPartialToolCall::new(id));
     if entry.name.is_empty() {
         if let Some(name) = extract_tool_call_name(delta) {
             entry.name = name;
@@ -1393,8 +1405,7 @@ fn parse_responses_body(body: &Value) -> Result<(ChatResponse, Option<TokenUsage
                 "message" => {
                     if let Some(contents) = item.get("content").and_then(|v| v.as_array()) {
                         for part in contents {
-                            let part_type =
-                                part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             if part_type == "output_text" || part_type == "text" {
                                 if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
                                     text.push_str(t);
@@ -1460,7 +1471,11 @@ fn parse_tool_call(item: &Value) -> Option<ToolCall> {
         _ => Value::Null,
     };
 
-    Some(ToolCall { id, name, arguments })
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1752,7 +1767,7 @@ impl OpenAiCompatibleClient {
     fn effective_model(&self) -> String {
         self.model_override
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| self.config.model.clone())
     }
@@ -1867,7 +1882,10 @@ impl LlmProvider for OpenAiCompatibleClient {
     }
 
     fn set_model_override(&self, model: Option<String>) {
-        *self.model_override.write().unwrap() = model;
+        *self
+            .model_override
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = model;
     }
 
     async fn list_models(&self) -> Result<Vec<String>> {
@@ -2326,8 +2344,10 @@ fn chat_message_to_wire(msg: &ChatMessage) -> Option<Value> {
 // ---------------------------------------------------------------------------
 
 /// Static regex for trailing comma cleanup (compiled once)
-static TRAILING_COMMA_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r",\s*([}\]])").unwrap());
+static TRAILING_COMMA_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r",\s*([}\]])")
+        .unwrap_or_else(|e| panic!("Invalid trailing comma regex: {}", e))
+});
 
 /// Sanitize common LLM JSON errors:
 /// - \' → ' (invalid JSON escape, common in shell-influenced output)

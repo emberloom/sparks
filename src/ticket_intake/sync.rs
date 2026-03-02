@@ -52,7 +52,7 @@ pub fn spawn_ticket_status_sync(
 
 fn should_run_sync(knobs: &SharedKnobs, webhook_enabled: bool) -> bool {
     let poll_enabled = {
-        let k = knobs.read().unwrap();
+        let k = knobs.read().unwrap_or_else(|e| e.into_inner());
         k.ticket_intake_enabled
     };
     poll_enabled || webhook_enabled

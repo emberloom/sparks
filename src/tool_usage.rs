@@ -8,15 +8,15 @@ use crate::error::{AthenaError, Result};
 #[derive(Debug, Clone)]
 pub struct ToolUsageStats {
     // Populated from DB rows; not consumed by current Rust logic but tracked for observability
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub tool_name: String,
     pub invocation_count: u64,
     pub success_count: u64,
     pub failure_count: u64,
     pub avg_duration_ms: f64,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub last_error: Option<String>,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub last_used: Option<String>,
 }
 

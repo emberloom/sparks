@@ -157,11 +157,7 @@ fn compute_error_rate_1h() -> f64 {
     }
 }
 
-fn has_recent_health_fix(
-    memory: &MemoryStore,
-    alert_signature: &str,
-    max_age_secs: u64,
-) -> bool {
+fn has_recent_health_fix(memory: &MemoryStore, alert_signature: &str, max_age_secs: u64) -> bool {
     let query = format!("health_fix {}", alert_signature);
     let Ok(results) = memory.search(&query) else {
         return false;
@@ -171,8 +167,7 @@ fn has_recent_health_fix(
         if m.category != "health_fix" || !m.content.contains(alert_signature) {
             return false;
         }
-        let Ok(created) = NaiveDateTime::parse_from_str(&m.created_at, "%Y-%m-%d %H:%M:%S")
-        else {
+        let Ok(created) = NaiveDateTime::parse_from_str(&m.created_at, "%Y-%m-%d %H:%M:%S") else {
             return false;
         };
         let created = Utc.from_utc_datetime(&created);
@@ -212,7 +207,7 @@ pub fn spawn_metrics_collector(
 
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.metrics_interval_secs, k.self_dev_enabled, k.all_proactive)
             };
 
@@ -226,7 +221,7 @@ pub fn spawn_metrics_collector(
 
             // Re-check knobs after sleep
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.self_dev_enabled {
                     continue;
                 }
@@ -341,10 +336,8 @@ pub fn spawn_metrics_collector(
                 if !anomalies.is_empty() {
                     let alert_signature = format!("alert_kinds={}", anomaly_kinds.join(","));
                     let alert_msg = anomalies.join("; ");
-                    let alert_memory = format!(
-                        "{} | {} | {}",
-                        alert_signature, alert_msg, metrics_summary
-                    );
+                    let alert_memory =
+                        format!("{} | {} | {}", alert_signature, alert_msg, metrics_summary);
                     let _ = memory.store("health_alert", &alert_memory, None);
                     let now_epoch = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

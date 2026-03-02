@@ -4,7 +4,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::error::{AthenaError, Result};
-use crate::llm::{LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient};
+use crate::llm::{
+    LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig, OuathClient,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -973,9 +975,7 @@ impl Config {
         if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
             labels.push("telegram.token".to_string());
         }
-        if self.telegram.stt_api_key.is_some()
-            && std::env::var("ATHENA_STT_API_KEY").is_err()
-        {
+        if self.telegram.stt_api_key.is_some() && std::env::var("ATHENA_STT_API_KEY").is_err() {
             labels.push("telegram.stt_api_key".to_string());
         }
         if self
@@ -992,8 +992,7 @@ impl Config {
         {
             labels.push("zen.api_key".to_string());
         }
-        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err()
-        {
+        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err() {
             labels.push("langfuse.public_key".to_string());
         }
         if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
@@ -1103,7 +1102,6 @@ impl Config {
                 }
             }
         }
-
     }
 
     /// Ordered provider candidates: configured provider first, then common fallbacks.

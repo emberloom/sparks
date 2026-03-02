@@ -26,7 +26,7 @@ pub struct Executor {
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
     observer: ObserverHandle,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
 }
 

@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::core::{AutonomousTask, SessionContext};
-use crate::kpi;
 use crate::knobs::SharedKnobs;
+use crate::kpi;
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::pulse::PulseTarget;
@@ -97,7 +97,7 @@ pub struct Job {
     pub enabled: bool,
     pub next_run: Option<DateTime<Utc>>,
     // last_run is persisted to/from DB but not used in Rust scheduling logic
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub last_run: Option<DateTime<Utc>>,
 }
 
@@ -190,7 +190,7 @@ impl CronEngine {
                     last_cleanup = Instant::now();
                 }
                 let active = {
-                    let k = this.knobs.read().unwrap();
+                    let k = this.knobs.read().unwrap_or_else(|e| e.into_inner());
                     k.all_proactive && k.cron_enabled
                 };
                 if !active {
@@ -237,7 +237,7 @@ impl CronEngine {
         let is_reentry = job.name.starts_with("reentry:");
         if is_reentry {
             let (all, enabled) = {
-                let k = self.knobs.read().unwrap();
+                let k = self.knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.all_proactive, k.conversation_reentry_enabled)
             };
             if !all || !enabled {
