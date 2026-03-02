@@ -14,7 +14,6 @@ pub struct SecretSpec {
 #[derive(Debug, Clone)]
 pub struct SecretStatus {
     pub key: &'static str,
-    pub env: &'static str,
     pub in_env: bool,
     pub in_keyring: bool,
 }
@@ -121,7 +120,6 @@ pub fn keyring_report() -> KeyringReport {
         }
         statuses.push(SecretStatus {
             key: spec.key,
-            env: spec.env,
             in_env,
             in_keyring,
         });

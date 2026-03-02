@@ -96,6 +96,8 @@ pub struct Job {
     pub target: String,
     pub enabled: bool,
     pub next_run: Option<DateTime<Utc>>,
+    // last_run is persisted to/from DB but not used in Rust scheduling logic
+    #[allow(dead_code)]
     pub last_run: Option<DateTime<Utc>>,
 }
 

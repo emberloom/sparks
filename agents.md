@@ -72,9 +72,12 @@ Before opening a PR or submitting a patch:
 1. Run `cargo check` (or `cargo check --all-features` if touching optional features).
 2. Run `cargo test` for relevant areas.
 3. Run `athena doctor --ci` for safety and system checks.
-4. Run `scripts/maintainability_check.py` if you changed core architecture or tool behavior.
-5. After each bigger change, run the relevant tests and report results without using the phrase "Tests not run." If tests fail, fix the issues and iterate until they pass.
-6. If there is a suggestion to run a command, run it.
+4. Run `scripts/dead_code_check.py --telegram` to verify zero dead code in both feature profiles.
+5. Run `scripts/wiring_check.py` to verify all declared variants/implementations are connected.
+6. Run `scripts/hygiene_check.py` to catch common AI code-smell patterns (panics, debug output, suppressors).
+7. Run `scripts/maintainability_check.py` if you changed core architecture or tool behavior.
+8. After each bigger change, run the relevant tests and report results without using the phrase "Tests not run." If tests fail, fix the issues and iterate until they pass.
+9. If there is a suggestion to run a command, run it.
 
 Review expectations:
 - No hardcoded credentials or tokens.
@@ -82,6 +85,24 @@ Review expectations:
 - New traits should have safe defaults to avoid breaking downstream implementations.
 - Database migrations are append-only and must be forward compatible.
 - Keep risk tier defaults conservative.
+
+## Wiring Invariants
+When extending the system, these invariants must hold (enforced by `scripts/wiring_check.py` on every CI run):
+
+- **New `ObserverCategory` variant** → add at least one `observer.log(ObserverCategory::X, …)` call at the relevant emit site.
+- **New `PulseSource` variant** → use it in at least one `Pulse::new(PulseSource::X, …)` call. Mark with `#[cfg(test)]` if the variant is test-only.
+- **New `LlmProvider` impl** → add a match arm in `config.rs::build_llm_provider_for()`.
+- **New ticket intake provider module** → register it in the dispatch block in `core.rs`.
+
+Violating any of these will fail the "Wiring & plumbing check" CI step. See `docs/architecture.md` for the full component map and state machines.
+
+The "Hygiene check" CI step additionally enforces:
+- No `todo!()` / `unimplemented!()` outside test blocks
+- No `dbg!()` anywhere
+- No `#![allow(...)]` crate-level suppressors
+- No `unsafe` blocks without a preceding `// SAFETY:` comment
+- No `use ...::*` glob imports outside test blocks (add `// hygiene: allow` for documented crate conventions)
+- `.unwrap()`, `.expect()`, `#[allow(clippy::too_many_arguments)]`, and `#[allow(dead_code)]` counts must not regress beyond the stored baseline in `docs/hygiene-baseline.json`.
 
 ## Risks and Mitigations
 | Threat | Mitigation |
@@ -103,3 +124,4 @@ Relevant code: `src/proactive/`, `src/self_heal.rs`, `src/kpi.rs`.
 - Ticket intake and sync: `src/ticket_intake/`
 - Configuration and security: `src/config.rs`, `config.example.toml`
 - Diagnostics: `src/doctor.rs`
+- Architecture diagrams and wiring map: `docs/architecture.md`

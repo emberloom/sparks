@@ -14,6 +14,8 @@ pub struct Memory {
     pub id: String,
     pub category: String,
     pub content: String,
+    // Filtering by active is done in SQL (WHERE active = 1); not read in Rust
+    #[allow(dead_code)]
     pub active: bool,
     pub created_at: String,
 }
@@ -556,18 +558,6 @@ impl MemoryStore {
         Ok(profile)
     }
 
-    /// Upsert a single key-value pair in a user's profile.
-    pub fn set_user_profile(&self, user_id: &str, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO user_profiles (user_id, key, value, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            rusqlite::params![user_id, key, value],
-        )?;
-        Ok(())
-    }
-
     // --- Mood state persistence ---
 
     /// Load the singleton mood state row.
@@ -786,14 +776,6 @@ impl MemoryStore {
         Ok(updated > 0)
     }
 
-    pub fn enable_scheduled_job(&self, id: &str) -> Result<bool> {
-        self.toggle_scheduled_job(id, true)
-    }
-
-    pub fn disable_scheduled_job(&self, id: &str) -> Result<bool> {
-        self.toggle_scheduled_job(id, false)
-    }
-
     pub fn cleanup_stale_disabled_oneshots(&self) -> Result<usize> {
         let conn = self.conn()?;
         let deleted = conn.execute(
@@ -825,16 +807,13 @@ impl MemoryStore {
     pub fn get_relationship(&self, user_id: &str) -> Result<Option<UserRelationship>> {
         let conn = self.conn()?;
         match conn.query_row(
-            "SELECT user_id, total_interactions, last_interaction, avg_message_length, warmth_level
+            "SELECT total_interactions, warmth_level
              FROM relationship_stats WHERE user_id = ?1",
             rusqlite::params![user_id],
             |row| {
                 Ok(UserRelationship {
-                    user_id: row.get(0)?,
-                    total_interactions: row.get(1)?,
-                    last_interaction: row.get(2)?,
-                    avg_message_length: row.get::<_, f64>(3)? as f32,
-                    warmth_level: row.get::<_, f64>(4)? as f32,
+                    total_interactions: row.get(0)?,
+                    warmth_level: row.get::<_, f64>(1)? as f32,
                 })
             },
         ) {
@@ -860,10 +839,7 @@ struct JobRow {
 
 #[derive(Debug, Clone)]
 pub struct UserRelationship {
-    pub user_id: String,
     pub total_interactions: i64,
-    pub last_interaction: String,
-    pub avg_message_length: f32,
     pub warmth_level: f32,
 }
 

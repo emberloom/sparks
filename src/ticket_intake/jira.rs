@@ -45,7 +45,6 @@ struct JiraSearchResponse {
 
 #[derive(Deserialize)]
 struct JiraIssue {
-    id: String,
     key: String,
     fields: JiraFields,
 }

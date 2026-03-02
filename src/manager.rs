@@ -17,6 +17,7 @@ use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{self, LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
+use crate::observer::ObserverHandle;
 use crate::strategy::{StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
 
@@ -118,6 +119,7 @@ impl Manager {
         usage_store: Arc<ToolUsageStore>,
         metrics: SharedMetrics,
         langfuse: SharedLangfuse,
+        observer: ObserverHandle,
     ) -> Self {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
         let executor = Executor::new(
@@ -128,6 +130,7 @@ impl Manager {
             knobs.clone(),
             config.github.token.clone(),
             usage_store.clone(),
+            observer,
             langfuse.clone(),
         );
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
-use teloxide::prelude::*;
+use teloxide::prelude::*; // hygiene: allow — teloxide crate convention
 use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 
 use crate::config::TelegramConfig;
@@ -15,7 +15,6 @@ use crate::observer::ObserverCategory;
 #[derive(Clone)]
 pub struct SystemInfo {
     pub provider: String,
-    pub model: String,
     pub temperature: f32,
     pub max_tokens: u32,
     pub started_at: tokio::time::Instant,
@@ -1721,10 +1720,6 @@ async fn forward_telegram_events(
                     .parse_mode(ParseMode::Html)
                     .await;
             }
-            CoreEvent::Pulse(p) => {
-                let html = format!("<b>💬 pulse</b>\n{}", escape_html(&p));
-                let _ = send_html(&bot, chat_id, &html).await;
-            }
         }
     }
 }
@@ -1909,16 +1904,6 @@ async fn ensure_authorized(
         return Ok(false);
     }
     Ok(true)
-}
-
-async fn send_working_status(bot: &Bot, chat_id: ChatId) -> ResponseResult<Message> {
-    tracing::debug!("Sending Working... status message");
-    let status_msg = bot
-        .send_message(chat_id, "<i>Working...</i>")
-        .parse_mode(ParseMode::Html)
-        .await?;
-    tracing::debug!(msg_id = %status_msg.id, "Status message sent");
-    Ok(status_msg)
 }
 
 // ── Callback handler ─────────────────────────────────────────────────

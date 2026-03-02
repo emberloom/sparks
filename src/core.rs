@@ -59,8 +59,6 @@ pub enum CoreEvent {
     Response(String),
     /// Error during execution
     Error(String),
-    /// Proactive pulse from background tasks
-    Pulse(String),
 }
 
 /// An autonomous task submitted by a background process (cron, heartbeat, etc.).
@@ -98,7 +96,6 @@ pub struct GhostInfo {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
-    pub strategy: String,
 }
 
 /// Info about a stored memory (returned by list_memories).
@@ -119,6 +116,8 @@ pub struct CoreHandle {
     pub knobs: SharedKnobs,
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
+    // activity is read by the telegram feature
+    #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
     pub activity: Arc<ActivityTracker>,
     pub mood: Arc<MoodState>,
     pub cron_engine: Option<Arc<CronEngine>>,
@@ -638,6 +637,7 @@ fn build_manager(
         usage_store,
         metrics,
         langfuse,
+        observer.clone(),
     ));
     if let Some(dt_path) = manager.dynamic_tools_path() {
         crate::dynamic_tools::spawn_hot_reload(
@@ -1390,7 +1390,6 @@ fn load_ghost_profiles(config: &Config) -> Result<(Vec<GhostConfig>, Vec<GhostIn
             name: g.name.clone(),
             description: g.description.clone(),
             tools: g.tools.clone(),
-            strategy: g.strategy.clone(),
         })
         .collect();
     Ok((merged_ghosts, ghosts))

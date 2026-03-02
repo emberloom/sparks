@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 mod config;
 mod confirm;
@@ -579,20 +578,6 @@ async fn main() -> anyhow::Result<()> {
 
             let system_info = telegram::SystemInfo {
                 provider: telegram_provider.clone(),
-                model: match telegram_provider.as_str() {
-                    "ouath" => ouath_cfg.model.clone(),
-                    "openrouter" => config
-                        .openrouter
-                        .as_ref()
-                        .map(|c| c.model.clone())
-                        .unwrap_or_default(),
-                    "zen" => config
-                        .zen
-                        .as_ref()
-                        .map(|c| c.model.clone())
-                        .unwrap_or_default(),
-                    _ => config.ollama.model.clone(),
-                },
                 temperature: match telegram_provider.as_str() {
                     "ouath" => ouath_cfg.temperature,
                     "openrouter" => config
@@ -5649,7 +5634,6 @@ async fn stream_cli_events(mut events: tokio::sync::mpsc::Receiver<CoreEvent>) {
                     eprintln!("Error: {}", e);
                 }
             }
-            CoreEvent::Pulse(p) => println!("\n[pulse] {}\n", p),
         }
     }
 }

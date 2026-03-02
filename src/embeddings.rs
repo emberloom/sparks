@@ -312,6 +312,7 @@ mod tests {
         category: &'static str,
     }
 
+    #[allow(dead_code)]
     struct QueryResult {
         query: String,
         category: String,

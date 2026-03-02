@@ -590,6 +590,8 @@ fn default_ticket_intake_webhook_bind() -> String {
     "127.0.0.1:8765".to_string()
 }
 
+// Fields are read by the webhook feature (ticket_intake/webhook.rs)
+#[cfg_attr(not(feature = "webhook"), allow(dead_code))]
 #[derive(Debug, Deserialize, Clone)]
 pub struct TicketIntakeWebhookConfig {
     #[serde(default)]
@@ -652,8 +654,6 @@ pub struct DockerConfig {
     pub image: String,
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
-    #[serde(default = "default_runtime")]
-    pub runtime: String,
     #[serde(default = "default_memory_limit")]
     pub memory_limit: i64,
     #[serde(default = "default_cpu_quota")]
@@ -743,9 +743,6 @@ fn default_image() -> String {
 fn default_socket_path() -> String {
     "/var/run/docker.sock".into()
 }
-fn default_runtime() -> String {
-    "runc".into()
-}
 fn default_memory_limit() -> i64 {
     268_435_456
 } // 256MB
@@ -804,7 +801,6 @@ impl Default for DockerConfig {
         Self {
             image: default_image(),
             socket_path: default_socket_path(),
-            runtime: default_runtime(),
             memory_limit: default_memory_limit(),
             cpu_quota: default_cpu_quota(),
             timeout_secs: default_timeout_secs(),
@@ -1190,11 +1186,6 @@ impl Config {
         }
     }
 
-    /// Build the configured LLM provider
-    pub fn build_llm_provider(&self) -> Result<Arc<dyn LlmProvider>> {
-        self.build_llm_provider_for(self.llm.provider.as_str())
-    }
-
     /// Build the orchestrator provider for an explicit provider name.
     pub fn build_orchestrator_provider_for(
         &self,
@@ -1287,14 +1278,6 @@ impl Config {
             }
             _ => Ok(fallback.clone()),
         }
-    }
-
-    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_orchestrator_provider(
-        &self,
-        fallback: &Arc<dyn LlmProvider>,
-    ) -> Result<Arc<dyn LlmProvider>> {
-        self.build_orchestrator_provider_for(self.llm.provider.as_str(), fallback)
     }
 
     /// Resolve the db path, expanding ~ to home dir

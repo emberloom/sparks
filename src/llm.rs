@@ -26,6 +26,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
     pub context_window: u64,
+    // Not used in production logic; verified in tests
+    #[allow(dead_code)]
     pub reserved_for_completion: u64,
     pub last_prompt_tokens: u64,
     pub total_completion_tokens: u64,
@@ -36,7 +38,7 @@ impl TokenBudget {
     pub fn new(context_window: u64) -> Self {
         Self {
             context_window,
-            reserved_for_completion: context_window / 4, // 25% reserved
+            reserved_for_completion: context_window / 4,
             last_prompt_tokens: 0,
             total_completion_tokens: 0,
             call_count: 0,
@@ -283,7 +285,8 @@ pub trait LlmProvider: Send + Sync {
         Ok(vec![])
     }
 
-    /// Query account credits (total, used). Returns None if not supported.
+    /// Query account credits (total, used). Used by the telegram feature.
+    #[cfg(feature = "telegram")]
     async fn credits(&self) -> Result<Option<(f64, f64)>> {
         Ok(None)
     }
@@ -1897,6 +1900,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         Ok(models)
     }
 
+    #[cfg(feature = "telegram")]
     async fn credits(&self) -> Result<Option<(f64, f64)>> {
         // Only supported for OpenRouter (URL contains openrouter.ai)
         if !self.config.url.contains("openrouter.ai") {
@@ -1911,7 +1915,6 @@ impl LlmProvider for OpenAiCompatibleClient {
             .await?;
 
         if !resp.status().is_success() {
-            // Non-fatal: might be a non-management key
             tracing::debug!(
                 provider = %self.name,
                 status = %resp.status(),

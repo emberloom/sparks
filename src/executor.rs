@@ -11,6 +11,7 @@ use crate::error::{AthenaError, Result};
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
+use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::self_heal;
 use crate::strategy::{self, StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
@@ -24,6 +25,7 @@ pub struct Executor {
     knobs: SharedKnobs,
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
+    observer: ObserverHandle,
     #[allow(dead_code)]
     langfuse: SharedLangfuse,
 }
@@ -37,6 +39,7 @@ impl Executor {
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Arc<ToolUsageStore>,
+        observer: ObserverHandle,
         langfuse: SharedLangfuse,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
@@ -48,6 +51,7 @@ impl Executor {
             knobs,
             github_token,
             usage_store,
+            observer,
             langfuse,
         }
     }
@@ -221,6 +225,15 @@ impl Executor {
             {
                 tracing::warn!("Failed to record tool usage: {}", e);
             }
+            self.observer.log(
+                ObserverCategory::ToolUsage,
+                format!(
+                    "{} {} ({:.0}ms)",
+                    tool_name,
+                    if success { "ok" } else { "fail" },
+                    duration_ms
+                ),
+            );
         }
 
         let output = match result {

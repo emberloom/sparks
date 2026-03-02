@@ -1,0 +1,6 @@
+{
+  "unwrap_non_test": 62,
+  "expect_non_test": 5,
+  "too_many_args_allow": 14,
+  "dead_code_allow": 9
+}

@@ -2028,6 +2028,7 @@ impl ToolRegistry {
             .join("\n")
     }
 
+    #[cfg(test)]
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
     }

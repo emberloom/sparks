@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -55,10 +55,6 @@ impl OuathAuth {
             token_path,
             cached: RwLock::new(None),
         }
-    }
-
-    pub fn token_path(&self) -> &Path {
-        &self.token_path
     }
 
     pub async fn load_tokens(&self) -> Result<Option<OuathTokens>> {

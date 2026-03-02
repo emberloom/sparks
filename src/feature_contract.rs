@@ -27,6 +27,8 @@ pub struct FeatureContract {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcceptanceCriterion {
     pub id: String,
+    // Set from YAML/JSON contract; not currently read by Rust code
+    #[allow(dead_code)]
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -278,6 +280,7 @@ impl FeatureContract {
         self.tasks.iter().find(|t| t.id == id)
     }
 
+    #[cfg(test)]
     pub fn execution_order(&self) -> anyhow::Result<Vec<String>> {
         let batches = self.execution_batches()?;
         Ok(batches.into_iter().flatten().collect())

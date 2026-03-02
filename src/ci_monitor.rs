@@ -324,10 +324,6 @@ async fn try_auto_merge(pr_url: &str, repo_root: &Path, ctx: &mut CiMonitorConte
     }
 }
 
-pub async fn poll_pr_ci_status(pr_url: &str, workdir: &Path) -> CiPollResult {
-    poll_pr_ci_status_internal(pr_url, workdir, &mut CiMonitorContext::new(false)).await
-}
-
 async fn poll_pr_ci_status_internal(
     pr_url: &str,
     workdir: &Path,
@@ -383,10 +379,6 @@ async fn poll_pr_ci_status_internal(
         checks,
         raw_json,
     }
-}
-
-pub async fn extract_failed_ci_logs(pr_url: &str, workdir: &Path) -> String {
-    extract_failed_ci_logs_internal(pr_url, workdir, &mut CiMonitorContext::new(false)).await
 }
 
 async fn extract_failed_ci_logs_internal(
@@ -460,23 +452,6 @@ async fn extract_failed_ci_logs_internal(
     tail_text(&logs, CI_LOG_TAIL_CHARS)
 }
 
-pub async fn heal_ci_failure(
-    repo_root: &Path,
-    branch: &str,
-    failure_logs: &str,
-    attempt: u8,
-    config: &Config,
-) -> CiHealAttempt {
-    heal_ci_failure_internal(
-        repo_root,
-        branch,
-        failure_logs,
-        attempt,
-        config,
-        &mut CiMonitorContext::new(false),
-    )
-    .await
-}
 
 async fn heal_ci_failure_internal(
     repo_root: &Path,
