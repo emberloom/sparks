@@ -1,41 +1,48 @@
 {
   "summary": {
-    "files": 42,
-    "total_loc": 32227,
-    "functions": 1109,
-    "fn_over_80": 61,
-    "fn_over_120": 32,
-    "files_over_1000_loc": 11,
-    "max_file_loc": 5613,
+    "files": 46,
+    "total_loc": 39368,
+    "functions": 1369,
+    "fn_over_80": 66,
+    "fn_over_120": 34,
+    "files_over_1000_loc": 13,
+    "max_file_loc": 6916,
     "max_file_path": "src/main.rs",
     "max_fn_len": 395,
     "max_fn_name": "extract_json_fenced",
     "max_fn_file": "src/llm.rs"
   },
   "by_file": {
+    "src/ci_monitor.rs": {
+      "loc": 1511,
+      "fn_count": 50,
+      "max_fn_len": 75,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
     "src/config.rs": {
-      "loc": 1320,
-      "fn_count": 84,
+      "loc": 1340,
+      "fn_count": 83,
       "max_fn_len": 92,
       "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/confirm.rs": {
-      "loc": 88,
+      "loc": 96,
       "fn_count": 5,
-      "max_fn_len": 26,
+      "max_fn_len": 28,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/core.rs": {
-      "loc": 1501,
-      "fn_count": 47,
-      "max_fn_len": 184,
+      "loc": 1773,
+      "fn_count": 54,
+      "max_fn_len": 178,
       "fn_over_80": 3,
       "fn_over_120": 1
     },
     "src/db.rs": {
-      "loc": 216,
+      "loc": 222,
       "fn_count": 3,
       "max_fn_len": 53,
       "fn_over_80": 0,
@@ -49,7 +56,7 @@
       "fn_over_120": 0
     },
     "src/doctor.rs": {
-      "loc": 952,
+      "loc": 984,
       "fn_count": 41,
       "max_fn_len": 75,
       "fn_over_80": 0,
@@ -63,11 +70,11 @@
       "fn_over_120": 0
     },
     "src/embeddings.rs": {
-      "loc": 1056,
+      "loc": 1235,
       "fn_count": 16,
       "max_fn_len": 388,
-      "fn_over_80": 3,
-      "fn_over_120": 1
+      "fn_over_80": 5,
+      "fn_over_120": 3
     },
     "src/error.rs": {
       "loc": 45,
@@ -77,30 +84,30 @@
       "fn_over_120": 0
     },
     "src/executor.rs": {
-      "loc": 295,
+      "loc": 308,
       "fn_count": 3,
-      "max_fn_len": 147,
+      "max_fn_len": 156,
       "fn_over_80": 2,
       "fn_over_120": 1
     },
     "src/feature_contract.rs": {
-      "loc": 614,
+      "loc": 621,
       "fn_count": 19,
       "max_fn_len": 167,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
     "src/heartbeat.rs": {
-      "loc": 213,
+      "loc": 218,
       "fn_count": 3,
-      "max_fn_len": 159,
+      "max_fn_len": 164,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
     "src/introspect.rs": {
       "loc": 454,
       "fn_count": 11,
-      "max_fn_len": 241,
+      "max_fn_len": 242,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
@@ -112,72 +119,72 @@
       "fn_over_120": 2
     },
     "src/kpi.rs": {
-      "loc": 840,
-      "fn_count": 29,
-      "max_fn_len": 63,
+      "loc": 1082,
+      "fn_count": 34,
+      "max_fn_len": 67,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/langfuse.rs": {
-      "loc": 294,
-      "fn_count": 14,
+      "loc": 290,
+      "fn_count": 13,
       "max_fn_len": 28,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/llm.rs": {
-      "loc": 2758,
+      "loc": 2787,
       "fn_count": 77,
       "max_fn_len": 395,
       "fn_over_80": 7,
       "fn_over_120": 5
     },
     "src/main.rs": {
-      "loc": 5613,
-      "fn_count": 145,
-      "max_fn_len": 274,
+      "loc": 6916,
+      "fn_count": 194,
+      "max_fn_len": 299,
       "fn_over_80": 11,
       "fn_over_120": 6
     },
     "src/manager.rs": {
-      "loc": 1302,
-      "fn_count": 35,
-      "max_fn_len": 198,
+      "loc": 1982,
+      "fn_count": 64,
+      "max_fn_len": 199,
       "fn_over_80": 5,
       "fn_over_120": 3
     },
     "src/memory.rs": {
-      "loc": 1240,
-      "fn_count": 60,
+      "loc": 1358,
+      "fn_count": 61,
       "max_fn_len": 64,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/mood.rs": {
-      "loc": 183,
+      "loc": 200,
       "fn_count": 9,
-      "max_fn_len": 42,
+      "max_fn_len": 57,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/observer.rs": {
-      "loc": 219,
+      "loc": 222,
       "fn_count": 11,
       "max_fn_len": 56,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ouath.rs": {
-      "loc": 507,
-      "fn_count": 25,
-      "max_fn_len": 76,
+      "loc": 509,
+      "fn_count": 24,
+      "max_fn_len": 77,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/proactive.rs": {
-      "loc": 1007,
-      "fn_count": 21,
-      "max_fn_len": 146,
+      "loc": 1218,
+      "fn_count": 29,
+      "max_fn_len": 159,
       "fn_over_80": 5,
       "fn_over_120": 3
     },
@@ -189,42 +196,49 @@
       "fn_over_120": 0
     },
     "src/pulse.rs": {
-      "loc": 265,
+      "loc": 261,
       "fn_count": 12,
       "max_fn_len": 87,
       "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/randomness.rs": {
-      "loc": 117,
+      "loc": 118,
       "fn_count": 11,
       "max_fn_len": 18,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/scheduler.rs": {
-      "loc": 303,
+      "loc": 305,
       "fn_count": 11,
       "max_fn_len": 61,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
+    "src/secrets.rs": {
+      "loc": 232,
+      "fn_count": 11,
+      "max_fn_len": 32,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
     "src/self_heal.rs": {
-      "loc": 446,
-      "fn_count": 6,
-      "max_fn_len": 116,
+      "loc": 596,
+      "fn_count": 19,
+      "max_fn_len": 114,
       "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/strategy/code.rs": {
-      "loc": 1407,
-      "fn_count": 28,
-      "max_fn_len": 160,
+      "loc": 1528,
+      "fn_count": 32,
+      "max_fn_len": 162,
       "fn_over_80": 6,
       "fn_over_120": 4
     },
     "src/strategy/mod.rs": {
-      "loc": 274,
+      "loc": 278,
       "fn_count": 6,
       "max_fn_len": 134,
       "fn_over_80": 1,
@@ -238,72 +252,86 @@
       "fn_over_120": 1
     },
     "src/telegram.rs": {
-      "loc": 2450,
-      "fn_count": 86,
-      "max_fn_len": 178,
-      "fn_over_80": 2,
+      "loc": 2629,
+      "fn_count": 85,
+      "max_fn_len": 182,
+      "fn_over_80": 5,
       "fn_over_120": 1
     },
     "src/ticket_intake/github.rs": {
-      "loc": 111,
-      "fn_count": 3,
-      "max_fn_len": 48,
+      "loc": 172,
+      "fn_count": 6,
+      "max_fn_len": 50,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ticket_intake/gitlab.rs": {
-      "loc": 109,
-      "fn_count": 4,
-      "max_fn_len": 48,
+      "loc": 172,
+      "fn_count": 7,
+      "max_fn_len": 50,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ticket_intake/jira.rs": {
-      "loc": 182,
-      "fn_count": 5,
-      "max_fn_len": 69,
+      "loc": 297,
+      "fn_count": 7,
+      "max_fn_len": 75,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ticket_intake/linear.rs": {
-      "loc": 192,
-      "fn_count": 4,
-      "max_fn_len": 58,
+      "loc": 319,
+      "fn_count": 10,
+      "max_fn_len": 54,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ticket_intake/mod.rs": {
-      "loc": 132,
+      "loc": 133,
       "fn_count": 1,
-      "max_fn_len": 114,
+      "max_fn_len": 112,
       "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/ticket_intake/provider.rs": {
-      "loc": 119,
-      "fn_count": 5,
-      "max_fn_len": 41,
+      "loc": 139,
+      "fn_count": 7,
+      "max_fn_len": 42,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/ticket_intake/store.rs": {
-      "loc": 62,
-      "fn_count": 4,
-      "max_fn_len": 18,
+      "loc": 122,
+      "fn_count": 5,
+      "max_fn_len": 45,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/ticket_intake/sync.rs": {
+      "loc": 334,
+      "fn_count": 22,
+      "max_fn_len": 66,
+      "fn_over_80": 0,
+      "fn_over_120": 0
+    },
+    "src/ticket_intake/webhook.rs": {
+      "loc": 960,
+      "fn_count": 48,
+      "max_fn_len": 58,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/tool_usage.rs": {
-      "loc": 260,
+      "loc": 264,
       "fn_count": 14,
       "max_fn_len": 31,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
     "src/tools.rs": {
-      "loc": 2744,
+      "loc": 2801,
       "fn_count": 179,
-      "max_fn_len": 103,
+      "max_fn_len": 106,
       "fn_over_80": 3,
       "fn_over_120": 0
     }

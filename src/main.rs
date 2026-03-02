@@ -173,6 +173,42 @@ enum Commands {
         #[command(subcommand)]
         action: KpiAction,
     },
+    /// Render KPI + eval dashboard (markdown/html)
+    Dashboard {
+        /// Product/repo label
+        #[arg(long, default_value = "athena")]
+        repo: String,
+        /// Optional lane filter (delivery | self_improvement)
+        #[arg(long)]
+        lane: Option<String>,
+        /// Optional risk tier filter (low | medium | high)
+        #[arg(long)]
+        risk: Option<String>,
+        /// Eval history JSONL input
+        #[arg(long, default_value = "eval/results/history.jsonl")]
+        history_file: PathBuf,
+        /// Max eval history rows to render
+        #[arg(long, default_value_t = 20)]
+        history_limit: usize,
+        /// Max KPI snapshot rows to render
+        #[arg(long, default_value_t = 20)]
+        kpi_trend_limit: usize,
+        /// Token pricing mapping version
+        #[arg(long, default_value = "v1")]
+        pricing_version: String,
+        /// Max per-task token cost rows to render
+        #[arg(long, default_value_t = 20)]
+        task_cost_limit: usize,
+        /// Minimum samples for stable ghost-comparison label
+        #[arg(long, default_value_t = 3)]
+        ghost_min_samples: usize,
+        /// Dashboard output format
+        #[arg(long, value_enum, default_value_t = DashboardOutputFormat::Auto)]
+        output_format: DashboardOutputFormat,
+        /// Output file path (default depends on --output-format)
+        #[arg(long)]
+        out_file: Option<PathBuf>,
+    },
     /// Execute multi-task feature contracts with DAG dependency ordering
     Feature {
         #[command(subcommand)]
@@ -478,6 +514,14 @@ enum SelfBuildPromoteMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum DashboardOutputFormat {
+    Auto,
+    Markdown,
+    Html,
+}
+
 fn format_epoch(epoch_secs: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_secs, 0)
         .map(|dt| dt.to_rfc3339())
@@ -505,6 +549,42 @@ async fn main() -> anyhow::Result<()> {
     // Handle observe subcommand early — it doesn't need config/db/LLM
     if matches!(cli.command, Some(Commands::Observe)) {
         return run_observe().await;
+    }
+    // Handle dashboard subcommand early — it shells out to the dashboard script
+    // and does not require initializing core, DB, or LLM providers.
+    if let Some(Commands::Dashboard {
+        repo,
+        lane,
+        risk,
+        history_file,
+        history_limit,
+        kpi_trend_limit,
+        pricing_version,
+        task_cost_limit,
+        ghost_min_samples,
+        output_format,
+        out_file,
+    }) = &cli.command
+    {
+        let config_path = cli
+            .config
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("config.toml"));
+        return run_dashboard_command(
+            config_path,
+            repo.clone(),
+            lane.clone(),
+            risk.clone(),
+            history_file.clone(),
+            *history_limit,
+            *kpi_trend_limit,
+            pricing_version.clone(),
+            *task_cost_limit,
+            *ghost_min_samples,
+            *output_format,
+            out_file.clone(),
+        )
+        .await;
     }
 
     match dotenvy::dotenv_override() {
@@ -698,6 +778,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
+        Some(Commands::Dashboard { .. }) => unreachable!(), // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
@@ -718,6 +799,144 @@ fn validate_risk(risk: &str) -> anyhow::Result<()> {
         "low" | "medium" | "high" => Ok(()),
         _ => anyhow::bail!("Invalid risk '{}'. Use: low | medium | high", risk),
     }
+}
+
+fn dashboard_output_format_label(value: DashboardOutputFormat) -> &'static str {
+    match value {
+        DashboardOutputFormat::Auto => "auto",
+        DashboardOutputFormat::Markdown => "markdown",
+        DashboardOutputFormat::Html => "html",
+    }
+}
+
+fn default_dashboard_out_file(output_format: DashboardOutputFormat) -> PathBuf {
+    match output_format {
+        DashboardOutputFormat::Html => PathBuf::from("eval/results/dashboard.html"),
+        _ => PathBuf::from("eval/results/dashboard.md"),
+    }
+}
+
+fn build_dashboard_script_args(
+    script_path: &Path,
+    config_path: &Path,
+    repo: String,
+    lane: Option<String>,
+    risk: Option<String>,
+    history_file: &Path,
+    history_limit: usize,
+    kpi_trend_limit: usize,
+    pricing_version: String,
+    task_cost_limit: usize,
+    ghost_min_samples: usize,
+    output_format: DashboardOutputFormat,
+    out_file: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        script_path.to_string_lossy().to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().to_string(),
+        "--repo".to_string(),
+        repo,
+        "--history-file".to_string(),
+        history_file.to_string_lossy().to_string(),
+        "--history-limit".to_string(),
+        history_limit.to_string(),
+        "--kpi-trend-limit".to_string(),
+        kpi_trend_limit.to_string(),
+        "--pricing-version".to_string(),
+        pricing_version,
+        "--task-cost-limit".to_string(),
+        task_cost_limit.to_string(),
+        "--ghost-min-samples".to_string(),
+        ghost_min_samples.to_string(),
+        "--output-format".to_string(),
+        dashboard_output_format_label(output_format).to_string(),
+        "--out-file".to_string(),
+        out_file.to_string_lossy().to_string(),
+    ];
+    if let Some(lane_value) = lane {
+        args.push("--lane".to_string());
+        args.push(lane_value);
+    }
+    if let Some(risk_value) = risk {
+        args.push("--risk".to_string());
+        args.push(risk_value);
+    }
+    args
+}
+
+async fn run_dashboard_script(cwd: &Path, dashboard_args: &[String]) -> CommandRunResult {
+    let mut run = run_command_capture(cwd, "python3", dashboard_args, 300).await;
+    if run.exit_code.is_none() && !run.timed_out {
+        let stderr = command_combined_output(&run).to_lowercase();
+        if stderr.contains("no such file") || stderr.contains("not found") {
+            run = run_command_capture(cwd, "python", dashboard_args, 300).await;
+        }
+    }
+    run
+}
+
+async fn run_dashboard_command(
+    config_path: PathBuf,
+    repo: String,
+    lane: Option<String>,
+    risk: Option<String>,
+    history_file: PathBuf,
+    history_limit: usize,
+    kpi_trend_limit: usize,
+    pricing_version: String,
+    task_cost_limit: usize,
+    ghost_min_samples: usize,
+    output_format: DashboardOutputFormat,
+    out_file: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    if let Some(ref lane_value) = lane {
+        validate_lane(lane_value)?;
+    }
+    if let Some(ref risk_value) = risk {
+        validate_risk(risk_value)?;
+    }
+
+    let repo_root = resolve_repo_root().await?;
+    let script_path = repo_root.join("scripts").join("eval_dashboard.py");
+    if !script_path.exists() {
+        anyhow::bail!("dashboard script missing at {}", script_path.display());
+    }
+
+    let cwd = std::env::current_dir()?;
+    let out_file = out_file.unwrap_or_else(|| default_dashboard_out_file(output_format));
+    let dashboard_args = build_dashboard_script_args(
+        &script_path,
+        &config_path,
+        repo,
+        lane,
+        risk,
+        &history_file,
+        history_limit,
+        kpi_trend_limit,
+        pricing_version,
+        task_cost_limit,
+        ghost_min_samples,
+        output_format,
+        &out_file,
+    );
+    let run = run_dashboard_script(&cwd, &dashboard_args).await;
+    if !command_succeeded(&run) {
+        anyhow::bail!(
+            "dashboard generation failed: {}",
+            tail_text(&command_combined_output(&run), 600)
+        );
+    }
+
+    let stdout = run.stdout.trim_end();
+    if !stdout.is_empty() {
+        println!("{}", stdout);
+    }
+    let stderr = run.stderr.trim_end();
+    if !stderr.is_empty() {
+        eprintln!("{}", stderr);
+    }
+    Ok(())
 }
 
 fn handle_secrets(action: SecretsAction) -> anyhow::Result<()> {
@@ -5734,13 +5953,13 @@ mod tests {
         append_feature_rollback_commit_policy_context, build_feature_promotion_decision,
         build_feature_run_ledger, build_feature_task_context, build_self_build_review_checklist,
         classify_chat_command, commit_message_contains_tag, compute_feature_outcome_grace_secs,
-        ensure_clean_working_tree, evaluate_self_build_guardrails,
-        feature_batch_configured_parallelism_from_raw, feature_batch_dynamic_parallelism,
-        latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
-        plan_self_build_promotion, pulse_matches_task_id, render_feature_ledger_markdown,
-        resolve_self_build_ci_monitor, rollback_feature_commits, run_feature_verify,
-        track_feature_commits_since, wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus,
-        SelfBuildPromoteMode, WaitForAutonomousOutcome,
+        dashboard_output_format_label, default_dashboard_out_file, ensure_clean_working_tree,
+        evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
+        feature_batch_dynamic_parallelism, latest_eval_gate_status, parse_dispatch_task_id,
+        parse_git_status_paths, plan_self_build_promotion, pulse_matches_task_id,
+        render_feature_ledger_markdown, resolve_self_build_ci_monitor, rollback_feature_commits,
+        run_feature_verify, track_feature_commits_since, wait_for_autonomous_pulse, ChatCommand,
+        DashboardOutputFormat, FeatureRunStatus, SelfBuildPromoteMode, WaitForAutonomousOutcome,
     };
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
@@ -5778,6 +5997,38 @@ mod tests {
         assert_eq!(
             classify_chat_command("please summarize this"),
             ChatCommand::Chat
+        );
+    }
+
+    #[test]
+    fn dashboard_output_format_labels_match_script_values() {
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Auto),
+            "auto"
+        );
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Markdown),
+            "markdown"
+        );
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Html),
+            "html"
+        );
+    }
+
+    #[test]
+    fn dashboard_default_output_file_depends_on_format() {
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Auto),
+            Path::new("eval/results/dashboard.md")
+        );
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Markdown),
+            Path::new("eval/results/dashboard.md")
+        );
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Html),
+            Path::new("eval/results/dashboard.html")
         );
     }
 
