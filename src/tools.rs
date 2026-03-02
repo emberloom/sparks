@@ -533,9 +533,13 @@ impl Tool for GlobTool {
 
 /// Strip HTML tags, decode common entities, and collapse whitespace
 fn strip_html(html: &str) -> String {
-    let re_tags =
-        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|e| panic!("Invalid HTML tag regex: {}", e));
-    let text = re_tags.replace_all(html, "");
+    let text = match regex::Regex::new(r"<[^>]+>") {
+        Ok(re_tags) => re_tags.replace_all(html, "").to_string(),
+        Err(e) => {
+            tracing::error!("Invalid HTML tag regex: {}", e);
+            html.to_string()
+        }
+    };
 
     let text = text
         .replace("&amp;", "&")
@@ -545,10 +549,13 @@ fn strip_html(html: &str) -> String {
         .replace("&#39;", "'")
         .replace("&nbsp;", " ");
 
-    let re_ws =
-        regex::Regex::new(r"\s+").unwrap_or_else(|e| panic!("Invalid whitespace regex: {}", e));
-    let text = re_ws.replace_all(&text, " ");
-    text.trim().to_string()
+    match regex::Regex::new(r"\s+") {
+        Ok(re_ws) => re_ws.replace_all(&text, " ").trim().to_string(),
+        Err(e) => {
+            tracing::error!("Invalid whitespace regex: {}", e);
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+    }
 }
 
 /// Minimal percent-decoding for DuckDuckGo redirect URLs
@@ -756,11 +763,25 @@ impl Tool for WebSearchTool {
 
         // Parse results from DuckDuckGo HTML
         let re_result =
-            regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
-                .unwrap_or_else(|e| panic!("Invalid web result regex: {}", e));
+            match regex::Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#) {
+                Ok(re) => re,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!("web_search: parser regex error: {}", e),
+                    });
+                }
+            };
         let re_snippet =
-            regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#)
-                .unwrap_or_else(|e| panic!("Invalid web snippet regex: {}", e));
+            match regex::Regex::new(r#"class="result__snippet"[^>]*>(.*?)</(?:td|a|span|div)>"#) {
+                Ok(re) => re,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!("web_search: snippet regex error: {}", e),
+                    });
+                }
+            };
 
         let titles: Vec<(&str, &str)> = re_result
             .captures_iter(&body)
