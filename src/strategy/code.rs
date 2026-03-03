@@ -1252,9 +1252,13 @@ fn build_explore_prompt_native(contract: &TaskContract) -> String {
         Some(soul) => format!("{}\n\n", soul),
         None => String::new(),
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     format!(
-        r#"{soul}You are exploring a codebase to prepare for a coding task.
+        r#"{soul}{skill}You are exploring a codebase to prepare for a coding task.
 
 CONTEXT: {context}
 
@@ -1265,6 +1269,7 @@ INSTRUCTIONS:
 - This plan will be passed to a coding agent that will execute it.
 - Be thorough but efficient — you have at most {max_steps} exploration steps."#,
         soul = soul_section,
+        skill = skill_section,
         context = contract.context,
         max_steps = MAX_EXPLORE_STEPS,
     )
@@ -1273,6 +1278,10 @@ INSTRUCTIONS:
 fn build_explore_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String {
     let soul_section = match &contract.soul {
         Some(soul) => format!("{}\n\n", soul),
+        None => String::new(),
+    };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
         None => String::new(),
     };
 
@@ -1289,7 +1298,7 @@ fn build_explore_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String
         .join("\n");
 
     format!(
-        r#"{soul}You are exploring a codebase to prepare for a coding task.
+        r#"{soul}{skill}You are exploring a codebase to prepare for a coding task.
 
 CONTEXT: {context}
 
@@ -1305,6 +1314,7 @@ INSTRUCTIONS:
 - This plan will be passed to a coding CLI agent that will execute it.
 - Be thorough but efficient — you have at most {max_steps} exploration steps."#,
         soul = soul_section,
+        skill = skill_section,
         context = contract.context,
         tools = tool_descs,
         tools_doc = tools_section,
@@ -1334,9 +1344,13 @@ fn build_verify_prompt_native(contract: &TaskContract, exec_result: &str) -> Str
     } else {
         ""
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     format!(
-        r#"You are verifying the result of a coding task.
+        r#"{skill}You are verifying the result of a coding task.
 
 ORIGINAL GOAL: {goal}
 
@@ -1350,6 +1364,7 @@ INSTRUCTIONS:
 - Be concise. Focus on correctness, not style."#,
         goal = contract.goal,
         result = result_display,
+        skill = skill_section,
         test_gen = test_gen_section,
     )
 }
@@ -1395,9 +1410,13 @@ fn build_verify_prompt(
     } else {
         ""
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     format!(
-        r#"You are verifying the result of a coding task.
+        r#"{skill}You are verifying the result of a coding task.
 
 ORIGINAL GOAL: {goal}
 
@@ -1415,6 +1434,7 @@ INSTRUCTIONS:
 - Be concise. Focus on correctness, not style."#,
         goal = contract.goal,
         result = result_display,
+        skill = skill_section,
         tools = tool_descs,
         test_gen = test_gen_section,
     )
@@ -1422,7 +1442,11 @@ INSTRUCTIONS:
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cli_candidate_order, parse_cli_failure_policy, CliFailurePolicy};
+    use super::{
+        build_cli_candidate_order, build_explore_prompt_native, parse_cli_failure_policy,
+        CliFailurePolicy,
+    };
+    use crate::strategy::TaskContract;
 
     #[test]
     fn parse_cli_failure_policy_defaults_for_plain_text() {
@@ -1524,5 +1548,24 @@ mod tests {
                 "opencode".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn build_explore_prompt_native_includes_skill_section_when_present() {
+        let contract = TaskContract {
+            context: "ctx".to_string(),
+            goal: "goal".to_string(),
+            constraints: Vec::new(),
+            soul: None,
+            skill: Some("Always validate assumptions with a quick grep first.".to_string()),
+            tools_doc: None,
+            cli_tool_preference: None,
+            cli_tool_routing_order: Vec::new(),
+            test_generation: false,
+            memory: None,
+        };
+        let prompt = build_explore_prompt_native(&contract);
+        assert!(prompt.contains("PROCEDURAL SKILLS:"));
+        assert!(prompt.contains("quick grep first"));
     }
 }

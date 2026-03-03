@@ -10,6 +10,7 @@ use crate::dynamic_tools;
 use crate::error::{AthenaError, Result};
 use crate::knobs::SharedKnobs;
 use crate::llm::ToolSchema;
+use crate::mcp::{DiscoveredMcpTool, McpRegistry};
 
 const MAX_OUTPUT_LEN: usize = 2000;
 const SEARCH_OUTPUT_LEN: usize = 8000;
@@ -1713,6 +1714,63 @@ impl Tool for GhTool {
     }
 }
 
+struct McpTool {
+    namespaced_name: String,
+    server: String,
+    remote_name: String,
+    description: String,
+    input_schema: Value,
+    requires_confirmation: bool,
+    registry: Arc<McpRegistry>,
+}
+
+impl McpTool {
+    fn from_discovered(discovered: DiscoveredMcpTool, registry: Arc<McpRegistry>) -> Self {
+        Self {
+            namespaced_name: discovered.namespaced_name,
+            server: discovered.server,
+            remote_name: discovered.remote_name,
+            description: discovered.description,
+            input_schema: discovered.input_schema,
+            requires_confirmation: discovered.requires_confirmation,
+            registry,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for McpTool {
+    fn name(&self) -> &str {
+        &self.namespaced_name
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Call MCP tool '{}': {}",
+            self.namespaced_name, self.description
+        )
+    }
+
+    fn needs_confirmation(&self) -> bool {
+        self.requires_confirmation
+    }
+
+    fn parameter_schema(&self) -> Value {
+        self.input_schema.clone()
+    }
+
+    async fn execute(&self, _session: &DockerSession, params: &Value) -> Result<ToolResult> {
+        let result = self
+            .registry
+            .invoke_tool(&self.server, &self.remote_name, params)
+            .await?;
+        Ok(ToolResult {
+            success: result.success,
+            output: truncate(&result.output, SEARCH_OUTPUT_LEN),
+        })
+    }
+}
+
 // ── ManageTools meta-tool ────────────────────────────────────────────
 
 struct ManageToolsTool {
@@ -2004,6 +2062,7 @@ impl ToolRegistry {
     pub fn for_ghost(
         ghost: &GhostConfig,
         dynamic_tools_path: Option<&Path>,
+        mcp_registry: Option<Arc<McpRegistry>>,
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Option<Arc<crate::tool_usage::ToolUsageStore>>,
@@ -2034,6 +2093,15 @@ impl ToolRegistry {
             Box::new(OpenCodeTool::new(&host_workspace, knobs)),
             Box::new(GhTool::new(&host_workspace, github_token)),
         ];
+
+        if let Some(registry) = mcp_registry.as_ref() {
+            let discovered = registry.discovered_tools();
+            if !discovered.is_empty() {
+                all_tools.extend(discovered.into_iter().map(|tool| {
+                    Box::new(McpTool::from_discovered(tool, registry.clone())) as Box<dyn Tool>
+                }));
+            }
+        }
 
         // Load dynamic tools from YAML definitions
         if let Some(path) = dynamic_tools_path {
@@ -2423,11 +2491,32 @@ mod tests {
             description: "test ghost".into(),
             tools: tools.into_iter().map(String::from).collect(),
             mounts: vec![],
+            role: crate::config::GhostRole::Worker,
             strategy: "react".into(),
             soul_file: None,
+            skill_file: None,
+            skill_files: Vec::new(),
             soul: None,
+            skill: None,
             image: None,
         }
+    }
+
+    fn make_mcp_registry() -> Arc<McpRegistry> {
+        McpRegistry::for_tests_with_tools(vec![DiscoveredMcpTool {
+            server: "linear".to_string(),
+            remote_name: "search_docs".to_string(),
+            namespaced_name: "mcp:linear:search_docs".to_string(),
+            description: "Search Linear documents".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }),
+            requires_confirmation: true,
+        }])
     }
 
     #[test]
@@ -2445,7 +2534,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 11);
         assert!(reg.get("codebase_map").is_some());
@@ -2464,7 +2553,7 @@ mod tests {
             "codebase_map",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         let names = reg.tool_names();
         assert_eq!(names.len(), 6);
         assert!(reg.get("codebase_map").is_some());
@@ -2480,7 +2569,7 @@ mod tests {
     #[test]
     fn test_registry_filters_unknown_tools() {
         let ghost = make_ghost(vec!["shell", "nonexistent_tool"]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 1);
         assert!(reg.get("shell").is_some());
         assert!(reg.get("nonexistent_tool").is_none());
@@ -2489,8 +2578,40 @@ mod tests {
     #[test]
     fn test_registry_empty_tools() {
         let ghost = make_ghost(vec![]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 0);
+    }
+
+    #[test]
+    fn test_registry_includes_mcp_tool_when_allowlisted() {
+        let ghost = make_ghost(vec!["shell", "mcp:linear:search_docs"]);
+        let reg = ToolRegistry::for_ghost(
+            &ghost,
+            None,
+            Some(make_mcp_registry()),
+            test_knobs(),
+            None,
+            None,
+        );
+        assert!(reg.get("mcp:linear:search_docs").is_some());
+        assert!(reg
+            .get("mcp:linear:search_docs")
+            .map(|tool| tool.needs_confirmation())
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_registry_filters_mcp_tool_not_allowlisted_by_ghost() {
+        let ghost = make_ghost(vec!["shell"]);
+        let reg = ToolRegistry::for_ghost(
+            &ghost,
+            None,
+            Some(make_mcp_registry()),
+            test_knobs(),
+            None,
+            None,
+        );
+        assert!(reg.get("mcp:linear:search_docs").is_none());
     }
 
     #[test]
@@ -2508,7 +2629,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         assert_eq!(reg.tool_names().len(), 11);
     }
 
@@ -2529,7 +2650,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         // Every registered tool name must match what the tool reports
         for name in reg.tool_names() {
             let tool = reg.get(name).unwrap();
@@ -2552,7 +2673,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         let desc = reg.descriptions();
         assert!(!desc.is_empty());
         // Each tool should have a description line
@@ -2586,7 +2707,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
 
         // No tools require confirmation (Docker sandbox is the safety boundary)
         assert!(!reg.get("file_write").unwrap().needs_confirmation());
@@ -2609,7 +2730,7 @@ mod tests {
     #[test]
     fn test_coding_cli_schemas_require_prompt() {
         let ghost = make_ghost(vec!["claude_code", "codex", "opencode"]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
         let schemas = reg.tool_schemas();
 
         for name in ["claude_code", "codex", "opencode"] {

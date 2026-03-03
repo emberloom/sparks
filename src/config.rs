@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,6 +53,8 @@ pub struct Config {
     pub github: GithubConfig,
     #[serde(default)]
     pub ticket_intake: TicketIntakeConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     #[serde(default)]
     pub prompt_scanner: PromptScannerConfig,
     #[serde(default)]
@@ -785,6 +788,58 @@ pub struct LoopGuardConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mcp_discovery_ttl_secs")]
+    pub discovery_ttl_secs: u64,
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpServerConfig {
+    pub name: String,
+    #[serde(default = "default_mcp_server_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub transport: McpTransport,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_mcp_reconnect_delay_secs")]
+    pub reconnect_delay_secs: u64,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    #[default]
+    Stdio,
+    Sse,
+    Websocket,
+}
+
+impl McpTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Sse => "sse",
+            Self::Websocket => "websocket",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct GhostConfig {
     pub name: String,
     pub description: String,
@@ -792,15 +847,46 @@ pub struct GhostConfig {
     pub tools: Vec<String>,
     #[serde(default)]
     pub mounts: Vec<MountConfig>,
+    #[serde(default)]
+    pub role: GhostRole,
     #[serde(default = "default_strategy")]
     pub strategy: String,
     /// Path to a soul file (markdown identity document)
     pub soul_file: Option<String>,
+    /// Path to a procedural skill file (markdown playbook/heuristics)
+    pub skill_file: Option<String>,
+    /// Additional procedural skill files merged in order.
+    #[serde(default)]
+    pub skill_files: Vec<String>,
     /// Runtime-loaded soul content (not serialized)
     #[serde(skip)]
     pub soul: Option<String>,
+    /// Runtime-loaded skill content (not serialized)
+    #[serde(skip)]
+    pub skill: Option<String>,
     /// Docker image override (uses global docker.image if None)
     pub image: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GhostRole {
+    Coordinator,
+    Coder,
+    Critic,
+    #[default]
+    Worker,
+}
+
+impl GhostRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Coordinator => "coordinator",
+            Self::Coder => "coder",
+            Self::Critic => "critic",
+            Self::Worker => "worker",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -872,6 +958,18 @@ fn default_loop_guard_window_size() -> usize {
 }
 fn default_loop_guard_repeat_threshold() -> usize {
     2
+}
+fn default_mcp_discovery_ttl_secs() -> u64 {
+    60
+}
+fn default_mcp_server_enabled() -> bool {
+    true
+}
+fn default_mcp_timeout_secs() -> u64 {
+    30
+}
+fn default_mcp_reconnect_delay_secs() -> u64 {
+    5
 }
 fn default_strategy() -> String {
     "react".into()
@@ -952,6 +1050,16 @@ impl Default for LoopGuardConfig {
     }
 }
 
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            discovery_ttl_secs: default_mcp_discovery_ttl_secs(),
+            servers: Vec::new(),
+        }
+    }
+}
+
 impl ManagerConfig {
     /// Resolve the dynamic tools directory, expanding ~ to home dir.
     /// Falls back to ~/.athena/dynamic_tools/ if not configured.
@@ -994,6 +1102,7 @@ impl Default for Config {
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
             ticket_intake: TicketIntakeConfig::default(),
+            mcp: McpConfig::default(),
             prompt_scanner: PromptScannerConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
@@ -1014,9 +1123,13 @@ fn default_ghosts() -> Vec<GhostConfig> {
                 container_path: "/workspace".into(),
                 read_only: false,
             }],
+            role: GhostRole::Coder,
             strategy: "react".into(),
             soul_file: None,
+            skill_file: None,
+            skill_files: Vec::new(),
             soul: None,
+            skill: None,
             image: None,
         },
         GhostConfig {
@@ -1029,9 +1142,13 @@ fn default_ghosts() -> Vec<GhostConfig> {
                 container_path: "/workspace".into(),
                 read_only: true,
             }],
+            role: GhostRole::Worker,
             strategy: "react".into(),
             soul_file: None,
+            skill_file: None,
+            skill_files: Vec::new(),
             soul: None,
+            skill: None,
             image: None,
         },
     ]
@@ -1199,6 +1316,7 @@ impl Config {
                 Err(e) => tracing::warn!("Failed to load tools reference {}: {}", path, e),
             }
         }
+        let mut skill_cache: HashMap<String, Option<String>> = HashMap::new();
         for ghost in &mut self.ghosts {
             if let Some(ref path) = ghost.soul_file {
                 match load_soul_file(path) {
@@ -1212,6 +1330,38 @@ impl Config {
                         path,
                         e
                     ),
+                }
+            }
+            let skill_paths =
+                resolve_ghost_skill_paths(ghost.skill_file.as_ref(), &ghost.skill_files);
+            if !skill_paths.is_empty() {
+                let mut loaded_skills: Vec<(String, String)> = Vec::new();
+                for path in skill_paths {
+                    if let Some(cached) = skill_cache.get(&path) {
+                        if let Some(content) = cached {
+                            loaded_skills.push((path, content.clone()));
+                        }
+                        continue;
+                    }
+                    match load_soul_file(&path) {
+                        Ok(content) => {
+                            tracing::info!("Loaded skill for ghost '{}' from {}", ghost.name, path);
+                            skill_cache.insert(path.clone(), Some(content.clone()));
+                            loaded_skills.push((path, content));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to load skill for ghost '{}' from {}: {}",
+                                ghost.name,
+                                path,
+                                e
+                            );
+                            skill_cache.insert(path, None);
+                        }
+                    }
+                }
+                if !loaded_skills.is_empty() {
+                    ghost.skill = Some(compose_ghost_skill_bundle(&loaded_skills));
                 }
             }
         }
@@ -1502,6 +1652,40 @@ pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
     std::fs::read_to_string(&resolved).map_err(|e| format!("{}: {}", resolved.display(), e))
 }
 
+pub fn resolve_ghost_skill_paths(
+    legacy_skill_file: Option<&String>,
+    skill_files: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(path) = legacy_skill_file {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    for path in skill_files {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+pub fn compose_ghost_skill_bundle(skills: &[(String, String)]) -> String {
+    if skills.len() == 1 {
+        return skills[0].1.clone();
+    }
+    skills
+        .iter()
+        .map(|(path, content)| format!("## SKILL: {}\n{}", path, content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn parse_url_host(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed
@@ -1524,7 +1708,7 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, RuntimeProfile};
+    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile};
     use std::path::Path;
 
     #[test]
@@ -1583,6 +1767,37 @@ strategy = "react"
         assert_eq!(config.ghosts[0].name, "custom");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn resolve_ghost_skill_paths_merges_and_deduplicates() {
+        let legacy = Some(&"skills/base.md".to_string());
+        let paths = vec![
+            "skills/base.md".to_string(),
+            "skills/security.md".to_string(),
+            " skills/security.md ".to_string(),
+            "".to_string(),
+        ];
+        let resolved = resolve_ghost_skill_paths(legacy, &paths);
+        assert_eq!(
+            resolved,
+            vec![
+                "skills/base.md".to_string(),
+                "skills/security.md".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_ghost_skill_bundle_adds_headers_for_multi_skill() {
+        let bundle = compose_ghost_skill_bundle(&[
+            ("skills/a.md".to_string(), "alpha".to_string()),
+            ("skills/b.md".to_string(), "beta".to_string()),
+        ]);
+        assert!(bundle.contains("## SKILL: skills/a.md"));
+        assert!(bundle.contains("alpha"));
+        assert!(bundle.contains("## SKILL: skills/b.md"));
+        assert!(bundle.contains("beta"));
     }
 
     fn temp_config_path(prefix: &str) -> String {

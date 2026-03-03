@@ -26,6 +26,8 @@ pub struct TaskContract {
     pub constraints: Vec<String>,
     /// Ghost soul — identity document prepended to the system prompt
     pub soul: Option<String>,
+    /// Ghost skill — procedural heuristics/playbook prepended to the system prompt
+    pub skill: Option<String>,
     /// Tool reference document — detailed usage guide injected into system prompt
     pub tools_doc: Option<String>,
     /// Preferred CLI tool for code strategy (from runtime knob)
@@ -99,9 +101,13 @@ pub async fn try_direct_completion(
         Some(soul) => format!("{}\n\n", soul),
         None => String::new(),
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     let system_prompt = format!(
-        r#"{soul}You have tools available. Determine if you can accomplish the following task directly.
+        r#"{soul}{skill}You have tools available. Determine if you can accomplish the following task directly.
 
 IMPORTANT:
 - Check your available tools FIRST. If a tool can handle the task (e.g., manage_tools for creating/editing dynamic tools, shell for running commands), use it immediately.
@@ -113,6 +119,7 @@ If the task requires writing or modifying source code across multiple files, res
 
 Otherwise, accomplish the task with your tools, then respond with a summary including the result."#,
         soul = soul_section,
+        skill = skill_section,
     );
 
     // Pass ALL tool schemas — no whitelisting

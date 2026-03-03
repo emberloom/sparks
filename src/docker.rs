@@ -598,7 +598,7 @@ mod tests {
         CONTAINER_CARGO_HOME, CONTAINER_RUSTUP_HOME, CONTAINER_TMPDIR, CRATES_INDEX_HASH_ALT,
         CRATES_INDEX_HASH_PRIMARY, HOST_WORKSPACE_ALIAS,
     };
-    use crate::config::{GhostConfig, MountConfig};
+    use crate::config::{GhostConfig, GhostRole, MountConfig};
     use crate::reason_codes;
     use std::path::Path;
 
@@ -612,9 +612,13 @@ mod tests {
                 container_path: "/workspace".to_string(),
                 read_only: false,
             }],
+            role: GhostRole::Worker,
             strategy: "code".to_string(),
             soul_file: None,
+            skill_file: None,
+            skill_files: Vec::new(),
             soul: None,
+            skill: None,
             image: None,
         }
     }
