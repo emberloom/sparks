@@ -822,7 +822,7 @@ fn default_max_tokens() -> u32 {
     4096
 }
 fn default_image() -> String {
-    "rust:1.84-slim".into()
+    "rust:1.93".into()
 }
 fn default_socket_path() -> String {
     "/var/run/docker.sock".into()
@@ -834,7 +834,7 @@ fn default_cpu_quota() -> i64 {
     50_000
 }
 fn default_timeout_secs() -> u64 {
-    120
+    600
 }
 fn default_db_path() -> String {
     "~/.athena/athena.db".into()

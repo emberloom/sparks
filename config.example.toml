@@ -75,12 +75,12 @@ max_tokens = 4096
 # For Rust repos, use a Rust image so cargo/rustc exist inside ghost execution env.
 # Pin images by digest for reproducibility, e.g.:
 # image = "rust@sha256:<digest>"
-image = "rust:1.84-slim"
+image = "rust:1.93"
 socket_path = "/var/run/docker.sock"
 runtime = "runc"
 memory_limit = 268435456
 cpu_quota = 50000
-timeout_secs = 120
+timeout_secs = 600
 
 [db]
 path = "~/.athena/athena.db"

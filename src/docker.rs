@@ -6,10 +6,238 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{HostConfig, Mount, MountTypeEnum};
 use bollard::Docker;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, DockerConfig, GhostConfig};
 use crate::error::{AthenaError, Result};
+use crate::reason_codes;
+
+pub const CONTAINER_MODE: &str = "docker";
+pub const CAP_DROP_ALL: &str = "ALL";
+pub const ROOTFS_READONLY: bool = true;
+pub const NETWORK_MODE_NONE: &str = "none";
+pub const DEFAULT_PIDS_LIMIT: i64 = 256;
+const CONTAINER_PATH: &str =
+    "/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const CONTAINER_TMPDIR: &str = "/tmp";
+const CONTAINER_CARGO_HOME: &str = "/tmp/cargo-home";
+const CONTAINER_RUSTUP_HOME: &str = "/tmp/rustup-home";
+const CRATES_INDEX_HASH_PRIMARY: &str = "index.crates.io-1949cf8c6b5b557f";
+const CRATES_INDEX_HASH_ALT: &str = "index.crates.io-6f17d22bba15001f";
+const LINUX_TARGET_X86_64: &str = "x86_64-unknown-linux-gnu";
+const LINUX_TARGET_AARCH64: &str = "aarch64-unknown-linux-gnu";
+static WARMED_WORKSPACES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn exec_env() -> Vec<String> {
+    vec![
+        format!("PATH={}", CONTAINER_PATH),
+        format!("TMPDIR={}", CONTAINER_TMPDIR),
+        format!("CARGO_HOME={}", CONTAINER_CARGO_HOME),
+        format!("RUSTUP_HOME={}", CONTAINER_RUSTUP_HOME),
+        "CARGO_NET_OFFLINE=true".to_string(),
+        "RUSTUP_SKIP_UPDATE_CHECK=1".to_string(),
+        "RUSTUP_AUTO_INSTALL=0".to_string(),
+        "HOME=/tmp".to_string(),
+    ]
+}
+
+fn exec_shell_prelude() -> String {
+    let tag = reason_codes::reason_tag(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE);
+    format!(
+        "export TMPDIR=\"{tmp}\" CARGO_HOME=\"{cargo}\" RUSTUP_HOME=\"{rustup}\" HOME=/tmp CARGO_NET_OFFLINE=true RUSTUP_SKIP_UPDATE_CHECK=1 RUSTUP_AUTO_INSTALL=0; \
+mkdir -p \"$TMPDIR\" \"$CARGO_HOME\" \"$RUSTUP_HOME\" \"$RUSTUP_HOME/tmp\"; \
+mkdir -p \"$CARGO_HOME/registry\" \"$CARGO_HOME/registry/index\" \"$CARGO_HOME/registry/cache\" \"$CARGO_HOME/registry/src\"; \
+INDEX_SRC=\"\"; \
+if [ -d /usr/local/cargo/registry/index/{idx_primary} ]; then INDEX_SRC=/usr/local/cargo/registry/index/{idx_primary}; \
+elif [ -d /usr/local/cargo/registry/index/{idx_alt} ]; then INDEX_SRC=/usr/local/cargo/registry/index/{idx_alt}; fi; \
+if [ -n \"$INDEX_SRC\" ]; then \
+if [ ! -e \"$CARGO_HOME/registry/index/{idx_primary}\" ]; then ln -s \"$INDEX_SRC\" \"$CARGO_HOME/registry/index/{idx_primary}\"; fi; \
+if [ ! -e \"$CARGO_HOME/registry/index/{idx_alt}\" ]; then ln -s \"$INDEX_SRC\" \"$CARGO_HOME/registry/index/{idx_alt}\"; fi; \
+fi; \
+CACHE_SRC=\"\"; \
+if [ -d /usr/local/cargo/registry/cache/{idx_primary} ]; then CACHE_SRC=/usr/local/cargo/registry/cache/{idx_primary}; \
+elif [ -d /usr/local/cargo/registry/cache/{idx_alt} ]; then CACHE_SRC=/usr/local/cargo/registry/cache/{idx_alt}; fi; \
+if [ -n \"$CACHE_SRC\" ]; then \
+if [ ! -e \"$CARGO_HOME/registry/cache/{idx_primary}\" ]; then ln -s \"$CACHE_SRC\" \"$CARGO_HOME/registry/cache/{idx_primary}\"; fi; \
+if [ ! -e \"$CARGO_HOME/registry/cache/{idx_alt}\" ]; then ln -s \"$CACHE_SRC\" \"$CARGO_HOME/registry/cache/{idx_alt}\"; fi; \
+fi; \
+SRC_SRC=\"\"; \
+if [ -d /usr/local/cargo/registry/src/{idx_primary} ]; then SRC_SRC=/usr/local/cargo/registry/src/{idx_primary}; \
+elif [ -d /usr/local/cargo/registry/src/{idx_alt} ]; then SRC_SRC=/usr/local/cargo/registry/src/{idx_alt}; fi; \
+if [ -n \"$SRC_SRC\" ]; then \
+if [ ! -e \"$CARGO_HOME/registry/src/{idx_primary}\" ]; then ln -s \"$SRC_SRC\" \"$CARGO_HOME/registry/src/{idx_primary}\"; fi; \
+if [ ! -e \"$CARGO_HOME/registry/src/{idx_alt}\" ]; then ln -s \"$SRC_SRC\" \"$CARGO_HOME/registry/src/{idx_alt}\"; fi; \
+fi; \
+if [ -d /usr/local/cargo/git ] && [ ! -e \"$CARGO_HOME/git\" ]; then ln -s /usr/local/cargo/git \"$CARGO_HOME/git\"; fi; \
+TOOLBIN=$(find /usr/local/rustup/toolchains -maxdepth 2 -type d -name bin 2>/dev/null | head -n 1); \
+if [ -n \"$TOOLBIN\" ]; then export PATH=\"$TOOLBIN:$PATH\"; fi; \
+if ! command -v rg >/dev/null 2>&1; then \
+rg() {{ \
+if [ \"$1\" = \"--files\" ]; then \
+shift; \
+if [ \"$#\" -eq 0 ]; then find . -type f; else find \"$@\" -type f; fi; \
+return 0; \
+fi; \
+echo '{tag} ripgrep (rg) is not installed in this ghost image. Fallback supports only `rg --files ...` via `find ... -type f`.' >&2; \
+return 127; \
+}}; \
+fi",
+        tmp = CONTAINER_TMPDIR,
+        cargo = CONTAINER_CARGO_HOME,
+        rustup = CONTAINER_RUSTUP_HOME,
+        idx_primary = CRATES_INDEX_HASH_PRIMARY,
+        idx_alt = CRATES_INDEX_HASH_ALT,
+        tag = tag
+    )
+}
+
+fn wrap_exec_command(cmd: &str) -> String {
+    format!("{}; {}", exec_shell_prelude(), cmd)
+}
+
+fn first_workspace_mount(ghost: &GhostConfig) -> Option<PathBuf> {
+    ghost
+        .mounts
+        .iter()
+        .find(|m| m.container_path == "/workspace")
+        .or_else(|| ghost.mounts.first())
+        .map(|m| PathBuf::from(Config::resolve_mount_path(&m.host_path)))
+}
+
+fn mark_workspace_warm_started(workspace: &Path) -> bool {
+    let key = workspace.to_string_lossy().to_string();
+    let warmed = WARMED_WORKSPACES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warmed.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(key)
+}
+
+fn unmark_workspace_warm(workspace: &Path) {
+    let key = workspace.to_string_lossy().to_string();
+    if let Some(warmed) = WARMED_WORKSPACES.get() {
+        let mut guard = warmed.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(&key);
+    }
+}
+
+fn cargo_fetch_locked(workspace: &Path, target: &str) -> Result<()> {
+    let status = Command::new("cargo")
+        .arg("fetch")
+        .arg("--locked")
+        .arg("--target")
+        .arg(target)
+        .current_dir(workspace)
+        .status()
+        .map_err(|e| {
+            AthenaError::Tool(format!(
+                "Failed to execute cargo fetch for target {} in {}: {}",
+                target,
+                workspace.display(),
+                e
+            ))
+        })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AthenaError::Tool(format!(
+            "cargo fetch failed for target {} in {} with status {}",
+            target,
+            workspace.display(),
+            status
+        )))
+    }
+}
+
+async fn warm_host_cargo_cache(ghost: &GhostConfig) {
+    let Some(workspace) = first_workspace_mount(ghost) else {
+        return;
+    };
+    if !workspace.join("Cargo.toml").exists() {
+        return;
+    }
+    if !mark_workspace_warm_started(&workspace) {
+        return;
+    }
+
+    let workspace_for_fetch = workspace.clone();
+    let fetch_result = tokio::task::spawn_blocking(move || -> Result<()> {
+        tracing::info!(
+            workspace = %workspace_for_fetch.display(),
+            "Warming host cargo registry for offline ghost execution"
+        );
+        let mut success = false;
+        for target in [LINUX_TARGET_X86_64, LINUX_TARGET_AARCH64] {
+            match cargo_fetch_locked(&workspace_for_fetch, target) {
+                Ok(()) => {
+                    success = true;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        workspace = %workspace_for_fetch.display(),
+                        target = target,
+                        error = %err,
+                        "cargo fetch target warm-up failed"
+                    );
+                }
+            }
+        }
+        if success {
+            Ok(())
+        } else {
+            Err(AthenaError::Tool(format!(
+                "Unable to warm cargo registry for linux targets in {}",
+                workspace_for_fetch.display()
+            )))
+        }
+    })
+    .await;
+
+    match fetch_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(
+                workspace = %workspace.display(),
+                error = %err,
+                "Cargo warm-up did not complete; offline container builds may fail"
+            );
+            unmark_workspace_warm(&workspace);
+        }
+        Err(join_err) => {
+            tracing::warn!(
+                workspace = %workspace.display(),
+                error = %join_err,
+                "Cargo warm-up task join error; offline container builds may fail"
+            );
+            unmark_workspace_warm(&workspace);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectiveContainerSecurity {
+    pub container_mode: &'static str,
+    pub caps_dropped: Vec<String>,
+    pub rootfs_readonly: bool,
+    pub network_mode: &'static str,
+    pub pid_limit: i64,
+    pub memory_limit: i64,
+    pub cpu_quota: i64,
+}
+
+pub fn effective_container_security(docker_config: &DockerConfig) -> EffectiveContainerSecurity {
+    EffectiveContainerSecurity {
+        container_mode: CONTAINER_MODE,
+        caps_dropped: vec![CAP_DROP_ALL.to_string()],
+        rootfs_readonly: ROOTFS_READONLY,
+        network_mode: NETWORK_MODE_NONE,
+        pid_limit: DEFAULT_PIDS_LIMIT,
+        memory_limit: docker_config.memory_limit,
+        cpu_quota: docker_config.cpu_quota,
+    }
+}
 
 pub struct DockerSession {
     docker: Docker,
@@ -20,6 +248,8 @@ pub struct DockerSession {
 impl DockerSession {
     /// Create and start a hardened container for a ghost task
     pub async fn new(ghost: &GhostConfig, docker_config: &DockerConfig) -> Result<Self> {
+        warm_host_cargo_cache(ghost).await;
+
         let docker = Docker::connect_with_socket(
             &docker_config.socket_path,
             120,
@@ -68,13 +298,13 @@ impl DockerSession {
 
         let host_config = HostConfig {
             mounts: Some(mounts),
-            readonly_rootfs: Some(true),
-            cap_drop: Some(vec!["ALL".into()]),
+            readonly_rootfs: Some(ROOTFS_READONLY),
+            cap_drop: Some(vec![CAP_DROP_ALL.into()]),
             security_opt: Some(vec!["no-new-privileges:true".into()]),
-            network_mode: Some("none".into()),
+            network_mode: Some(NETWORK_MODE_NONE.into()),
             memory: Some(docker_config.memory_limit),
             cpu_quota: Some(docker_config.cpu_quota),
-            pids_limit: Some(256),
+            pids_limit: Some(DEFAULT_PIDS_LIMIT),
             // Writable /tmp for tools that need scratch space
             tmpfs: Some(HashMap::from([(
                 "/tmp".into(),
@@ -91,15 +321,13 @@ impl DockerSession {
             image: Some(image.to_string()),
             user: Some("65534:65534".into()),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
-            env: Some(vec![
-                "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
-                "CARGO_HOME=/usr/local/cargo".into(),
-                "HOME=/tmp".into(),
-            ]),
+            env: Some(exec_env()),
             working_dir: Some(
-                ghost.mounts.first()
+                ghost
+                    .mounts
+                    .first()
                     .map(|m| m.container_path.clone())
-                    .unwrap_or_else(|| "/".into())
+                    .unwrap_or_else(|| "/".into()),
             ),
             host_config: Some(host_config),
             ..Default::default()
@@ -130,12 +358,14 @@ impl DockerSession {
 
     /// Execute a command in the container, returning combined stdout+stderr
     pub async fn exec(&self, cmd: &str) -> Result<String> {
+        let wrapped_cmd = wrap_exec_command(cmd);
         let exec = self
             .docker
             .create_exec(
                 &self.container_id,
                 CreateExecOptions::<String> {
-                    cmd: Some(vec!["sh".into(), "-c".into(), cmd.into()]),
+                    cmd: Some(vec!["sh".into(), "-c".into(), wrapped_cmd]),
+                    env: Some(exec_env()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()
@@ -200,5 +430,55 @@ impl DockerSession {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        wrap_exec_command, CONTAINER_CARGO_HOME, CONTAINER_RUSTUP_HOME, CONTAINER_TMPDIR,
+        CRATES_INDEX_HASH_ALT, CRATES_INDEX_HASH_PRIMARY,
+    };
+    use crate::reason_codes;
+
+    #[test]
+    fn wrapped_exec_command_sets_writable_rust_env() {
+        let wrapped = wrap_exec_command("cargo check");
+        assert!(wrapped.contains(&format!("TMPDIR=\"{}\"", CONTAINER_TMPDIR)));
+        assert!(wrapped.contains(&format!("CARGO_HOME=\"{}\"", CONTAINER_CARGO_HOME)));
+        assert!(wrapped.contains(&format!("RUSTUP_HOME=\"{}\"", CONTAINER_RUSTUP_HOME)));
+        assert!(wrapped.contains("CARGO_NET_OFFLINE=true"));
+        assert!(wrapped.contains("RUSTUP_SKIP_UPDATE_CHECK=1"));
+        assert!(wrapped.contains("RUSTUP_AUTO_INSTALL=0"));
+        assert!(wrapped.contains("TOOLBIN=$(find /usr/local/rustup/toolchains"));
+        assert!(wrapped.contains("export PATH=\"$TOOLBIN:$PATH\""));
+        assert!(
+            wrapped.contains("mkdir -p \"$CARGO_HOME/registry\" \"$CARGO_HOME/registry/index\"")
+        );
+        assert!(wrapped.contains(&format!(
+            "/usr/local/cargo/registry/index/{}",
+            CRATES_INDEX_HASH_PRIMARY
+        )));
+        assert!(wrapped.contains(&format!(
+            "/usr/local/cargo/registry/index/{}",
+            CRATES_INDEX_HASH_ALT
+        )));
+        assert!(wrapped.contains(
+            "mkdir -p \"$TMPDIR\" \"$CARGO_HOME\" \"$RUSTUP_HOME\" \"$RUSTUP_HOME/tmp\""
+        ));
+    }
+
+    #[test]
+    fn wrapped_exec_command_contains_rg_files_fallback() {
+        let wrapped = wrap_exec_command("rg --files src | wc -l");
+        assert!(wrapped.contains("if [ \"$1\" = \"--files\" ]"));
+        assert!(wrapped.contains("find \"$@\" -type f"));
+    }
+
+    #[test]
+    fn wrapped_exec_command_tags_rg_missing_errors_with_reason_code() {
+        let wrapped = wrap_exec_command("rg foo src");
+        let expected_tag = reason_codes::reason_tag(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE);
+        assert!(wrapped.contains(&expected_tag));
     }
 }

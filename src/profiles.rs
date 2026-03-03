@@ -24,6 +24,27 @@ fn default_strategy() -> String {
     "react".into()
 }
 
+fn is_legacy_rust_image(image: &str) -> bool {
+    image.starts_with("rust:1.84")
+        || image.starts_with("rust:1.85")
+        || image.starts_with("rust:1.86")
+        || image.starts_with("rust:1.87")
+}
+
+fn normalize_profile_image(image: Option<String>, fallback_image: &str) -> Option<String> {
+    match image {
+        Some(img) if is_legacy_rust_image(&img) && fallback_image != img => {
+            tracing::warn!(
+                profile_image = %img,
+                fallback_image = fallback_image,
+                "Normalizing legacy ghost image to configured docker.image (Rust >=1.88 required)"
+            );
+            Some(fallback_image.to_string())
+        }
+        other => other,
+    }
+}
+
 fn home_profile_loading_disabled() -> bool {
     std::env::var("ATHENA_DISABLE_HOME_PROFILES")
         .ok()
@@ -114,7 +135,7 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
                     mounts: profile.mounts,
                     soul_file: profile.soul_file,
                     soul,
-                    image: profile.image,
+                    image: normalize_profile_image(profile.image, &config.docker.image),
                 };
 
                 // Deduplicate: profile overrides config ghost with same name
@@ -138,4 +159,33 @@ fn load_profile(path: &PathBuf) -> Result<GhostProfile> {
         .map_err(|e| AthenaError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
 
     Ok(profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_profile_image;
+
+    #[test]
+    fn normalizes_legacy_rust_184_profile_image() {
+        let normalized = normalize_profile_image(Some("rust:1.84-slim".to_string()), "rust:1.93");
+        assert_eq!(normalized.as_deref(), Some("rust:1.93"));
+    }
+
+    #[test]
+    fn normalizes_legacy_rust_187_profile_image() {
+        let normalized = normalize_profile_image(Some("rust:1.87-slim".to_string()), "rust:1.93");
+        assert_eq!(normalized.as_deref(), Some("rust:1.93"));
+    }
+
+    #[test]
+    fn preserves_non_legacy_profile_image() {
+        let normalized = normalize_profile_image(Some("rust:1.93".to_string()), "rust:1.93");
+        assert_eq!(normalized.as_deref(), Some("rust:1.93"));
+    }
+
+    #[test]
+    fn preserves_missing_profile_image() {
+        let normalized = normalize_profile_image(None, "rust:1.93");
+        assert_eq!(normalized, None);
+    }
 }
