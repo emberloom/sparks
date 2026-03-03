@@ -62,9 +62,11 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProfile {
+    #[serde(alias = "container_strict")]
     #[default]
     Standard,
     LocalOnly,
+    SelfDevTrusted,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -508,6 +510,10 @@ fn default_tolerance() -> f32 {
 pub struct SelfDevConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Trusted repo names allowed to run in host execution mode when
+    /// runtime.profile = "self_dev_trusted".
+    #[serde(default)]
+    pub trusted_repos: Vec<String>,
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval_secs: u64,
     #[serde(default)]
@@ -524,6 +530,7 @@ impl Default for SelfDevConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            trusted_repos: Vec::new(),
             metrics_interval_secs: default_metrics_interval(),
             code_indexer_enabled: false,
             code_indexer_interval_secs: default_code_indexer_interval(),
@@ -1184,13 +1191,27 @@ impl Config {
 
     pub fn runtime_profile_name(&self) -> &'static str {
         match self.runtime.profile {
-            RuntimeProfile::Standard => "standard",
+            RuntimeProfile::Standard => "container_strict",
             RuntimeProfile::LocalOnly => "local_only",
+            RuntimeProfile::SelfDevTrusted => "self_dev_trusted",
         }
     }
 
     pub fn local_only_enabled(&self) -> bool {
         matches!(self.runtime.profile, RuntimeProfile::LocalOnly)
+    }
+
+    pub fn self_dev_trusted_enabled(&self) -> bool {
+        matches!(self.runtime.profile, RuntimeProfile::SelfDevTrusted)
+    }
+
+    pub fn trusted_self_dev_repos(&self) -> Vec<String> {
+        self.self_dev
+            .trusted_repos
+            .iter()
+            .map(|repo| repo.trim().to_ascii_lowercase())
+            .filter(|repo| !repo.is_empty())
+            .collect()
     }
 
     pub fn ollama_url_host(&self) -> Option<String> {
@@ -1456,5 +1477,24 @@ fn is_loopback_host(host: &str) -> bool {
     match host.parse::<IpAddr>() {
         Ok(ip) => ip.is_loopback(),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, RuntimeProfile};
+
+    #[test]
+    fn runtime_profile_name_maps_standard_to_container_strict() {
+        let config = Config::default();
+        assert_eq!(config.runtime_profile_name(), "container_strict");
+    }
+
+    #[test]
+    fn trusted_repo_helpers_normalize_and_match() {
+        let mut config = Config::default();
+        config.runtime.profile = RuntimeProfile::SelfDevTrusted;
+        config.self_dev.trusted_repos = vec![" Athena ".to_string(), "".to_string()];
+        assert_eq!(config.trusted_self_dev_repos(), vec!["athena"]);
     }
 }

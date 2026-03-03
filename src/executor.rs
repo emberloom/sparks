@@ -19,6 +19,8 @@ use crate::tools::ToolRegistry;
 
 pub struct Executor {
     docker_config: DockerConfig,
+    self_dev_trusted_mode: bool,
+    trusted_repos: Vec<String>,
     max_steps: usize,
     sensitive_patterns: SensitivePatterns,
     dynamic_tools_path: Option<PathBuf>,
@@ -33,6 +35,8 @@ pub struct Executor {
 impl Executor {
     pub fn new(
         docker_config: DockerConfig,
+        self_dev_trusted_mode: bool,
+        trusted_repos: Vec<String>,
         max_steps: usize,
         sensitive_patterns: Vec<String>,
         dynamic_tools_path: Option<PathBuf>,
@@ -45,6 +49,8 @@ impl Executor {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
             docker_config,
+            self_dev_trusted_mode,
+            trusted_repos,
             max_steps,
             sensitive_patterns: compiled,
             dynamic_tools_path,
@@ -72,7 +78,12 @@ impl Executor {
         let run_span = trace.map(|t| t.span("ghost_run", Some(&contract.goal)));
 
         // Create session-scoped container
-        let session = DockerSession::new(ghost, &self.docker_config).await?;
+        let trusted_repo_policy = if self.self_dev_trusted_mode {
+            Some(self.trusted_repos.as_slice())
+        } else {
+            None
+        };
+        let session = DockerSession::new(ghost, &self.docker_config, trusted_repo_policy).await?;
         let tools = ToolRegistry::for_ghost(
             ghost,
             self.dynamic_tools_path.as_deref(),

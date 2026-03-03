@@ -3,8 +3,11 @@
 # or `athena secrets set <key>` to store credentials in the OS keyring.
 # Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
 [runtime]
-# Runtime security/deployment profile: "standard" (default) or "local_only"
-profile = "standard"
+# Runtime security/deployment profile:
+# - "container_strict" (default, Docker-isolated execution)
+# - "self_dev_trusted" (trusted host execution only for allowlisted repos)
+# - "local_only" (fully local provider/integration constraints)
+profile = "container_strict"
 
 [llm]
 provider = "openai"
@@ -87,8 +90,18 @@ path = "~/.athena/athena.db"
 
 [manager]
 max_steps = 15
+# For runtime.profile = "self_dev_trusted", recommended:
+# max_steps = 30
 # Sensitive patterns have comprehensive defaults — uncomment to override:
 # sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+
+[self_dev]
+enabled = false
+# Only used when runtime.profile = "self_dev_trusted"
+# trusted_repos = ["athena"]
+# For trusted self-dev workloads, also ensure:
+# [docker]
+# timeout_secs = 600
 
 # Athena's persona — soul file is a freeform markdown identity document
 # loaded at startup and injected as the first section of the manager's system prompt.

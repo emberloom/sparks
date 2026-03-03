@@ -154,6 +154,8 @@ impl Manager {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
         let executor = Executor::new(
             config.docker.clone(),
+            config.self_dev_trusted_enabled(),
+            config.trusted_self_dev_repos(),
             config.manager.max_steps,
             config.manager.sensitive_patterns.clone(),
             dynamic_tools_path.clone(),

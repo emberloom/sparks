@@ -8,7 +8,7 @@ use bollard::Docker;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as StdCommand;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, DockerConfig, GhostConfig};
@@ -16,6 +16,7 @@ use crate::error::{AthenaError, Result};
 use crate::reason_codes;
 
 pub const CONTAINER_MODE: &str = "docker";
+pub const HOST_TRUSTED_MODE: &str = "host_trusted";
 pub const CAP_DROP_ALL: &str = "ALL";
 pub const ROOTFS_READONLY: bool = true;
 pub const NETWORK_MODE_NONE: &str = "none";
@@ -29,6 +30,7 @@ const CRATES_INDEX_HASH_PRIMARY: &str = "index.crates.io-1949cf8c6b5b557f";
 const CRATES_INDEX_HASH_ALT: &str = "index.crates.io-6f17d22bba15001f";
 const LINUX_TARGET_X86_64: &str = "x86_64-unknown-linux-gnu";
 const LINUX_TARGET_AARCH64: &str = "aarch64-unknown-linux-gnu";
+const HOST_WORKSPACE_ALIAS: &str = "/tmp/athena-workspace";
 static WARMED_WORKSPACES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn exec_env() -> Vec<String> {
@@ -98,6 +100,45 @@ fn wrap_exec_command(cmd: &str) -> String {
     format!("{}; {}", exec_shell_prelude(), cmd)
 }
 
+fn shell_single_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "'\\''"))
+}
+
+fn host_exec_shell_prelude(workdir: &Path) -> String {
+    let tag = reason_codes::reason_tag(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE);
+    let workdir_q = shell_single_quote(workdir.to_string_lossy().as_ref());
+    format!(
+        "ATHENA_HOST_WORKSPACE={workdir}; ATHENA_WORKSPACE_ALIAS={alias}; \
+mkdir -p /tmp; ln -sfn \"$ATHENA_HOST_WORKSPACE\" \"$ATHENA_WORKSPACE_ALIAS\"; \
+if ! command -v rg >/dev/null 2>&1; then \
+rg() {{ \
+if [ \"$1\" = \"--files\" ]; then \
+shift; \
+if [ \"$#\" -eq 0 ]; then find . -type f; else find \"$@\" -type f; fi; \
+return 0; \
+fi; \
+echo '{tag} ripgrep (rg) is not installed on host. Fallback supports only `rg --files ...` via `find ... -type f`.' >&2; \
+return 127; \
+}}; \
+fi",
+        workdir = workdir_q,
+        alias = HOST_WORKSPACE_ALIAS,
+        tag = tag
+    )
+}
+
+fn rewrite_workspace_paths_for_host(cmd: &str) -> String {
+    cmd.replace("/workspace", HOST_WORKSPACE_ALIAS)
+}
+
+fn wrap_host_exec_command(workdir: &Path, cmd: &str) -> String {
+    format!(
+        "{}; {}",
+        host_exec_shell_prelude(workdir),
+        rewrite_workspace_paths_for_host(cmd)
+    )
+}
+
 fn first_workspace_mount(ghost: &GhostConfig) -> Option<PathBuf> {
     ghost
         .mounts
@@ -105,6 +146,44 @@ fn first_workspace_mount(ghost: &GhostConfig) -> Option<PathBuf> {
         .find(|m| m.container_path == "/workspace")
         .or_else(|| ghost.mounts.first())
         .map(|m| PathBuf::from(Config::resolve_mount_path(&m.host_path)))
+}
+
+fn normalized_repo_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn workspace_repo_name(workspace: &Path) -> Option<String> {
+    workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalized_repo_token)
+        .filter(|name| !name.is_empty())
+}
+
+fn resolve_trusted_host_workspace(
+    ghost: &GhostConfig,
+    trusted_repos: &[String],
+) -> Option<PathBuf> {
+    if trusted_repos.is_empty() {
+        return None;
+    }
+
+    let trusted = trusted_repos
+        .iter()
+        .map(|repo| normalized_repo_token(repo))
+        .filter(|repo| !repo.is_empty())
+        .collect::<HashSet<_>>();
+    if trusted.is_empty() {
+        return None;
+    }
+
+    let mount = first_workspace_mount(ghost)?;
+    let repo_name = workspace_repo_name(&mount)?;
+    if !trusted.contains(&repo_name) {
+        return None;
+    }
+
+    mount.exists().then_some(mount)
 }
 
 fn mark_workspace_warm_started(workspace: &Path) -> bool {
@@ -123,7 +202,7 @@ fn unmark_workspace_warm(workspace: &Path) {
 }
 
 fn cargo_fetch_locked(workspace: &Path, target: &str) -> Result<()> {
-    let status = Command::new("cargo")
+    let status = StdCommand::new("cargo")
         .arg("fetch")
         .arg("--locked")
         .arg("--target")
@@ -239,16 +318,45 @@ pub fn effective_container_security(docker_config: &DockerConfig) -> EffectiveCo
     }
 }
 
+enum SessionBackend {
+    Container {
+        docker: Docker,
+        container_id: String,
+    },
+    Host {
+        workspace: PathBuf,
+    },
+}
+
 pub struct DockerSession {
-    docker: Docker,
-    container_id: String,
+    backend: SessionBackend,
     timeout_secs: u64,
 }
 
 impl DockerSession {
-    /// Create and start a hardened container for a ghost task
-    pub async fn new(ghost: &GhostConfig, docker_config: &DockerConfig) -> Result<Self> {
+    /// Create and start a hardened execution session.
+    /// Uses Docker by default; when `trusted_host_repos` is provided and the
+    /// mounted workspace repo is allowlisted, uses trusted host execution mode.
+    pub async fn new(
+        ghost: &GhostConfig,
+        docker_config: &DockerConfig,
+        trusted_host_repos: Option<&[String]>,
+    ) -> Result<Self> {
         warm_host_cargo_cache(ghost).await;
+
+        if let Some(trusted_repos) = trusted_host_repos {
+            if let Some(workspace) = resolve_trusted_host_workspace(ghost, trusted_repos) {
+                tracing::warn!(
+                    ghost = %ghost.name,
+                    workspace = %workspace.display(),
+                    "Using trusted host execution mode"
+                );
+                return Ok(Self {
+                    backend: SessionBackend::Host { workspace },
+                    timeout_secs: docker_config.timeout_secs,
+                });
+            }
+        }
 
         let docker = Docker::connect_with_socket(
             &docker_config.socket_path,
@@ -350,37 +458,56 @@ impl DockerSession {
         tracing::info!(container_id = %resp.id, ghost = %ghost.name, "Container started");
 
         Ok(Self {
-            docker,
-            container_id: resp.id,
+            backend: SessionBackend::Container {
+                docker,
+                container_id: resp.id,
+            },
             timeout_secs: docker_config.timeout_secs,
         })
     }
 
-    /// Execute a command in the container, returning combined stdout+stderr
+    pub fn execution_mode(&self) -> &'static str {
+        match self.backend {
+            SessionBackend::Container { .. } => CONTAINER_MODE,
+            SessionBackend::Host { .. } => HOST_TRUSTED_MODE,
+        }
+    }
+
+    /// Execute a command, returning combined stdout+stderr
     pub async fn exec(&self, cmd: &str) -> Result<String> {
-        let wrapped_cmd = wrap_exec_command(cmd);
-        let exec = self
-            .docker
-            .create_exec(
-                &self.container_id,
-                CreateExecOptions::<String> {
-                    cmd: Some(vec!["sh".into(), "-c".into(), wrapped_cmd]),
-                    env: Some(exec_env()),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        match &self.backend {
+            SessionBackend::Container {
+                docker,
+                container_id,
+            } => {
+                let wrapped_cmd = wrap_exec_command(cmd);
+                let exec = docker
+                    .create_exec(
+                        container_id,
+                        CreateExecOptions::<String> {
+                            cmd: Some(vec!["sh".into(), "-c".into(), wrapped_cmd]),
+                            env: Some(exec_env()),
+                            attach_stdout: Some(true),
+                            attach_stderr: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            self.collect_exec_output(&exec.id),
-        )
-        .await
-        .map_err(|_| AthenaError::Timeout(self.timeout_secs))??;
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs(self.timeout_secs),
+                    self.collect_exec_output(docker, &exec.id),
+                )
+                .await
+                .map_err(|_| AthenaError::Timeout(self.timeout_secs))??;
 
-        Ok(output)
+                Ok(output)
+            }
+            SessionBackend::Host { workspace } => {
+                let wrapped_cmd = wrap_host_exec_command(workspace, cmd);
+                self.exec_host(workspace, &wrapped_cmd).await
+            }
+        }
     }
 
     /// Execute a command with stdin input (for file writes)
@@ -392,8 +519,8 @@ impl DockerSession {
         self.exec(&full_cmd).await
     }
 
-    async fn collect_exec_output(&self, exec_id: &str) -> Result<String> {
-        let start_result = self.docker.start_exec(exec_id, None).await?;
+    async fn collect_exec_output(&self, docker: &Docker, exec_id: &str) -> Result<String> {
+        let start_result = docker.start_exec(exec_id, None).await?;
 
         let mut output = String::new();
         if let StartExecResults::Attached {
@@ -409,37 +536,80 @@ impl DockerSession {
         Ok(output)
     }
 
-    /// Kill and remove the container
+    async fn exec_host(&self, workspace: &Path, cmd: &str) -> Result<String> {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(cmd).current_dir(workspace);
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            command.output(),
+        )
+        .await
+        .map_err(|_| AthenaError::Timeout(self.timeout_secs))?
+        .map_err(|e| AthenaError::Tool(format!("host execution failed: {}", e)))?;
+
+        let mut combined = String::new();
+        combined.push_str(&String::from_utf8_lossy(&output.stdout));
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok(combined)
+    }
+
+    /// Kill and remove the container (no-op for trusted host mode)
     pub async fn close(self) -> Result<()> {
-        tracing::info!(container_id = %self.container_id, "Closing container");
+        match self.backend {
+            SessionBackend::Container {
+                docker,
+                container_id,
+            } => {
+                tracing::info!(container_id = %container_id, "Closing container");
 
-        // Kill if running (ignore errors — may already be stopped)
-        let _ = self
-            .docker
-            .kill_container::<&str>(&self.container_id, None)
-            .await;
+                // Kill if running (ignore errors — may already be stopped)
+                let _ = docker.kill_container::<&str>(&container_id, None).await;
 
-        self.docker
-            .remove_container(
-                &self.container_id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+                docker
+                    .remove_container(
+                        &container_id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await?;
 
-        Ok(())
+                Ok(())
+            }
+            SessionBackend::Host { .. } => Ok(()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        wrap_exec_command, CONTAINER_CARGO_HOME, CONTAINER_RUSTUP_HOME, CONTAINER_TMPDIR,
-        CRATES_INDEX_HASH_ALT, CRATES_INDEX_HASH_PRIMARY,
+        resolve_trusted_host_workspace, rewrite_workspace_paths_for_host, wrap_exec_command,
+        CONTAINER_CARGO_HOME, CONTAINER_RUSTUP_HOME, CONTAINER_TMPDIR, CRATES_INDEX_HASH_ALT,
+        CRATES_INDEX_HASH_PRIMARY, HOST_WORKSPACE_ALIAS,
     };
+    use crate::config::{GhostConfig, MountConfig};
     use crate::reason_codes;
+    use std::path::Path;
+
+    fn make_ghost(host_path: &str) -> GhostConfig {
+        GhostConfig {
+            name: "coder".to_string(),
+            description: "test".to_string(),
+            tools: vec!["shell".to_string()],
+            mounts: vec![MountConfig {
+                host_path: host_path.to_string(),
+                container_path: "/workspace".to_string(),
+                read_only: false,
+            }],
+            strategy: "code".to_string(),
+            soul_file: None,
+            soul: None,
+            image: None,
+        }
+    }
 
     #[test]
     fn wrapped_exec_command_sets_writable_rust_env() {
@@ -480,5 +650,35 @@ mod tests {
         let wrapped = wrap_exec_command("rg foo src");
         let expected_tag = reason_codes::reason_tag(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE);
         assert!(wrapped.contains(&expected_tag));
+    }
+
+    #[test]
+    fn rewrite_workspace_paths_for_host_maps_container_workspace_alias() {
+        let cmd = "cat /workspace/src/main.rs && ls /workspace";
+        let rewritten = rewrite_workspace_paths_for_host(cmd);
+        assert!(rewritten.contains(HOST_WORKSPACE_ALIAS));
+        assert!(!rewritten.contains("/workspace"));
+    }
+
+    #[test]
+    fn trusted_host_workspace_resolution_matches_repo_name() {
+        let workspace = std::env::current_dir()
+            .ok()
+            .and_then(|dir| {
+                dir.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "athena".to_string());
+        let ghost = make_ghost(".");
+        let trusted = vec![workspace.to_ascii_lowercase()];
+        let resolved = resolve_trusted_host_workspace(&ghost, &trusted);
+        assert!(resolved.as_deref().map(Path::exists).unwrap_or(false));
+    }
+
+    #[test]
+    fn trusted_host_workspace_resolution_rejects_untrusted_repo() {
+        let ghost = make_ghost(".");
+        let trusted = vec!["different-repo".to_string()];
+        assert!(resolve_trusted_host_workspace(&ghost, &trusted).is_none());
     }
 }

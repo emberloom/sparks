@@ -8,6 +8,7 @@ use crate::config::{self, Config};
 use crate::docker;
 use crate::knobs;
 use crate::profiles;
+use crate::reason_codes;
 use crate::secrets;
 use crate::tool_usage::ToolUsageStore;
 use crate::tools;
@@ -158,6 +159,84 @@ struct SecurityContext {
     container: docker::EffectiveContainerSecurity,
     valid_sensitive_patterns: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostCompilePreflight {
+    pub reason_code: Option<&'static str>,
+    pub detail: String,
+    pub remediation: Option<String>,
+    pub rg_available: bool,
+}
+
+impl GhostCompilePreflight {
+    pub fn is_ok(&self) -> bool {
+        self.reason_code.is_none()
+    }
+
+    pub fn failure_message(&self, ghost_name: &str) -> Option<String> {
+        let reason = self.reason_code?;
+        let mut message = reason_codes::with_reason(
+            reason,
+            format!(
+                "Ghost '{}' compile/runtime preflight failed: {}",
+                ghost_name, self.detail
+            ),
+        );
+        if let Some(remediation) = &self.remediation {
+            message.push_str(&format!(" Remediation: {}", remediation));
+        }
+        Some(message)
+    }
+
+    pub fn rg_fallback_message(&self, ghost_name: &str) -> Option<String> {
+        if self.is_ok() && !self.rg_available {
+            Some(format!(
+                "Ghost '{}' does not provide ripgrep (`rg`). `rg --files ...` will use `find ... -type f`; other rg patterns fail fast with a reason tag.",
+                ghost_name
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompileRuntimeProbe {
+    missing_bins: Vec<String>,
+    write_fail_paths: Vec<String>,
+    cargo_version: Option<String>,
+    rg_available: bool,
+}
+
+const COMPILE_RUNTIME_PROBE_CMD: &str = r#"
+for bin in sh cargo; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "__ATHENA_MISSING_BIN__:$bin"
+  fi
+done
+if command -v cargo >/dev/null 2>&1; then
+  cargo --version 2>/dev/null | sed 's/^/__ATHENA_CARGO_VERSION__:/'
+fi
+if command -v rg >/dev/null 2>&1; then
+  echo "__ATHENA_RG__:1"
+else
+  echo "__ATHENA_RG__:0"
+fi
+for dir in "${TMPDIR:-/tmp}" "${CARGO_HOME:-/tmp/cargo-home}" "${RUSTUP_HOME:-/tmp/rustup-home}" "${RUSTUP_HOME:-/tmp/rustup-home}/tmp"; do
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "__ATHENA_WRITE_FAIL__:$dir"
+    continue
+  fi
+  probe="$dir/.athena-write-probe.$$"
+  if ! ( : > "$probe" ) 2>/dev/null; then
+    echo "__ATHENA_WRITE_FAIL__:$dir"
+    continue
+  fi
+  rm -f "$probe" 2>/dev/null || true
+done
+"#;
+const SELF_DEV_TRUSTED_MIN_TIMEOUT_SECS: u64 = 600;
+const SELF_DEV_TRUSTED_MIN_MAX_STEPS: usize = 30;
 
 struct DoctorSnapshot {
     db_path: PathBuf,
@@ -1142,8 +1221,307 @@ async fn local_only_ollama_reachability_check(config: &Config, skip_llm: bool) -
     }
 }
 
+fn self_dev_trusted_not_selected(stage: &'static str, detail: String) -> CheckItem {
+    CheckItem {
+        stage,
+        status: CheckStatus::Pass,
+        detail,
+        fix: None,
+    }
+}
+
+fn self_dev_runtime_profile_check(config: &Config) -> CheckItem {
+    let profile = config.runtime_profile_name();
+    CheckItem {
+        stage: "Self-dev runtime profile",
+        status: CheckStatus::Pass,
+        detail: if config.self_dev_trusted_enabled() {
+            format!(
+                "runtime.profile={profile} (trusted host execution allowed for allowlisted repos)"
+            )
+        } else {
+            format!("runtime.profile={profile} (container isolation remains enforced)")
+        },
+        fix: (!config.self_dev_trusted_enabled()).then(|| {
+            "Set `[runtime].profile = \"self_dev_trusted\"` to allow trusted host execution."
+                .to_string()
+        }),
+    }
+}
+
+fn self_dev_trusted_enablement_check(config: &Config) -> CheckItem {
+    if !config.self_dev_trusted_enabled() {
+        return self_dev_trusted_not_selected(
+            "Trusted mode enablement",
+            "runtime.profile != self_dev_trusted".to_string(),
+        );
+    }
+
+    CheckItem {
+        stage: "Trusted mode enablement",
+        status: if config.self_dev.enabled {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: format!("self_dev.enabled={}", config.self_dev.enabled),
+        fix: (!config.self_dev.enabled)
+            .then(|| "Set `[self_dev].enabled = true` for trusted self-dev mode.".to_string()),
+    }
+}
+
+fn self_dev_trusted_repo_allowlist_check(config: &Config) -> CheckItem {
+    if !config.self_dev_trusted_enabled() {
+        return self_dev_trusted_not_selected(
+            "Trusted repo allowlist",
+            "runtime.profile != self_dev_trusted".to_string(),
+        );
+    }
+
+    let repos = config.trusted_self_dev_repos();
+    CheckItem {
+        stage: "Trusted repo allowlist",
+        status: if repos.is_empty() {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Pass
+        },
+        detail: if repos.is_empty() {
+            reason_codes::with_reason(
+                reason_codes::REASON_SELF_DEV_MODE_RESTRICTION,
+                "self_dev.trusted_repos is empty",
+            )
+        } else {
+            format!("trusted repos: {}", repos.join(", "))
+        },
+        fix: repos.is_empty().then(|| {
+            "Set `[self_dev].trusted_repos = [\"athena\"]` (or your trusted repo names)."
+                .to_string()
+        }),
+    }
+}
+
+fn self_dev_trusted_budget_check(config: &Config) -> CheckItem {
+    if !config.self_dev_trusted_enabled() {
+        return self_dev_trusted_not_selected(
+            "Self-dev execution budgets",
+            format!(
+                "runtime.profile != self_dev_trusted (timeout={}s max_steps={})",
+                config.docker.timeout_secs, config.manager.max_steps
+            ),
+        );
+    }
+
+    let timeout_ok = config.docker.timeout_secs >= SELF_DEV_TRUSTED_MIN_TIMEOUT_SECS;
+    let steps_ok = config.manager.max_steps >= SELF_DEV_TRUSTED_MIN_MAX_STEPS;
+    let budgets_ok = timeout_ok && steps_ok;
+
+    CheckItem {
+        stage: "Self-dev execution budgets",
+        status: if budgets_ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: format!(
+            "docker.timeout_secs={} (min {}) manager.max_steps={} (min {})",
+            config.docker.timeout_secs,
+            SELF_DEV_TRUSTED_MIN_TIMEOUT_SECS,
+            config.manager.max_steps,
+            SELF_DEV_TRUSTED_MIN_MAX_STEPS
+        ),
+        fix: (!budgets_ok).then(|| {
+            format!(
+                "Set `[docker].timeout_secs >= {}` and `[manager].max_steps >= {}` for trusted self-dev workloads.",
+                SELF_DEV_TRUSTED_MIN_TIMEOUT_SECS, SELF_DEV_TRUSTED_MIN_MAX_STEPS
+            )
+        }),
+    }
+}
+
+async fn self_dev_trusted_compile_preflight_check(
+    config: &Config,
+    snap: &DoctorSnapshot,
+) -> CheckItem {
+    if !config.self_dev_trusted_enabled() {
+        return self_dev_trusted_not_selected(
+            "Trusted compile preflight",
+            "runtime.profile != self_dev_trusted".to_string(),
+        );
+    }
+
+    let Some(coder) = snap.coder.as_ref() else {
+        return CheckItem {
+            stage: "Trusted compile preflight",
+            status: CheckStatus::Fail,
+            detail: "coder ghost is missing".to_string(),
+            fix: Some("Configure a `coder` ghost for trusted self-dev workflows.".to_string()),
+        };
+    };
+
+    let preflight = run_ghost_compile_preflight(config, coder).await;
+    match preflight.reason_code {
+        None => CheckItem {
+            stage: "Trusted compile preflight",
+            status: CheckStatus::Pass,
+            detail: preflight.detail,
+            fix: None,
+        },
+        Some(_) => CheckItem {
+            stage: "Trusted compile preflight",
+            status: CheckStatus::Fail,
+            detail: preflight.detail,
+            fix: preflight.remediation,
+        },
+    }
+}
+
+async fn build_self_dev_runtime_funnel(config: &Config, snap: &DoctorSnapshot) -> FunnelReport {
+    let mut checks = Vec::new();
+    checks.push(self_dev_runtime_profile_check(config));
+    checks.push(self_dev_trusted_enablement_check(config));
+    checks.push(self_dev_trusted_repo_allowlist_check(config));
+    checks.push(self_dev_trusted_budget_check(config));
+    checks.push(self_dev_trusted_compile_preflight_check(config, snap).await);
+
+    FunnelReport {
+        name: "Funnel 6: Self-Dev Runtime Mode Readiness",
+        checks,
+    }
+}
+
 fn is_local_path(path: &str) -> bool {
     !path.contains("://")
+}
+
+fn parse_compile_runtime_probe(output: &str) -> CompileRuntimeProbe {
+    let mut probe = CompileRuntimeProbe::default();
+
+    for line in output.lines().map(str::trim) {
+        if let Some(bin) = line.strip_prefix("__ATHENA_MISSING_BIN__:") {
+            if !bin.is_empty() {
+                probe.missing_bins.push(bin.to_string());
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("__ATHENA_WRITE_FAIL__:") {
+            if !path.is_empty() {
+                probe.write_fail_paths.push(path.to_string());
+            }
+            continue;
+        }
+        if let Some(version) = line.strip_prefix("__ATHENA_CARGO_VERSION__:") {
+            let trimmed = version.trim();
+            if !trimmed.is_empty() {
+                probe.cargo_version = Some(trimmed.to_string());
+            }
+            continue;
+        }
+        if let Some(flag) = line.strip_prefix("__ATHENA_RG__:") {
+            probe.rg_available = flag.trim() == "1";
+        }
+    }
+
+    probe
+}
+
+fn evaluate_compile_runtime_probe(probe: CompileRuntimeProbe) -> GhostCompilePreflight {
+    if !probe.missing_bins.is_empty() {
+        return GhostCompilePreflight {
+            reason_code: Some(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE),
+            detail: format!(
+                "required tools missing in ghost container: {}",
+                probe.missing_bins.join(", ")
+            ),
+            remediation: Some(
+                "Use a ghost image that includes `/bin/sh` and Rust toolchain binaries (cargo/rustc)."
+                    .to_string(),
+            ),
+            rg_available: probe.rg_available,
+        };
+    }
+
+    if !probe.write_fail_paths.is_empty() {
+        return GhostCompilePreflight {
+            reason_code: Some(reason_codes::REASON_GHOST_RUST_TEMP_UNWRITABLE),
+            detail: format!(
+                "unwritable runtime dirs detected: {}",
+                probe.write_fail_paths.join(", ")
+            ),
+            remediation: Some(
+                "Configure writable TMPDIR/CARGO_HOME/RUSTUP_HOME paths in the ghost runtime (for example under /tmp)."
+                    .to_string(),
+            ),
+            rg_available: probe.rg_available,
+        };
+    }
+
+    let cargo_version = probe
+        .cargo_version
+        .unwrap_or_else(|| "cargo detected (version unavailable)".to_string());
+    let rg_status = if probe.rg_available {
+        "rg available".to_string()
+    } else {
+        "rg missing (fallback enabled for `rg --files`)".to_string()
+    };
+
+    GhostCompilePreflight {
+        reason_code: None,
+        detail: format!(
+            "{cargo_version}; writable TMPDIR/CARGO_HOME/RUSTUP_HOME confirmed; {rg_status}"
+        ),
+        remediation: None,
+        rg_available: probe.rg_available,
+    }
+}
+
+pub async fn run_ghost_compile_preflight(
+    config: &Config,
+    ghost: &config::GhostConfig,
+) -> GhostCompilePreflight {
+    let trusted_repos = config.trusted_self_dev_repos();
+    let trusted_policy = if config.self_dev_trusted_enabled() {
+        Some(trusted_repos.as_slice())
+    } else {
+        None
+    };
+    let session = match docker::DockerSession::new(ghost, &config.docker, trusted_policy).await {
+        Ok(session) => session,
+        Err(e) => {
+            return GhostCompilePreflight {
+                reason_code: Some(reason_codes::REASON_GHOST_RUNTIME_CAPABILITY_MISMATCH),
+                detail: format!("failed to start ghost runtime session: {}", e),
+                remediation: Some(
+                    "Fix ghost runtime configuration (container or trusted host mode), then rerun dispatch."
+                        .to_string(),
+                ),
+                rg_available: false,
+            };
+        }
+    };
+
+    let mode = session.execution_mode().to_string();
+    let probe = session.exec(COMPILE_RUNTIME_PROBE_CMD).await;
+    if let Err(e) = session.close().await {
+        tracing::warn!("Failed to close compile preflight container: {}", e);
+    }
+
+    match probe {
+        Ok(output) => {
+            let mut result = evaluate_compile_runtime_probe(parse_compile_runtime_probe(&output));
+            result.detail = format!("mode={}; {}", mode, result.detail);
+            result
+        }
+        Err(e) => GhostCompilePreflight {
+            reason_code: Some(reason_codes::REASON_GHOST_RUNTIME_CAPABILITY_MISMATCH),
+            detail: format!("compile runtime probe failed: {}", e),
+            remediation: Some(
+                "Fix ghost runtime startup/exec settings and rerun `athena doctor --ci`."
+                    .to_string(),
+            ),
+            rg_available: false,
+        },
+    }
 }
 
 fn needs_cargo_check(snap: &DoctorSnapshot) -> bool {
@@ -1165,46 +1543,19 @@ async fn run_cargo_check(config: &Config, snap: &DoctorSnapshot) -> CheckItem {
         };
     };
 
-    let session = match docker::DockerSession::new(coder, &config.docker).await {
-        Ok(s) => s,
-        Err(e) => {
-            return CheckItem {
-                stage: "Rust toolchain in execution env",
-                status: CheckStatus::Fail,
-                detail: format!("failed to start coder container: {}", e),
-                fix: Some(
-                    "Ensure Docker daemon is running and configured image exists locally/pullable."
-                        .to_string(),
-                ),
-            };
-        }
-    };
-
-    let probe = session
-        .exec("if command -v cargo >/dev/null 2>&1; then cargo --version; else echo __ATHENA_CARGO_MISSING__; fi")
-        .await;
-    let _ = session.close().await;
-
-    match probe {
-        Ok(output) if !output.contains("__ATHENA_CARGO_MISSING__") => CheckItem {
+    let preflight = run_ghost_compile_preflight(config, coder).await;
+    match preflight.reason_code {
+        None => CheckItem {
             stage: "Rust toolchain in execution env",
             status: CheckStatus::Pass,
-            detail: output.trim().to_string(),
+            detail: preflight.detail,
             fix: None,
         },
-        Ok(_) => CheckItem {
+        Some(_) => CheckItem {
             stage: "Rust toolchain in execution env",
             status: CheckStatus::Fail,
-            detail: "cargo is missing inside coder container".to_string(),
-            fix: Some(
-                "Set `[docker].image` or `coder.image` to a Rust image (e.g. `rust:1.84-slim`) and ensure PATH includes `/usr/local/cargo/bin`.".to_string(),
-            ),
-        },
-        Err(e) => CheckItem {
-            stage: "Rust toolchain in execution env",
-            status: CheckStatus::Fail,
-            detail: format!("cargo probe failed: {}", e),
-            fix: Some("Fix container startup/image issues, then re-run `athena doctor`.".to_string()),
+            detail: preflight.detail,
+            fix: preflight.remediation,
         },
     }
 }
@@ -1635,13 +1986,15 @@ async fn build_funnel_reports(
     llm: &LlmHealth,
     skip_llm: bool,
 ) -> Vec<FunnelReport> {
-    vec![
+    let mut reports = vec![
         build_funnel1(config, snap, llm),
         build_funnel2(config, snap, llm),
         build_funnel3(config, snap, llm),
         build_funnel4(config, snap, llm).await,
         build_local_only_funnel(config, skip_llm).await,
-    ]
+    ];
+    reports.push(build_self_dev_runtime_funnel(config, snap).await);
+    reports
 }
 
 fn render_funnel_report(
@@ -1760,6 +2113,77 @@ mod tests {
     }
 
     #[test]
+    fn parse_compile_runtime_probe_reads_capability_markers() {
+        let out = "\
+__ATHENA_CARGO_VERSION__:cargo 1.88.0\n\
+__ATHENA_RG__:0\n\
+__ATHENA_WRITE_FAIL__:/tmp/cargo-home\n\
+__ATHENA_MISSING_BIN__:cargo\n";
+        let probe = parse_compile_runtime_probe(out);
+        assert_eq!(probe.cargo_version.as_deref(), Some("cargo 1.88.0"));
+        assert!(!probe.rg_available);
+        assert_eq!(probe.write_fail_paths, vec!["/tmp/cargo-home".to_string()]);
+        assert_eq!(probe.missing_bins, vec!["cargo".to_string()]);
+    }
+
+    #[test]
+    fn evaluate_compile_runtime_probe_allows_missing_rg_with_fallback() {
+        let probe = CompileRuntimeProbe {
+            missing_bins: vec![],
+            write_fail_paths: vec![],
+            cargo_version: Some("cargo 1.88.0".to_string()),
+            rg_available: false,
+        };
+        let result = evaluate_compile_runtime_probe(probe);
+        assert!(result.is_ok());
+        assert!(!result.rg_available);
+        assert!(result.detail.contains("fallback enabled"));
+    }
+
+    #[test]
+    fn evaluate_compile_runtime_probe_flags_missing_required_tools() {
+        let probe = CompileRuntimeProbe {
+            missing_bins: vec!["cargo".to_string()],
+            write_fail_paths: vec![],
+            cargo_version: None,
+            rg_available: true,
+        };
+        let result = evaluate_compile_runtime_probe(probe);
+        assert_eq!(
+            result.reason_code,
+            Some(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE)
+        );
+    }
+
+    #[test]
+    fn evaluate_compile_runtime_probe_flags_unwritable_temp_dirs() {
+        let probe = CompileRuntimeProbe {
+            missing_bins: vec![],
+            write_fail_paths: vec!["/tmp/rustup-home/tmp".to_string()],
+            cargo_version: Some("cargo 1.88.0".to_string()),
+            rg_available: true,
+        };
+        let result = evaluate_compile_runtime_probe(probe);
+        assert_eq!(
+            result.reason_code,
+            Some(reason_codes::REASON_GHOST_RUST_TEMP_UNWRITABLE)
+        );
+    }
+
+    #[test]
+    fn ghost_preflight_failure_message_is_reason_tagged() {
+        let preflight = GhostCompilePreflight {
+            reason_code: Some(reason_codes::REASON_GHOST_RUNTIME_CAPABILITY_MISMATCH),
+            detail: "failed to start ghost container".to_string(),
+            remediation: Some("fix image".to_string()),
+            rg_available: false,
+        };
+        let msg = preflight.failure_message("coder").unwrap_or_default();
+        assert!(msg.contains("[reason:ghost_runtime_capability_mismatch]"));
+        assert!(msg.contains("Remediation: fix image"));
+    }
+
+    #[test]
     fn local_only_provider_requires_ollama() {
         let mut config = Config::default();
         config.runtime.profile = config::RuntimeProfile::LocalOnly;
@@ -1810,5 +2234,41 @@ mod tests {
         let check = local_only_provider_check(&config);
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.detail.contains("runtime.profile != local_only"));
+    }
+
+    #[test]
+    fn self_dev_trusted_requires_self_dev_enabled() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::SelfDevTrusted;
+        config.self_dev.enabled = false;
+
+        let check = self_dev_trusted_enablement_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn self_dev_trusted_requires_repo_allowlist() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::SelfDevTrusted;
+        config.self_dev.enabled = true;
+        config.self_dev.trusted_repos.clear();
+
+        let check = self_dev_trusted_repo_allowlist_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("self_dev_mode_restriction"));
+    }
+
+    #[test]
+    fn self_dev_trusted_budget_check_enforces_minimums() {
+        let mut config = Config::default();
+        config.runtime.profile = config::RuntimeProfile::SelfDevTrusted;
+        config.self_dev.enabled = true;
+        config.self_dev.trusted_repos = vec!["athena".to_string()];
+        config.docker.timeout_secs = 120;
+        config.manager.max_steps = 10;
+
+        let check = self_dev_trusted_budget_check(&config);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("docker.timeout_secs=120 (min 600)"));
     }
 }
