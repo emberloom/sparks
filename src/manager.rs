@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, GhostConfig};
 use crate::confirm::Confirmer;
-use crate::core::SessionContext;
+use crate::core::{CoreEvent, SessionContext};
+use crate::doctor;
 use crate::dynamic_tools::{self, DynamicTool};
 use crate::embeddings::Embedder;
 use crate::error::{AthenaError, Result};
@@ -18,6 +19,7 @@ use crate::llm::{self, LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
 use crate::observer::ObserverHandle;
+use crate::reason_codes;
 use crate::strategy::{StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
 
@@ -33,6 +35,7 @@ const KPI_GHOST_MIN_SAMPLES: u64 = 3;
 const KPI_GHOST_TOP_LIMIT: usize = 3;
 const KPI_TOOL_MIN_SAMPLES: u64 = 3;
 const KPI_TOOL_TOP_LIMIT: usize = 3;
+const ROUTING_CONTEXT_LATENCY_WARN_MS: u128 = 300;
 const TOKEN_BUDGET_PRECHECK_RATIO: f64 = 0.70;
 const TOKEN_ESTIMATOR_CONFIDENCE_FLOOR: f64 = 0.50;
 const TOKEN_BUDGET_CONTEXT_SOFT_CHARS: usize = 24_000;
@@ -71,7 +74,11 @@ struct RoutingPromptContext {
 }
 
 fn compact_context_line(input: &str, max_chars: usize) -> String {
-    let first_line = input.lines().next().unwrap_or("").trim();
+    let first_line = input
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
     if first_line.chars().count() <= max_chars {
         return first_line.to_string();
     }
@@ -81,6 +88,20 @@ fn compact_context_line(input: &str, max_chars: usize) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+fn goal_requires_compile_runtime_preflight(goal: &str) -> bool {
+    let goal_lower = goal.to_lowercase();
+    [
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "compile",
+        "build",
+        "verification pass",
+    ]
+    .iter()
+    .any(|needle| goal_lower.contains(needle))
 }
 
 pub struct Manager {
@@ -304,9 +325,18 @@ impl Manager {
         let metrics_section = self.build_metrics_section();
         let mood_section = self.build_mood_section();
         let relationship_section = self.build_relationship_section(&session.user_id);
+        let routing_context_started = Instant::now();
         let routing_context = self
             .build_routing_prompt_context(user_input, &recent_messages)
             .await;
+        let routing_context_ms = routing_context_started.elapsed().as_millis();
+        if routing_context_ms > ROUTING_CONTEXT_LATENCY_WARN_MS {
+            tracing::warn!(
+                routing_context_ms,
+                threshold_ms = ROUTING_CONTEXT_LATENCY_WARN_MS,
+                "Routing context build latency exceeded threshold"
+            );
+        }
 
         // Classify the request (pass conversation history for context)
         let classify_gen = lf_trace.as_ref().map(|t| {
@@ -330,7 +360,13 @@ impl Manager {
             )
             .await?;
         let route_id = uuid::Uuid::new_v4().to_string();
-        self.record_route_decision(&route_id, user_input, &classification, &routing_context);
+        self.record_route_decision(
+            &route_id,
+            user_input,
+            &classification,
+            &routing_context,
+            routing_context_ms,
+        );
         if let Some(g) = classify_gen {
             let label = match &classification {
                 Classification::Simple(_) => "simple",
@@ -357,6 +393,9 @@ impl Manager {
                     .iter()
                     .find(|g| g.name == ghost_name)
                     .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
+
+                self.run_compile_runtime_preflight_if_needed(ghost, &goal, status_tx)
+                    .await?;
 
                 eprintln!("Delegating to ghost: {}", ghost.name);
 
@@ -467,7 +506,6 @@ impl Manager {
         repo: Option<&str>,
         confirmer: &dyn Confirmer,
     ) -> Result<String> {
-        // If no ghost specified, use the orchestrator to classify
         if ghost_name.is_none() {
             let session = crate::core::SessionContext {
                 platform: "autonomous".into(),
@@ -487,7 +525,9 @@ impl Manager {
 
         tracing::info!(ghost = %ghost.name, goal = %goal, "Autonomous task executing");
 
-        // Enrich context with system metrics (Gap 3)
+        self.run_compile_runtime_preflight_if_needed(ghost, goal, None)
+            .await?;
+
         let metrics_ctx = if self
             .knobs
             .read()
@@ -503,7 +543,6 @@ impl Manager {
             String::new()
         };
 
-        // Enrich coder context with code_structure memories (Gap 4)
         let structure_ctx = if ghost_name == "coder" {
             let mut structure_memories = self
                 .memory
@@ -540,7 +579,6 @@ impl Manager {
             memory: Some(self.memory.clone()),
         });
 
-        // Start Langfuse trace for autonomous task
         let lf_trace = self.langfuse.as_ref().map(|lf| {
             ActiveTrace::start(
                 lf.clone(),
@@ -573,10 +611,55 @@ impl Manager {
             t.end(Some(preview));
         }
 
-        // Save lesson from autonomous work too
         self.maybe_save_lesson(goal, &result).await;
 
         Ok(result)
+    }
+
+    async fn run_compile_runtime_preflight_if_needed(
+        &self,
+        ghost: &GhostConfig,
+        goal: &str,
+        status_tx: Option<&StatusSender>,
+    ) -> Result<()> {
+        if !goal_requires_compile_runtime_preflight(goal) {
+            return Ok(());
+        }
+
+        if let Some(tx) = status_tx {
+            let _ = tx
+                .send(CoreEvent::Status(
+                    "Preflight: checking ghost compile/runtime capabilities...".to_string(),
+                ))
+                .await;
+        }
+
+        let preflight = doctor::run_ghost_compile_preflight(&self.config, ghost).await;
+
+        if let Some(msg) = preflight.rg_fallback_message(&ghost.name) {
+            tracing::info!(ghost = %ghost.name, "{}", msg);
+            if let Some(tx) = status_tx {
+                let _ = tx.send(CoreEvent::Status(msg)).await;
+            }
+        }
+
+        if preflight.is_ok() {
+            return Ok(());
+        }
+
+        let err = preflight.failure_message(&ghost.name).unwrap_or_else(|| {
+            reason_codes::with_reason(
+                reason_codes::REASON_GHOST_RUNTIME_CAPABILITY_MISMATCH,
+                format!(
+                    "Ghost '{}' compile/runtime preflight failed: {}",
+                    ghost.name, preflight.detail
+                ),
+            )
+        });
+        if let Some(tx) = status_tx {
+            let _ = tx.send(CoreEvent::Status(err.clone())).await;
+        }
+        Err(AthenaError::Tool(err))
     }
 
     #[tracing::instrument(skip(
@@ -1244,10 +1327,12 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
         user_input: &str,
         classification: &Classification,
         routing_context: &RoutingPromptContext,
+        routing_context_ms: u128,
     ) {
         let (route_type, ghost) = classification_route_target(classification);
+        let feature_payload = routing_feature_payload_preview(routing_context);
         let entry = format!(
-            "route_id={} route_type={} ghost={} repo={} lane={} risk={} kpi_available={} lessons={} input=\"{}\"",
+            "route_id={} route_type={} ghost={} repo={} lane={} risk={} kpi_available={} lessons={} routing_context_ms={} features=\"{}\" input=\"{}\"",
             route_id,
             route_type,
             ghost.unwrap_or("-"),
@@ -1260,6 +1345,8 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
                 .unwrap_or("all-risks"),
             routing_context.kpi_available,
             routing_context.lesson_count,
+            routing_context_ms,
+            truncate_utf8(&feature_payload, 220),
             truncate_utf8(user_input, 180).replace('\n', " ")
         );
         let _ = self.memory.store("route_decision", &entry, None);
@@ -1272,6 +1359,8 @@ DIRECT EXAMPLES (note: params must have COMPLETE arguments):
             risk = %routing_context.scope.risk_tier.as_deref().unwrap_or("all-risks"),
             kpi_available = routing_context.kpi_available,
             lesson_count = routing_context.lesson_count,
+            routing_context_ms,
+            feature_payload = %feature_payload,
             "Classifier route decision recorded"
         );
     }
@@ -1850,6 +1939,28 @@ fn classification_route_target(classification: &Classification) -> (&'static str
     }
 }
 
+fn routing_feature_payload_preview(routing_context: &RoutingPromptContext) -> String {
+    let lane = routing_context.scope.lane.as_deref().unwrap_or("all-lanes");
+    let risk = routing_context
+        .scope
+        .risk_tier
+        .as_deref()
+        .unwrap_or("all-risks");
+    let kpi_preview = compact_context_line(&routing_context.kpi_context, 96).replace('"', "'");
+    let lesson_preview =
+        compact_context_line(&routing_context.lesson_context, 96).replace('"', "'");
+    format!(
+        "scope={}/{}/{} kpi_available={} lessons={} kpi_preview={} lesson_preview={}",
+        routing_context.scope.repo,
+        lane,
+        risk,
+        routing_context.kpi_available,
+        routing_context.lesson_count,
+        kpi_preview,
+        lesson_preview
+    )
+}
+
 /// Truncate a string to at most `max_bytes` without splitting a UTF-8 character.
 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -1881,7 +1992,8 @@ mod tests {
         apply_token_budget_strategy, classification_route_target, count_section_bullets,
         estimate_token_budget, format_ghost_success_context, format_kpi_context,
         format_kpi_fallback_context, format_lesson_context, format_lesson_fallback_context,
-        infer_kpi_prompt_scope, Classification, KpiPromptScope, Manager,
+        goal_requires_compile_runtime_preflight, infer_kpi_prompt_scope,
+        routing_feature_payload_preview, Classification, KpiPromptScope, Manager,
     };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
     use crate::kpi::GhostSuccessRate;
@@ -2178,5 +2290,41 @@ mod tests {
         let (route_type, ghost) = classification_route_target(&c);
         assert_eq!(route_type, "complex");
         assert_eq!(ghost, Some("coder"));
+    }
+
+    #[test]
+    fn compile_runtime_preflight_goal_detection_matches_compile_tasks() {
+        assert!(goal_requires_compile_runtime_preflight(
+            "run cargo check and cargo test",
+        ));
+        assert!(goal_requires_compile_runtime_preflight(
+            "do a heavier verification pass on the build",
+        ));
+        assert!(!goal_requires_compile_runtime_preflight(
+            "summarize docs and update changelog",
+        ));
+    }
+
+    #[test]
+    fn routing_feature_payload_preview_includes_scope_and_previews() {
+        let ctx = super::RoutingPromptContext {
+            scope: super::KpiPromptScope {
+                lane: Some("delivery".to_string()),
+                repo: "athena".to_string(),
+                risk_tier: Some("medium".to_string()),
+            },
+            kpi_context: "\n\nRecent stats for athena/delivery/medium: success_rate=75.0%"
+                .to_string(),
+            lesson_context: "\n\nRecent lessons:\n- Always run targeted tests first".to_string(),
+            kpi_available: true,
+            lesson_count: 1,
+        };
+
+        let payload = routing_feature_payload_preview(&ctx);
+        assert!(payload.contains("scope=athena/delivery/medium"));
+        assert!(payload.contains("kpi_available=true"));
+        assert!(payload.contains("lessons=1"));
+        assert!(payload.contains("kpi_preview="));
+        assert!(payload.contains("lesson_preview="));
     }
 }
