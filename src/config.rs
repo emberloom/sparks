@@ -1032,6 +1032,12 @@ impl Config {
         } else {
             Config::default()
         };
+        if config.ghosts.is_empty() {
+            tracing::warn!(
+                "No ghosts configured in config; applying built-in defaults (coder, scout)"
+            );
+            config.ghosts = default_ghosts();
+        }
 
         config.inline_secret_labels = config.collect_inline_secret_labels();
         if !config.inline_secret_labels.is_empty() && !allow_inline_secrets() {
@@ -1483,6 +1489,7 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Config, RuntimeProfile};
+    use std::path::Path;
 
     #[test]
     fn runtime_profile_name_maps_standard_to_container_strict() {
@@ -1496,5 +1503,56 @@ mod tests {
         config.runtime.profile = RuntimeProfile::SelfDevTrusted;
         config.self_dev.trusted_repos = vec![" Athena ".to_string(), "".to_string()];
         assert_eq!(config.trusted_self_dev_repos(), vec!["athena"]);
+    }
+
+    #[test]
+    fn load_hydrates_default_ghosts_when_missing_in_file() {
+        let path = temp_config_path("athena-config-no-ghosts");
+        std::fs::write(
+            &path,
+            r#"
+[llm]
+provider = "ollama"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(Path::new(&path))).unwrap();
+        assert!(!config.ghosts.is_empty());
+        assert!(config.ghosts.iter().any(|g| g.name == "coder"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_preserves_explicit_ghosts_from_file() {
+        let path = temp_config_path("athena-config-explicit-ghost");
+        std::fs::write(
+            &path,
+            r#"
+[llm]
+provider = "ollama"
+
+[[ghosts]]
+name = "custom"
+description = "custom ghost"
+tools = ["shell"]
+strategy = "react"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(Path::new(&path))).unwrap();
+        assert_eq!(config.ghosts.len(), 1);
+        assert_eq!(config.ghosts[0].name, "custom");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn temp_config_path(prefix: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("{}-{}.toml", prefix, uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string()
     }
 }

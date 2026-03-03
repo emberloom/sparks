@@ -357,8 +357,17 @@ async fn try_auto_merge(pr_url: &str, repo_root: &Path, ctx: &mut CiMonitorConte
         ctx.log("ci monitor auto-merge succeeded");
         true
     } else {
-        ctx.log("ci monitor auto-merge failed");
-        false
+        let merged = resolve_pr_merge_info(pr_url, repo_root, ctx)
+            .await
+            .map(|info| info.merged)
+            .unwrap_or(false);
+        if merged {
+            ctx.log("ci monitor auto-merge command returned non-zero but PR is merged");
+            true
+        } else {
+            ctx.log("ci monitor auto-merge failed");
+            false
+        }
     }
 }
 

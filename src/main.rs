@@ -1281,6 +1281,43 @@ fn parse_pr_url(text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
+fn select_self_build_dispatch_ghost(config: &Config) -> anyhow::Result<String> {
+    if config.ghosts.is_empty() {
+        anyhow::bail!(
+            "No ghosts configured. Add at least one [[ghosts]] entry or use defaults that include 'coder'."
+        );
+    }
+    if let Some(coder) = config.ghosts.iter().find(|g| g.name == "coder") {
+        return Ok(coder.name.clone());
+    }
+    if let Some(code_ghost) = config.ghosts.iter().find(|g| g.strategy == "code") {
+        return Ok(code_ghost.name.clone());
+    }
+    if let Some(writer) = config.ghosts.iter().find(|g| ghost_has_write_tool(g)) {
+        return Ok(writer.name.clone());
+    }
+    Ok(config.ghosts[0].name.clone())
+}
+
+fn ghost_has_write_tool(ghost: &config::GhostConfig) -> bool {
+    ghost
+        .tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), "file_write" | "file_edit"))
+}
+
+fn pr_view_reports_merged(raw_json: &str) -> bool {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_json);
+    let Ok(value) = parsed else {
+        return false;
+    };
+    value
+        .get("mergedAt")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn format_ci_monitor_status(report: &ci_monitor::CiMonitorReport) -> String {
     let mut ci_status = report.final_status.clone();
     if report.post_merge_status != "not_merged" && report.post_merge_status != "not_checked" {
@@ -2227,7 +2264,7 @@ async fn execute_self_build_promotion(
         &[
             "pr".to_string(),
             "merge".to_string(),
-            pr_target,
+            pr_target.clone(),
             "--squash".to_string(),
             "--delete-branch".to_string(),
         ],
@@ -2241,10 +2278,42 @@ async fn execute_self_build_promotion(
         execution.status = "merged".to_string();
         execution.merged = true;
     } else {
-        execution.reasons.push(format!(
-            "auto-merge failed; leaving PR open: {}",
-            tail_text(&command_combined_output(&merge_run), 260)
+        let merge_output = command_combined_output(&merge_run);
+        let merge_info_run = run_command_capture(
+            worktree,
+            "gh",
+            &[
+                "pr".to_string(),
+                "view".to_string(),
+                pr_target,
+                "--json".to_string(),
+                "number,mergedAt,baseRefName,mergeCommit".to_string(),
+            ],
+            120,
+        )
+        .await;
+        execution.commands.push(build_promotion_command(
+            "gh_pr_view_merge_info",
+            merge_info_run.clone(),
         ));
+        let merge_info_raw = if !merge_info_run.stdout.trim().is_empty() {
+            merge_info_run.stdout.clone()
+        } else {
+            command_combined_output(&merge_info_run)
+        };
+        if command_succeeded(&merge_info_run) && pr_view_reports_merged(&merge_info_raw) {
+            execution.status = "merged".to_string();
+            execution.merged = true;
+            execution.reasons.push(format!(
+                "auto-merge completed but gh returned non-zero (likely local cleanup): {}",
+                tail_text(&merge_output, 260)
+            ));
+        } else {
+            execution.reasons.push(format!(
+                "auto-merge failed; leaving PR open: {}",
+                tail_text(&merge_output, 260)
+            ));
+        }
     }
 
     execution
@@ -2828,6 +2897,7 @@ async fn run_self_build(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let self_build_ghost = select_self_build_dispatch_ghost(&config)?;
     let exe = std::env::current_exe()?;
     let exe_s = exe.to_string_lossy().to_string();
     let mut dispatch_context = format!(
@@ -2848,7 +2918,7 @@ async fn run_self_build(
             "--context".to_string(),
             ctx,
             "--ghost".to_string(),
-            "coder".to_string(),
+            self_build_ghost.clone(),
             "--auto-store".to_string(),
             "self_build_run".to_string(),
             "--wait-secs".to_string(),
@@ -2989,7 +3059,9 @@ async fn run_self_build(
         println!("auto-enabling CI monitor for promote_mode=auto");
     }
 
-    let ci_monitor = if monitor_ci_enabled && promotion_execution.status == "pr_opened" {
+    let ci_monitor = if monitor_ci_enabled
+        && (promotion_execution.status == "pr_opened" || promotion_execution.status == "merged")
+    {
         if let Some(pr_url) = promotion_execution.pr_url.as_deref() {
             Some(
                 ci_monitor::monitor_pr_ci(
@@ -6621,10 +6693,11 @@ mod tests {
         evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
         feature_batch_dynamic_parallelism, format_ci_monitor_status, latest_eval_gate_status,
         parse_dispatch_task_id, parse_git_status_paths, plan_self_build_promotion,
-        pulse_matches_task_id, render_feature_ledger_markdown, resolve_self_build_ci_monitor,
-        rollback_feature_commits, run_feature_verify, track_feature_commits_since,
-        wait_for_autonomous_pulse, ChatCommand, DashboardOutputFormat, FeatureRunStatus,
-        SelfBuildPromoteMode, WaitForAutonomousOutcome,
+        pr_view_reports_merged, pulse_matches_task_id, render_feature_ledger_markdown,
+        resolve_self_build_ci_monitor, rollback_feature_commits, run_feature_verify,
+        select_self_build_dispatch_ghost, track_feature_commits_since, wait_for_autonomous_pulse,
+        ChatCommand, DashboardOutputFormat, FeatureRunStatus, SelfBuildPromoteMode,
+        WaitForAutonomousOutcome,
     };
     use crate::ci_monitor::CiMonitorReport;
     use crate::feature_contract::{
@@ -7451,6 +7524,52 @@ mod tests {
         let out = " M src/main.rs\nR  old.txt -> new.txt\n?? notes.md\n";
         let paths = parse_git_status_paths(out);
         assert_eq!(paths, vec!["new.txt", "notes.md", "src/main.rs"]);
+    }
+
+    #[test]
+    fn select_self_build_dispatch_ghost_prefers_coder() {
+        let config = crate::config::Config::default();
+        let selected = select_self_build_dispatch_ghost(&config).unwrap();
+        assert_eq!(selected, "coder");
+    }
+
+    #[test]
+    fn select_self_build_dispatch_ghost_prefers_code_strategy_when_no_coder() {
+        let mut config = crate::config::Config::default();
+        config.ghosts = vec![
+            crate::config::GhostConfig {
+                name: "scout".to_string(),
+                description: "read-only".to_string(),
+                tools: vec!["file_read".to_string()],
+                mounts: Vec::new(),
+                strategy: "react".to_string(),
+                soul_file: None,
+                soul: None,
+                image: None,
+            },
+            crate::config::GhostConfig {
+                name: "architect".to_string(),
+                description: "code strategist".to_string(),
+                tools: vec!["shell".to_string()],
+                mounts: Vec::new(),
+                strategy: "code".to_string(),
+                soul_file: None,
+                soul: None,
+                image: None,
+            },
+        ];
+        let selected = select_self_build_dispatch_ghost(&config).unwrap();
+        assert_eq!(selected, "architect");
+    }
+
+    #[test]
+    fn pr_view_reports_merged_detects_merged_at() {
+        assert!(pr_view_reports_merged(
+            r#"{"number":64,"mergedAt":"2026-03-03T17:27:17Z","baseRefName":"main"}"#
+        ));
+        assert!(!pr_view_reports_merged(
+            r#"{"number":64,"mergedAt":null,"baseRefName":"main"}"#
+        ));
     }
 
     #[test]
