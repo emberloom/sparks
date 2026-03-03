@@ -209,7 +209,16 @@ impl McpRegistry {
                 continue;
             }
 
-            servers.insert(server.name.clone(), Arc::new(ServerRuntime::new(server.clone())));
+            tracing::debug!(
+                server = %server.name,
+                timeout_secs = server.timeout_secs,
+                reconnect_delay_secs = server.reconnect_delay_secs,
+                "Configured MCP server"
+            );
+            servers.insert(
+                server.name.clone(),
+                Arc::new(ServerRuntime::new(server.clone())),
+            );
         }
 
         if servers.is_empty() {
@@ -253,6 +262,38 @@ impl McpRegistry {
             .clone();
 
         runtime.invoke(remote_tool, args).await
+    }
+
+    #[cfg(test)]
+    pub fn for_tests_with_tools(tools: Vec<DiscoveredMcpTool>) -> Arc<Self> {
+        let mut grouped: HashMap<String, Vec<DiscoveredMcpTool>> = HashMap::new();
+        for tool in tools {
+            grouped.entry(tool.server.clone()).or_default().push(tool);
+        }
+
+        let mut servers = HashMap::new();
+        for (server_name, discovered) in grouped {
+            let runtime = Arc::new(ServerRuntime::new(McpServerConfig {
+                name: server_name.clone(),
+                enabled: true,
+                transport: McpTransport::Stdio,
+                command: Some("echo".to_string()),
+                args: Vec::new(),
+                env: Vec::new(),
+                timeout_secs: 5,
+                reconnect_delay_secs: 5,
+                requires_confirmation: false,
+                allowed_tools: vec!["*".to_string()],
+            }));
+            runtime.mark_ready(discovered);
+            servers.insert(server_name, runtime);
+        }
+
+        Arc::new(Self {
+            servers,
+            discovery_ttl: Duration::from_secs(60),
+            observer: ObserverHandle::new(4),
+        })
     }
 }
 
@@ -308,7 +349,11 @@ impl McpStdioSession {
                 "failed to spawn MCP server '{}' command '{}': {}",
                 config.name, command, e
             );
-            AthenaError::Tool(build_diagnostic(&config.name, McpFailureKind::Connection, &message))
+            AthenaError::Tool(build_diagnostic(
+                &config.name,
+                McpFailureKind::Connection,
+                &message,
+            ))
         })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -343,12 +388,7 @@ impl McpStdioSession {
 
     async fn close(&mut self) {
         let _ = self.stdin.shutdown().await;
-        match timeout(
-            Duration::from_millis(SHUTDOWN_GRACE_MS),
-            self.child.wait(),
-        )
-        .await
-        {
+        match timeout(Duration::from_millis(SHUTDOWN_GRACE_MS), self.child.wait()).await {
             Ok(_) => {}
             Err(_) => {
                 let _ = self.child.start_kill();
@@ -550,23 +590,17 @@ impl McpStdioSession {
         timeout(self.timeout, self.stdin.write_all(header.as_bytes()))
             .await
             .map_err(|_| AthenaError::Tool("MCP write timed out".to_string()))
-            .and_then(|r| {
-                r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e)))
-            })?;
+            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e))))?;
 
         timeout(self.timeout, self.stdin.write_all(&payload))
             .await
             .map_err(|_| AthenaError::Tool("MCP write timed out".to_string()))
-            .and_then(|r| {
-                r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e)))
-            })?;
+            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e))))?;
 
         timeout(self.timeout, self.stdin.flush())
             .await
             .map_err(|_| AthenaError::Tool("MCP flush timed out".to_string()))
-            .and_then(|r| {
-                r.map_err(|e| AthenaError::Tool(format!("MCP flush error: {}", e)))
-            })?;
+            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP flush error: {}", e))))?;
 
         Ok(())
     }
@@ -720,7 +754,8 @@ fn extract_content_text(result: &Value) -> String {
             .get("structuredContent")
             .or_else(|| result.get("structured_content"))
         {
-            let serialized = serde_json::to_string_pretty(text).unwrap_or_else(|_| text.to_string());
+            let serialized =
+                serde_json::to_string_pretty(text).unwrap_or_else(|_| text.to_string());
             if !serialized.trim().is_empty() {
                 parts.push(serialized);
             }
@@ -793,6 +828,7 @@ fn truncate_diagnostic(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{McpConfig, McpServerConfig, McpTransport};
+    use std::path::PathBuf;
 
     fn server_config(allowed_tools: Vec<&str>) -> McpServerConfig {
         McpServerConfig {
@@ -807,6 +843,91 @@ mod tests {
             requires_confirmation: true,
             allowed_tools: allowed_tools.into_iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    const STUB_MCP_SERVER_SCRIPT: &str = r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode("utf-8").split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers.get("content-length", "0"))
+    payload = sys.stdin.buffer.read(length)
+    return json.loads(payload.decode("utf-8"))
+
+def send_message(message):
+    payload = json.dumps(message).encode("utf-8")
+    header = f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
+    sys.stdout.buffer.write(header + payload)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        send_message({
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "stub", "version": "1.0.0"}
+            }
+        })
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send_message({
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo back provided text",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"]
+                        }
+                    }
+                ]
+            }
+        })
+    elif method == "tools/call":
+        args = msg.get("params", {}).get("arguments", {})
+        text = args.get("text", "")
+        send_message({
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "content": [{"type": "text", "text": f"echo:{text}"}]
+            }
+        })
+    else:
+        send_message({
+            "jsonrpc": "2.0",
+            "id": msg.get("id"),
+            "error": {"code": -32601, "message": "method not found"}
+        })
+"#;
+
+    fn write_stub_mcp_server_script() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("athena-mcp-stub-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(&path, STUB_MCP_SERVER_SCRIPT)
+            .expect("stub MCP server script should be writable");
+        path
     }
 
     #[test]
@@ -866,5 +987,71 @@ mod tests {
         };
         let observer = ObserverHandle::new(4);
         assert!(McpRegistry::from_config(&cfg, observer).is_none());
+    }
+
+    #[tokio::test]
+    async fn stdio_server_discovery_and_invocation_work() {
+        let script = write_stub_mcp_server_script();
+        let cfg = McpConfig {
+            enabled: true,
+            discovery_ttl_secs: 60,
+            servers: vec![McpServerConfig {
+                name: "stub".to_string(),
+                enabled: true,
+                transport: McpTransport::Stdio,
+                command: Some("python3".to_string()),
+                args: vec![script.to_string_lossy().to_string()],
+                env: vec![],
+                timeout_secs: 5,
+                reconnect_delay_secs: 5,
+                requires_confirmation: false,
+                allowed_tools: vec!["echo".to_string()],
+            }],
+        };
+        let observer = ObserverHandle::new(8);
+        let registry = McpRegistry::from_config(&cfg, observer).expect("registry should be built");
+
+        registry.refresh_if_stale().await;
+        let discovered = registry.discovered_tools();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].namespaced_name, "mcp:stub:echo");
+
+        let result = registry
+            .invoke_tool("stub", "echo", &json!({ "text": "hello" }))
+            .await
+            .expect("echo tool invocation should succeed");
+        assert!(result.success);
+        assert!(result.output.contains("echo:hello"));
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[tokio::test]
+    async fn connection_failures_return_actionable_diagnostics() {
+        let cfg = McpConfig {
+            enabled: true,
+            discovery_ttl_secs: 60,
+            servers: vec![McpServerConfig {
+                name: "broken".to_string(),
+                enabled: true,
+                transport: McpTransport::Stdio,
+                command: Some("athena-mcp-command-does-not-exist".to_string()),
+                args: vec![],
+                env: vec![],
+                timeout_secs: 5,
+                reconnect_delay_secs: 5,
+                requires_confirmation: false,
+                allowed_tools: vec!["echo".to_string()],
+            }],
+        };
+        let observer = ObserverHandle::new(4);
+        let registry = McpRegistry::from_config(&cfg, observer).expect("registry should be built");
+        let err = registry
+            .invoke_tool("broken", "echo", &json!({ "text": "x" }))
+            .await
+            .expect_err("missing command should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("Hint:"));
+        assert!(msg.contains("mcp.servers[].command"));
     }
 }

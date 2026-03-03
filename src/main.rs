@@ -17,6 +17,7 @@ mod kpi;
 mod langfuse;
 mod llm;
 mod manager;
+mod mcp;
 mod memory;
 mod mood;
 mod observer;
@@ -7543,9 +7544,13 @@ mod tests {
                 description: "read-only".to_string(),
                 tools: vec!["file_read".to_string()],
                 mounts: Vec::new(),
+                role: crate::config::GhostRole::Worker,
                 strategy: "react".to_string(),
                 soul_file: None,
+                skill_file: None,
+                skill_files: Vec::new(),
                 soul: None,
+                skill: None,
                 image: None,
             },
             crate::config::GhostConfig {
@@ -7553,9 +7558,13 @@ mod tests {
                 description: "code strategist".to_string(),
                 tools: vec!["shell".to_string()],
                 mounts: Vec::new(),
+                role: crate::config::GhostRole::Worker,
                 strategy: "code".to_string(),
                 soul_file: None,
+                skill_file: None,
+                skill_files: Vec::new(),
                 soul: None,
+                skill: None,
                 image: None,
             },
         ];

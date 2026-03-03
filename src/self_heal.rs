@@ -14,6 +14,7 @@ fn make_contract(
         goal,
         constraints,
         soul: Some(soul),
+        skill: None,
         tools_doc: None,
         cli_tool_preference: None,
         cli_tool_routing_order: Vec::new(),

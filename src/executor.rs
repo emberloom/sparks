@@ -13,6 +13,7 @@ use crate::error::{AthenaError, Result};
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
+use crate::mcp::McpRegistry;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
@@ -133,6 +134,7 @@ pub struct Executor {
     max_steps: usize,
     sensitive_patterns: SensitivePatterns,
     dynamic_tools_path: Option<PathBuf>,
+    mcp_registry: Option<Arc<McpRegistry>>,
     knobs: SharedKnobs,
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
@@ -151,6 +153,7 @@ impl Executor {
         sensitive_patterns: Vec<String>,
         loop_guard_config: LoopGuardConfig,
         dynamic_tools_path: Option<PathBuf>,
+        mcp_registry: Option<Arc<McpRegistry>>,
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Arc<ToolUsageStore>,
@@ -165,6 +168,7 @@ impl Executor {
             max_steps,
             sensitive_patterns: compiled,
             dynamic_tools_path,
+            mcp_registry,
             knobs,
             github_token,
             usage_store,
@@ -196,9 +200,13 @@ impl Executor {
             None
         };
         let session = DockerSession::new(ghost, &self.docker_config, trusted_repo_policy).await?;
+        if let Some(registry) = self.mcp_registry.as_ref() {
+            registry.refresh_if_stale().await;
+        }
         let tools = ToolRegistry::for_ghost(
             ghost,
             self.dynamic_tools_path.as_deref(),
+            self.mcp_registry.clone(),
             self.knobs.clone(),
             self.github_token.clone(),
             Some(self.usage_store.clone()),
