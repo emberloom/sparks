@@ -12,6 +12,7 @@ use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{ChatMessage, ChatResponse, LlmProvider, StreamEvent};
 use crate::memory::MemoryStore;
+use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::tools::ToolRegistry;
 
 /// Channel for sending core events (status, stream chunks) to the frontend.
@@ -60,6 +61,18 @@ pub fn strategy_from_config(name: &str) -> Result<Box<dyn LoopStrategy>> {
         "react" => Ok(Box::new(react::ReactStrategy)),
         "code" => Ok(Box::new(code::CodeStrategy)),
         other => Err(AthenaError::Config(format!("Unknown strategy: {}", other))),
+    }
+}
+
+pub(crate) fn materialize_tool_result(result: Result<String>) -> Result<String> {
+    match result {
+        Ok(output) => Ok(output),
+        Err(e) => {
+            if reason_codes::message_has_reason(&e.to_string(), REASON_LOOP_GUARD_TRIGGERED) {
+                return Err(e);
+            }
+            Ok(format!("[tool error]\n{}", e))
+        }
     }
 }
 
@@ -155,7 +168,7 @@ Otherwise, accomplish the task with your tools, then respond with a summary incl
                 let result = executor
                     .execute_tool(&tc.name, &json, tools, docker, confirmer, status_tx, trace)
                     .await;
-                let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                let output = materialize_tool_result(result)?;
                 tracing::debug!(step, tool = %tc.name, "precheck tool executed");
                 history.push(ChatMessage::Tool {
                     tool_call_id: tc.id.clone(),

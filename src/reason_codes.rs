@@ -29,3 +29,7 @@ pub fn reason_tag(reason: &str) -> String {
 pub fn with_reason(reason: &str, message: impl AsRef<str>) -> String {
     format!("{} {}", reason_tag(reason), message.as_ref())
 }
+
+pub fn message_has_reason(message: &str, reason: &str) -> bool {
+    message.contains(&reason_tag(reason))
+}

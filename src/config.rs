@@ -768,8 +768,20 @@ pub struct ManagerConfig {
     pub max_steps: usize,
     #[serde(default = "default_sensitive_patterns")]
     pub sensitive_patterns: Vec<String>,
+    #[serde(default)]
+    pub loop_guard: LoopGuardConfig,
     /// Directory containing dynamic tool YAML definitions (default: ~/.athena/dynamic_tools/)
     pub dynamic_tools_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoopGuardConfig {
+    #[serde(default = "default_loop_guard_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_loop_guard_window_size")]
+    pub window_size: usize,
+    #[serde(default = "default_loop_guard_repeat_threshold")]
+    pub repeat_threshold: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -852,6 +864,15 @@ fn default_db_path() -> String {
 fn default_max_steps() -> usize {
     15
 }
+fn default_loop_guard_enabled() -> bool {
+    true
+}
+fn default_loop_guard_window_size() -> usize {
+    12
+}
+fn default_loop_guard_repeat_threshold() -> usize {
+    2
+}
 fn default_strategy() -> String {
     "react".into()
 }
@@ -915,7 +936,18 @@ impl Default for ManagerConfig {
         Self {
             max_steps: default_max_steps(),
             sensitive_patterns: default_sensitive_patterns(),
+            loop_guard: LoopGuardConfig::default(),
             dynamic_tools_path: None,
+        }
+    }
+}
+
+impl Default for LoopGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_guard_enabled(),
+            window_size: default_loop_guard_window_size(),
+            repeat_threshold: default_loop_guard_repeat_threshold(),
         }
     }
 }

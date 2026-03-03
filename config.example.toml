@@ -95,6 +95,14 @@ max_steps = 15
 # Sensitive patterns have comprehensive defaults — uncomment to override:
 # sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
 
+[manager.loop_guard]
+# Detect repeated identical tool calls and break loops early.
+enabled = true
+# Keep only this many most-recent tool call fingerprints per execution session.
+window_size = 12
+# Trigger breaker when the same fingerprint appears this many times within the window.
+repeat_threshold = 2
+
 [self_dev]
 enabled = false
 # Only used when runtime.profile = "self_dev_trusted"

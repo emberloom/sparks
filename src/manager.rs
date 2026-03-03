@@ -158,6 +158,7 @@ impl Manager {
             config.trusted_self_dev_repos(),
             config.manager.max_steps,
             config.manager.sensitive_patterns.clone(),
+            config.manager.loop_guard.clone(),
             dynamic_tools_path.clone(),
             knobs.clone(),
             config.github.token.clone(),

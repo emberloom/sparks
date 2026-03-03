@@ -1,9 +1,11 @@
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::config::{DockerConfig, GhostConfig};
+use crate::config::{DockerConfig, GhostConfig, LoopGuardConfig};
 use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
@@ -12,10 +14,117 @@ use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
 use crate::observer::{ObserverCategory, ObserverHandle};
+use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
 use crate::strategy::{self, StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
 use crate::tools::ToolRegistry;
+
+#[derive(Debug, Clone)]
+struct ToolLoopGuard {
+    enabled: bool,
+    window_size: usize,
+    repeat_threshold: usize,
+    sessions: Arc<Mutex<HashMap<String, SessionLoopState>>>,
+}
+
+#[derive(Debug, Clone)]
+struct LoopObservation {
+    fingerprint: String,
+    repeats: usize,
+    triggered: bool,
+}
+
+#[derive(Debug, Default)]
+struct SessionLoopState {
+    recent: VecDeque<String>,
+    counts: HashMap<String, usize>,
+}
+
+impl ToolLoopGuard {
+    fn new(config: &LoopGuardConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            window_size: config.window_size.max(1),
+            repeat_threshold: config.repeat_threshold.max(1),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn observe(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        params: &Value,
+    ) -> Option<LoopObservation> {
+        if !self.enabled {
+            return None;
+        }
+        let fingerprint = tool_call_fingerprint(tool_name, params);
+        let mut sessions = match self.sessions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "Loop guard state mutex was poisoned; continuing with recovered state"
+                );
+                poisoned.into_inner()
+            }
+        };
+        let state = sessions.entry(session_id.to_string()).or_default();
+        state.recent.push_back(fingerprint.clone());
+        *state.counts.entry(fingerprint.clone()).or_insert(0) += 1;
+        while state.recent.len() > self.window_size {
+            if let Some(old) = state.recent.pop_front() {
+                if let Some(count) = state.counts.get_mut(&old) {
+                    *count -= 1;
+                    if *count == 0 {
+                        state.counts.remove(&old);
+                    }
+                }
+            }
+        }
+        let repeats = state.counts.get(&fingerprint).copied().unwrap_or(0);
+        Some(LoopObservation {
+            fingerprint,
+            repeats,
+            triggered: repeats >= self.repeat_threshold,
+        })
+    }
+
+    fn clear_session(&self, session_id: &str) {
+        let mut sessions = match self.sessions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("Loop guard state mutex was poisoned during cleanup; continuing");
+                poisoned.into_inner()
+            }
+        };
+        sessions.remove(session_id);
+    }
+}
+
+fn normalize_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut ordered = BTreeMap::new();
+            for (k, v) in map {
+                ordered.insert(k.clone(), normalize_value(v));
+            }
+            Value::Object(ordered.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalize_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn tool_call_fingerprint(tool_name: &str, params: &Value) -> String {
+    let normalized = normalize_value(params);
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(serde_json::to_vec(&normalized).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
+}
 
 pub struct Executor {
     docker_config: DockerConfig,
@@ -28,6 +137,7 @@ pub struct Executor {
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
     observer: ObserverHandle,
+    loop_guard: ToolLoopGuard,
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
 }
@@ -39,6 +149,7 @@ impl Executor {
         trusted_repos: Vec<String>,
         max_steps: usize,
         sensitive_patterns: Vec<String>,
+        loop_guard_config: LoopGuardConfig,
         dynamic_tools_path: Option<PathBuf>,
         knobs: SharedKnobs,
         github_token: Option<String>,
@@ -58,6 +169,7 @@ impl Executor {
             github_token,
             usage_store,
             observer,
+            loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
         }
     }
@@ -94,15 +206,20 @@ impl Executor {
         let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
         // Try direct tool completion first (precheck)
-        if let Some(result) = strategy::try_direct_completion(
+        let precheck = match strategy::try_direct_completion(
             contract, &tools, &session, llm, self, confirmer, status_tx, trace,
         )
-        .await?
+        .await
         {
-            tracing::info!(ghost = %ghost.name, "Task completed via direct tool use (precheck)");
-            if let Err(e) = session.close().await {
-                tracing::warn!("Failed to close container: {}", e);
+            Ok(result) => result,
+            Err(e) => {
+                self.close_session(session).await;
+                return Err(e);
             }
+        };
+        if let Some(result) = precheck {
+            tracing::info!(ghost = %ghost.name, "Task completed via direct tool use (precheck)");
+            self.close_session(session).await;
             if let Some(s) = run_span {
                 let preview = if result.len() > 500 {
                     &result[..result.floor_char_boundary(500)]
@@ -130,9 +247,7 @@ impl Executor {
             .await;
 
         // Always clean up the container
-        if let Err(e) = session.close().await {
-            tracing::warn!("Failed to close container: {}", e);
-        }
+        self.close_session(session).await;
 
         match result {
             Ok(output) => {
@@ -154,6 +269,13 @@ impl Executor {
                 }
                 Err(e)
             }
+        }
+    }
+
+    async fn close_session(&self, session: DockerSession) {
+        self.loop_guard.clear_session(session.session_id());
+        if let Err(e) = session.close().await {
+            tracing::warn!("Failed to close container: {}", e);
         }
     }
 
@@ -185,6 +307,38 @@ impl Executor {
         let tool = tools
             .get(tool_name)
             .ok_or_else(|| AthenaError::Tool(format!("Unknown tool: {}", tool_name)))?;
+
+        if let Some(loop_obs) = self
+            .loop_guard
+            .observe(docker.session_id(), tool_name, &params)
+            .filter(|obs| obs.triggered)
+        {
+            let short_fp = &loop_obs.fingerprint[..12];
+            let loop_message = reason_codes::with_reason(
+                REASON_LOOP_GUARD_TRIGGERED,
+                format!(
+                    "Loop guard blocked repeated tool call '{}' (repeats={} window={}). Change arguments or choose a different tool before retrying. fingerprint={}",
+                    tool_name,
+                    loop_obs.repeats,
+                    self.loop_guard.window_size,
+                    short_fp
+                ),
+            );
+            self.observer.log(
+                ObserverCategory::ToolUsage,
+                format!(
+                    "loop_guard tool={} repeats={} window={} fingerprint={}",
+                    tool_name, loop_obs.repeats, self.loop_guard.window_size, short_fp
+                ),
+            );
+            if let Err(e) = self
+                .usage_store
+                .record("loop_guard", false, 0.0, Some(&loop_message))
+            {
+                tracing::warn!("Failed to record loop guard usage: {}", e);
+            }
+            return Err(AthenaError::Tool(loop_message));
+        }
 
         // Confirmation check
         let needs_confirm = if tool.needs_confirmation() {
@@ -315,5 +469,97 @@ impl Executor {
         }
 
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolLoopGuard;
+    use crate::config::LoopGuardConfig;
+    use serde_json::json;
+
+    #[test]
+    fn loop_guard_triggers_on_repeated_identical_call() {
+        let guard = ToolLoopGuard::new(&LoopGuardConfig {
+            enabled: true,
+            window_size: 8,
+            repeat_threshold: 2,
+        });
+        let first = guard
+            .observe("session-a", "shell", &json!({ "command": "cargo check" }))
+            .expect("loop guard should be enabled");
+        assert!(!first.triggered);
+        assert_eq!(first.repeats, 1);
+
+        let second = guard
+            .observe("session-a", "shell", &json!({ "command": "cargo check" }))
+            .expect("loop guard should be enabled");
+        assert!(second.triggered);
+        assert_eq!(second.repeats, 2);
+    }
+
+    #[test]
+    fn loop_guard_allows_changed_arguments() {
+        let guard = ToolLoopGuard::new(&LoopGuardConfig {
+            enabled: true,
+            window_size: 8,
+            repeat_threshold: 2,
+        });
+        let _ = guard.observe("session-b", "grep", &json!({ "pattern": "foo" }));
+        let changed = guard
+            .observe("session-b", "grep", &json!({ "pattern": "bar" }))
+            .expect("loop guard should be enabled");
+        assert!(!changed.triggered);
+        assert_eq!(changed.repeats, 1);
+    }
+
+    #[test]
+    fn loop_guard_is_bounded_by_window() {
+        let guard = ToolLoopGuard::new(&LoopGuardConfig {
+            enabled: true,
+            window_size: 2,
+            repeat_threshold: 2,
+        });
+        let _ = guard.observe("session-c", "shell", &json!({ "command": "A" }));
+        let _ = guard.observe("session-c", "shell", &json!({ "command": "B" }));
+        let third = guard
+            .observe("session-c", "shell", &json!({ "command": "A" }))
+            .expect("loop guard should be enabled");
+        assert!(!third.triggered);
+        assert_eq!(third.repeats, 1);
+    }
+
+    #[test]
+    fn loop_guard_normalizes_param_key_order() {
+        let guard = ToolLoopGuard::new(&LoopGuardConfig {
+            enabled: true,
+            window_size: 8,
+            repeat_threshold: 2,
+        });
+        let _ = guard.observe(
+            "session-d",
+            "shell",
+            &json!({ "command": "cargo test", "cwd": "/workspace" }),
+        );
+        let second = guard
+            .observe(
+                "session-d",
+                "shell",
+                &json!({ "cwd": "/workspace", "command": "cargo test" }),
+            )
+            .expect("loop guard should be enabled");
+        assert!(second.triggered);
+    }
+
+    #[test]
+    fn loop_guard_can_be_disabled() {
+        let guard = ToolLoopGuard::new(&LoopGuardConfig {
+            enabled: false,
+            window_size: 8,
+            repeat_threshold: 2,
+        });
+        assert!(guard
+            .observe("session-e", "shell", &json!({ "command": "cargo check" }))
+            .is_none());
     }
 }

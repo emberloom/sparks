@@ -331,6 +331,7 @@ enum SessionBackend {
 pub struct DockerSession {
     backend: SessionBackend,
     timeout_secs: u64,
+    session_id: String,
 }
 
 impl DockerSession {
@@ -342,6 +343,7 @@ impl DockerSession {
         docker_config: &DockerConfig,
         trusted_host_repos: Option<&[String]>,
     ) -> Result<Self> {
+        let session_id = uuid::Uuid::new_v4().to_string();
         warm_host_cargo_cache(ghost).await;
 
         if let Some(trusted_repos) = trusted_host_repos {
@@ -354,6 +356,7 @@ impl DockerSession {
                 return Ok(Self {
                     backend: SessionBackend::Host { workspace },
                     timeout_secs: docker_config.timeout_secs,
+                    session_id,
                 });
             }
         }
@@ -463,7 +466,12 @@ impl DockerSession {
                 container_id: resp.id,
             },
             timeout_secs: docker_config.timeout_secs,
+            session_id,
         })
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn execution_mode(&self) -> &'static str {

@@ -13,7 +13,7 @@ use crate::llm::{
 };
 use crate::tools::ToolRegistry;
 
-use super::{LoopStrategy, StatusSender, TaskContract};
+use super::{materialize_tool_result, LoopStrategy, StatusSender, TaskContract};
 
 /// Read-only tools allowed in the EXPLORE phase
 const EXPLORE_TOOLS: &[&str] = &[
@@ -604,7 +604,7 @@ impl CodeStrategy {
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
-                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    let output = materialize_tool_result(result)?;
                     tracing::debug!(step, tool = %tc.name, path = "native", "EXPLORE tool executed");
                     history.push(ChatMessage::Tool {
                         tool_call_id: tc.id.clone(),
@@ -1015,7 +1015,7 @@ impl CodeStrategy {
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
-                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    let output = materialize_tool_result(result)?;
                     tracing::debug!(step, tool = %tc.name, path = "native", "VERIFY tool executed");
                     history.push(ChatMessage::Tool {
                         tool_call_id: tc.id.clone(),

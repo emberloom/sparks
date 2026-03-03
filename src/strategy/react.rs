@@ -11,7 +11,7 @@ use crate::llm::{
 };
 use crate::tools::ToolRegistry;
 
-use super::{LoopStrategy, StatusSender, TaskContract};
+use super::{materialize_tool_result, LoopStrategy, StatusSender, TaskContract};
 
 pub struct ReactStrategy;
 
@@ -167,7 +167,7 @@ impl ReactStrategy {
 
                     let results = futures::future::join_all(futs).await;
                     for (tc, result) in results {
-                        let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                        let output = materialize_tool_result(result)?;
                         tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
                         history.push(ChatMessage::Tool {
                             tool_call_id: tc.id.clone(),
@@ -242,7 +242,7 @@ impl ReactStrategy {
 
                         let results = futures::future::join_all(futs).await;
                         for (tc, result) in results {
-                            let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                            let output = materialize_tool_result(result)?;
                             tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
                             history.push(ChatMessage::Tool {
                                 tool_call_id: tc.id.clone(),
