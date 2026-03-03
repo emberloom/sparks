@@ -1,14 +1,14 @@
 {
   "summary": {
     "files": 55,
-    "total_loc": 44549,
-    "functions": 1559,
+    "total_loc": 48871,
+    "functions": 1736,
     "fn_over_80": 74,
-    "fn_over_120": 39,
-    "files_over_1000_loc": 14,
-    "max_file_loc": 6665,
+    "fn_over_120": 40,
+    "files_over_1000_loc": 16,
+    "max_file_loc": 7700,
     "max_file_path": "src/main.rs",
-    "max_fn_len": 395,
+    "max_fn_len": 460,
     "max_fn_name": "extract_json_fenced",
     "max_fn_file": "src/llm.rs"
   },
@@ -21,8 +21,8 @@
       "fn_over_120": 0
     },
     "src/config.rs": {
-      "loc": 1391,
-      "fn_count": 90,
+      "loc": 1500,
+      "fn_count": 102,
       "max_fn_len": 92,
       "fn_over_80": 1,
       "fn_over_120": 0
@@ -49,15 +49,15 @@
       "fn_over_120": 0
     },
     "src/docker.rs": {
-      "loc": 204,
-      "fn_count": 5,
-      "max_fn_len": 108,
+      "loc": 684,
+      "fn_count": 30,
+      "max_fn_len": 128,
       "fn_over_80": 1,
-      "fn_over_120": 0
+      "fn_over_120": 1
     },
     "src/doctor.rs": {
-      "loc": 984,
-      "fn_count": 41,
+      "loc": 2274,
+      "fn_count": 96,
       "max_fn_len": 75,
       "fn_over_80": 0,
       "fn_over_120": 0
@@ -98,16 +98,16 @@
       "fn_over_120": 1
     },
     "src/executor.rs": {
-      "loc": 308,
+      "loc": 319,
       "fn_count": 3,
       "max_fn_len": 156,
       "fn_over_80": 2,
       "fn_over_120": 1
     },
     "src/feature_contract.rs": {
-      "loc": 621,
-      "fn_count": 19,
-      "max_fn_len": 167,
+      "loc": 1032,
+      "fn_count": 30,
+      "max_fn_len": 202,
       "fn_over_80": 1,
       "fn_over_120": 1
     },
@@ -154,23 +154,23 @@
       "fn_over_120": 0
     },
     "src/llm.rs": {
-      "loc": 2787,
-      "fn_count": 77,
-      "max_fn_len": 395,
+      "loc": 2878,
+      "fn_count": 78,
+      "max_fn_len": 460,
       "fn_over_80": 7,
       "fn_over_120": 5
     },
     "src/main.rs": {
-      "loc": 6665,
-      "fn_count": 187,
-      "max_fn_len": 299,
-      "fn_over_80": 11,
+      "loc": 7700,
+      "fn_count": 215,
+      "max_fn_len": 366,
+      "fn_over_80": 10,
       "fn_over_120": 6
     },
     "src/manager.rs": {
-      "loc": 2182,
-      "fn_count": 74,
-      "max_fn_len": 230,
+      "loc": 2332,
+      "fn_count": 79,
+      "max_fn_len": 248,
       "fn_over_80": 5,
       "fn_over_120": 3
     },
@@ -182,10 +182,10 @@
       "fn_over_120": 0
     },
     "src/memory.rs": {
-      "loc": 1358,
-      "fn_count": 61,
-      "max_fn_len": 64,
-      "fn_over_80": 0,
+      "loc": 1995,
+      "fn_count": 93,
+      "max_fn_len": 83,
+      "fn_over_80": 1,
       "fn_over_120": 0
     },
     "src/mood.rs": {
@@ -210,8 +210,8 @@
       "fn_over_120": 1
     },
     "src/openai_auth.rs": {
-      "loc": 509,
-      "fn_count": 24,
+      "loc": 547,
+      "fn_count": 25,
       "max_fn_len": 77,
       "fn_over_80": 0,
       "fn_over_120": 0
@@ -224,8 +224,8 @@
       "fn_over_120": 3
     },
     "src/profiles.rs": {
-      "loc": 141,
-      "fn_count": 4,
+      "loc": 191,
+      "fn_count": 10,
       "max_fn_len": 91,
       "fn_over_80": 1,
       "fn_over_120": 0
@@ -259,9 +259,9 @@
       "fn_over_120": 0
     },
     "src/reason_codes.rs": {
-      "loc": 13,
-      "fn_count": 2,
-      "max_fn_len": 3,
+      "loc": 31,
+      "fn_count": 3,
+      "max_fn_len": 13,
       "fn_over_80": 0,
       "fn_over_120": 0
     },
@@ -392,7 +392,7 @@
       "fn_over_120": 0
     },
     "src/tools.rs": {
-      "loc": 2801,
+      "loc": 2803,
       "fn_count": 179,
       "max_fn_len": 106,
       "fn_over_80": 3,
