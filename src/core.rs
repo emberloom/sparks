@@ -19,6 +19,9 @@ use crate::mood::MoodState;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::proactive::{self, ActivityTracker};
 use crate::profiles;
+use crate::prompt_scanner::{
+    PromptScanner, ScanDecision, ScanMetadata, ScanReport, ScanRuntimeOverrides,
+};
 use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
@@ -202,6 +205,7 @@ impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
         let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
         let llm_for_handle = llm.clone();
+        let prompt_scanner = Arc::new(PromptScanner::new(config.prompt_scanner.clone()));
 
         spawn_embedding_backfill(memory.clone(), embedder.clone());
 
@@ -245,6 +249,7 @@ impl AthenaCore {
             manager,
             auto_rx,
             config.clone(),
+            prompt_scanner,
             activity.clone(),
             knobs.clone(),
             observer.clone(),
@@ -301,6 +306,7 @@ fn spawn_core_loops(
     manager: Arc<Manager>,
     auto_rx: mpsc::Receiver<AutonomousTask>,
     config: Config,
+    prompt_scanner: Arc<PromptScanner>,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
@@ -315,6 +321,7 @@ fn spawn_core_loops(
     spawn_core_event_loop(
         rx,
         manager.clone(),
+        prompt_scanner.clone(),
         activity,
         knobs,
         observer.clone(),
@@ -325,6 +332,7 @@ fn spawn_core_loops(
         auto_rx,
         manager,
         config,
+        prompt_scanner,
         observer,
         pulse_bus,
         memory,
@@ -666,6 +674,7 @@ fn build_manager(
 fn spawn_core_event_loop(
     mut rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
+    prompt_scanner: Arc<PromptScanner>,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
@@ -680,6 +689,7 @@ fn spawn_core_event_loop(
                 handle_core_request(
                     req,
                     manager.clone(),
+                    prompt_scanner.clone(),
                     activity.clone(),
                     knobs.clone(),
                     observer.clone(),
@@ -692,6 +702,142 @@ fn spawn_core_event_loop(
     });
 }
 
+fn parse_context_value(context: &str, key: &str) -> Option<String> {
+    context
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_external_id_from_dedup_key(dedup_key: &str) -> String {
+    dedup_key
+        .rsplit_once(':')
+        .map(|(_, id)| id.to_string())
+        .unwrap_or_else(|| dedup_key.to_string())
+}
+
+fn scan_metadata_for_chat(req: &CoreRequest) -> ScanMetadata {
+    let dedup = req.session.session_key();
+    ScanMetadata {
+        dedup_key: dedup.clone(),
+        external_id: dedup,
+        number: None,
+        provider: format!("chat:{}", req.session.platform),
+        repo: "chat".to_string(),
+        author: Some(req.session.user_id.clone()),
+    }
+}
+
+fn scan_metadata_for_task(task: &AutonomousTask, task_id: &str) -> ScanMetadata {
+    let source = parse_context_value(&task.context, "Source: ")
+        .unwrap_or_else(|| format!("lane:{}", task.lane));
+    let dedup_key = task_id
+        .strip_prefix("ticket:")
+        .unwrap_or(task_id)
+        .to_string();
+    let number = parse_context_value(&task.context, "Number: ");
+    let author = parse_context_value(&task.context, "Author: ");
+    ScanMetadata {
+        dedup_key: dedup_key.clone(),
+        external_id: parse_external_id_from_dedup_key(&dedup_key),
+        number,
+        provider: source,
+        repo: task.repo.clone(),
+        author,
+    }
+}
+
+fn log_prompt_scan(
+    observer: &ObserverHandle,
+    category: ObserverCategory,
+    surface: &str,
+    report: &ScanReport,
+    metadata: &ScanMetadata,
+) {
+    if report.findings.is_empty() {
+        return;
+    }
+    observer.log(
+        category,
+        format!(
+            "Prompt scanner {} decision={} score={} mode={} allowlisted={} rules={} provider={} repo={} excerpt={}",
+            surface,
+            report.decision.as_str(),
+            report.score,
+            report.mode_used.as_str(),
+            report.allowlisted,
+            report.finding_ids_csv(),
+            metadata.provider,
+            metadata.repo,
+            report.redacted_excerpt
+        ),
+    );
+}
+
+async fn should_block_chat_input(
+    req: &CoreRequest,
+    prompt_scanner: &PromptScanner,
+    observer: &ObserverHandle,
+    session_key: &str,
+) -> bool {
+    let scan_metadata = scan_metadata_for_chat(req);
+    let scan_report =
+        prompt_scanner.scan(&req.input, &scan_metadata, ScanRuntimeOverrides::default());
+    log_prompt_scan(
+        observer,
+        ObserverCategory::ChatIn,
+        "chat_intake",
+        &scan_report,
+        &scan_metadata,
+    );
+    if scan_report.decision != ScanDecision::Block {
+        return false;
+    }
+    let blocked_reason = format!(
+        "Input blocked by prompt scanner (rules: {})",
+        scan_report.finding_ids_csv()
+    );
+    observer.log(
+        ObserverCategory::ChatOut,
+        format!("{} ERROR: {}", session_key, blocked_reason),
+    );
+    let _ = req.event_tx.send(CoreEvent::Error(blocked_reason)).await;
+    true
+}
+
+fn scan_autonomous_task_input(
+    task: &AutonomousTask,
+    task_id: &str,
+    prompt_scanner: &PromptScanner,
+    observer: &ObserverHandle,
+) -> std::result::Result<(), crate::error::AthenaError> {
+    let scan_metadata = scan_metadata_for_task(task, task_id);
+    let scan_input = format!("{}\n\n{}", task.goal, task.context);
+    let scan_report =
+        prompt_scanner.scan(&scan_input, &scan_metadata, ScanRuntimeOverrides::default());
+    let scan_category = if task.lane == "ticket_intake" {
+        ObserverCategory::TicketIntake
+    } else {
+        ObserverCategory::AutonomousTask
+    };
+    log_prompt_scan(
+        observer,
+        scan_category,
+        "autonomous_task_intake",
+        &scan_report,
+        &scan_metadata,
+    );
+    if scan_report.decision == ScanDecision::Block {
+        return Err(crate::error::AthenaError::Tool(format!(
+            "Prompt scanner blocked task intake (rules: {})",
+            scan_report.finding_ids_csv()
+        )));
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "signature kept explicit for orchestration wiring"
@@ -699,6 +845,7 @@ fn spawn_core_event_loop(
 async fn handle_core_request(
     req: CoreRequest,
     manager: Arc<Manager>,
+    prompt_scanner: Arc<PromptScanner>,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
@@ -711,6 +858,9 @@ async fn handle_core_request(
         ObserverCategory::ChatIn,
         format!("{} \"{}\"", session_key, truncate_obs(&req.input, 80)),
     ));
+    if should_block_chat_input(&req, &prompt_scanner, &observer, &session_key).await {
+        return;
+    }
     let _ = req
         .event_tx
         .send(CoreEvent::Status("Thinking...".into()))
@@ -772,6 +922,7 @@ fn spawn_autonomous_task_consumer(
     mut auto_rx: mpsc::Receiver<AutonomousTask>,
     manager: Arc<Manager>,
     config: Config,
+    prompt_scanner: Arc<PromptScanner>,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
@@ -782,6 +933,7 @@ fn spawn_autonomous_task_consumer(
         while let Some(task) = auto_rx.recv().await {
             let manager = manager.clone();
             let config = config.clone();
+            let prompt_scanner = prompt_scanner.clone();
             let observer = observer.clone();
             let pulse_bus = pulse_bus.clone();
             let memory = memory.clone();
@@ -792,6 +944,7 @@ fn spawn_autonomous_task_consumer(
                     task,
                     manager,
                     config,
+                    prompt_scanner,
                     observer,
                     pulse_bus,
                     memory,
@@ -808,6 +961,7 @@ async fn execute_autonomous_task(
     task: AutonomousTask,
     manager: Arc<Manager>,
     config: Config,
+    prompt_scanner: Arc<PromptScanner>,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
@@ -846,36 +1000,39 @@ async fn execute_autonomous_task(
 
     let (verification_total_on_fail, _) = infer_verification_counters(&task.goal, None, false);
     let rolled_back_on_fail = infer_rollback_flag(&task.goal, None);
-    match run_manager_autonomous_task(&manager, &task, &confirmer).await {
-        Ok(result) => {
-            handle_autonomous_task_success(
-                &task,
-                &task_id,
-                &ghost_label,
-                &goal_summary,
-                result,
-                &config,
-                &observer,
-                &pulse_bus,
-                &memory,
-                &outcome_store,
-            )
-            .await
-        }
-        Err(e) => handle_autonomous_task_failure(
+    if let Err(err) = scan_autonomous_task_input(&task, &task_id, &prompt_scanner, &observer) {
+        fail_autonomous_task(
             &task,
             &task_id,
             &ghost_label,
             &goal_summary,
-            &e,
+            &err,
             verification_total_on_fail,
             rolled_back_on_fail,
             &observer,
             &pulse_bus,
             &memory,
             &outcome_store,
-        ),
+        );
+        introspect::dec_active_tasks();
+        return;
     }
+    let manager_result = run_manager_autonomous_task(&manager, &task, &confirmer).await;
+    finalize_autonomous_task_run(
+        &task,
+        &task_id,
+        &ghost_label,
+        &goal_summary,
+        manager_result,
+        &config,
+        verification_total_on_fail,
+        rolled_back_on_fail,
+        &observer,
+        &pulse_bus,
+        &memory,
+        &outcome_store,
+    )
+    .await;
     introspect::dec_active_tasks();
 }
 
@@ -894,6 +1051,88 @@ async fn run_manager_autonomous_task(
             confirmer,
         )
         .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+fn fail_autonomous_task(
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    err: &crate::error::AthenaError,
+    verification_total_on_fail: u64,
+    rolled_back_on_fail: bool,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    handle_autonomous_task_failure(
+        task,
+        task_id,
+        ghost_label,
+        goal_summary,
+        err,
+        verification_total_on_fail,
+        rolled_back_on_fail,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+async fn finalize_autonomous_task_run(
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    manager_result: Result<String>,
+    config: &Config,
+    verification_total_on_fail: u64,
+    rolled_back_on_fail: bool,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    match manager_result {
+        Ok(result) => {
+            handle_autonomous_task_success(
+                task,
+                task_id,
+                ghost_label,
+                goal_summary,
+                result,
+                config,
+                observer,
+                pulse_bus,
+                memory,
+                outcome_store,
+            )
+            .await
+        }
+        Err(e) => fail_autonomous_task(
+            task,
+            task_id,
+            ghost_label,
+            goal_summary,
+            &e,
+            verification_total_on_fail,
+            rolled_back_on_fail,
+            observer,
+            pulse_bus,
+            memory,
+            outcome_store,
+        ),
+    }
 }
 
 #[allow(

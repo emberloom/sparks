@@ -8,6 +8,7 @@ use crate::error::{AthenaError, Result};
 use crate::llm::{
     LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
 };
+use crate::prompt_scanner::PromptScannerConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -51,6 +52,8 @@ pub struct Config {
     pub github: GithubConfig,
     #[serde(default)]
     pub ticket_intake: TicketIntakeConfig,
+    #[serde(default)]
+    pub prompt_scanner: PromptScannerConfig,
     #[serde(default)]
     pub self_dev: SelfDevConfig,
     #[serde(default)]
@@ -959,6 +962,7 @@ impl Default for Config {
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
             ticket_intake: TicketIntakeConfig::default(),
+            prompt_scanner: PromptScannerConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
             inline_secret_labels: Vec::new(),

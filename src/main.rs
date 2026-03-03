@@ -23,6 +23,7 @@ mod observer;
 mod openai_auth;
 mod proactive;
 mod profiles;
+mod prompt_scanner;
 mod pulse;
 mod randomness;
 mod reason_codes;

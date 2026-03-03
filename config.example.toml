@@ -213,6 +213,31 @@ timeout_secs = 1200
 # linear_secret_env = "LINEAR_WEBHOOK_SECRET"
 # jira_secret_env = "JIRA_WEBHOOK_SECRET"
 
+[prompt_scanner]
+# Input-layer scanner runs before classifier/LLM execution for chat + autonomous tasks.
+enabled = true
+# `flag_only` logs findings and continues, `block` rejects risky inputs before model execution.
+mode = "flag_only"
+flag_threshold = 4
+block_threshold = 8
+max_findings = 8
+max_log_chars = 180
+
+[prompt_scanner.allowlist]
+# Optional safety valve for known false positives.
+ticket_ids = []
+repos = []
+providers = []
+authors = []
+text_patterns = []
+# If true, allowlisted inputs are downgraded from block -> flag.
+downgrade_block_to_flag = true
+
+# [[prompt_scanner.mode_overrides]]
+# provider = "linear"
+# repo = "LNY"
+# mode = "block"
+
 # Langfuse observability - traces all LLM calls and agent activities
 # Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
 [langfuse]

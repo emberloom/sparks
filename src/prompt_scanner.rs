@@ -52,18 +52,6 @@ pub enum FindingClass {
     PolicyBypass,
 }
 
-impl FindingClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OverrideAttempt => "override_attempt",
-            Self::SecretExfiltration => "secret_exfiltration",
-            Self::ShellInjectionLike => "shell_injection_like",
-            Self::ToolEscalation => "tool_escalation",
-            Self::PolicyBypass => "policy_bypass",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingSeverity {
     Medium,
@@ -77,14 +65,6 @@ impl FindingSeverity {
             Self::Medium => 2,
             Self::High => 4,
             Self::Critical => 6,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Critical => "critical",
         }
     }
 }
@@ -133,18 +113,6 @@ pub struct ScanMetadata {
 pub struct ScanRuntimeOverrides {
     pub enabled: Option<bool>,
     pub mode: Option<PromptScannerMode>,
-}
-
-impl ScanRuntimeOverrides {
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = Some(enabled);
-        self
-    }
-
-    pub fn with_mode(mut self, mode: PromptScannerMode) -> Self {
-        self.mode = Some(mode);
-        self
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -270,14 +238,6 @@ impl PromptScanner {
             heuristic_rules,
             allowlist_text_patterns,
         }
-    }
-
-    pub fn mode(&self) -> PromptScannerMode {
-        self.config.mode
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.config.enabled
     }
 
     pub fn scan(
@@ -584,7 +544,10 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 }
 
 fn provider_base(provider: &str) -> &str {
-    provider.split_once(':').map(|(base, _)| base).unwrap_or(provider)
+    provider
+        .split_once(':')
+        .map(|(base, _)| base)
+        .unwrap_or(provider)
 }
 
 fn default_prompt_scanner_enabled() -> bool {
@@ -745,9 +708,13 @@ mod tests {
 
     #[test]
     fn redact_masks_token_like_content() {
-        let redacted =
-            redact_for_log("Here is token sk-1234567890ABCDEF123456 and KEY=abcdefghijklmno", 200);
-        assert!(redacted.contains("[REDACTED_TOKEN]") || redacted.contains("[REDACTED_ASSIGNMENT]"));
+        let redacted = redact_for_log(
+            "Here is token sk-1234567890ABCDEF123456 and KEY=abcdefghijklmno",
+            200,
+        );
+        assert!(
+            redacted.contains("[REDACTED_TOKEN]") || redacted.contains("[REDACTED_ASSIGNMENT]")
+        );
     }
 
     #[test]
