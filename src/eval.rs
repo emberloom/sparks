@@ -289,7 +289,8 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
     let scenario_library = load_scenario_library(&scenario_library_path)?;
     validate_schema_v1(&scenario_library.schema_version, "scenario library")?;
 
-    let temp_run_dir = std::env::temp_dir().join(format!("athena-eval-run-{}", uuid::Uuid::new_v4()));
+    let temp_run_dir =
+        std::env::temp_dir().join(format!("athena-eval-run-{}", uuid::Uuid::new_v4()));
     let harness_output_dir = temp_run_dir.join("harness");
     let harness_history_path = temp_run_dir.join("history.jsonl");
     fs::create_dir_all(&harness_output_dir).with_context(|| {
@@ -347,11 +348,19 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
         })?;
 
     ensure_exists(&report_json_path, "harness report json")?;
-    let harness_report: HarnessReport = serde_json::from_str(
-        &fs::read_to_string(&report_json_path)
-            .with_context(|| format!("failed to read harness report {}", report_json_path.display()))?,
-    )
-    .with_context(|| format!("failed to parse harness report {}", report_json_path.display()))?;
+    let harness_report: HarnessReport =
+        serde_json::from_str(&fs::read_to_string(&report_json_path).with_context(|| {
+            format!(
+                "failed to read harness report {}",
+                report_json_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "failed to parse harness report {}",
+                report_json_path.display()
+            )
+        })?;
 
     let scenario = resolve_scenario(&scenario_library, &suite_path, &repo_root);
     let mut gate_reasons = harness_report.gate_reasons.clone();
@@ -478,7 +487,11 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
     println!("harness_exit_code={}", harness_exit_code);
     println!(
         "verdict={}",
-        if scorecard.summary.gate_ok { "ok" } else { "regression" }
+        if scorecard.summary.gate_ok {
+            "ok"
+        } else {
+            "regression"
+        }
     );
 
     let _ = fs::remove_dir_all(&temp_run_dir);
@@ -513,7 +526,13 @@ fn handle_eval_compare(args: EvalCompareArgs) -> anyhow::Result<()> {
         max_quality_drop: args.max_quality_drop,
         max_safety_increase: args.max_safety_increase,
     };
-    let report = compare_scorecards(&baseline, &candidate, &thresholds, &baseline_path, &candidate_path);
+    let report = compare_scorecards(
+        &baseline,
+        &candidate,
+        &thresholds,
+        &baseline_path,
+        &candidate_path,
+    );
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -820,8 +839,8 @@ fn compute_sha256_hex(path: &Path) -> anyhow::Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes =
-        fs::read(path).with_context(|| format!("failed to read file for hash {}", path.display()))?;
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read file for hash {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(Some(format!("{:x}", hasher.finalize())))
@@ -972,9 +991,15 @@ mod tests {
             Path::new("candidate.json"),
         );
         assert_eq!(report.verdict, "regression");
-        assert!(report.regressions.contains(&"success.pass_rate".to_string()));
-        assert!(report.regressions.contains(&"quality.overall_score".to_string()));
-        assert!(report.regressions.contains(&"safety.failed_rate".to_string()));
+        assert!(report
+            .regressions
+            .contains(&"success.pass_rate".to_string()));
+        assert!(report
+            .regressions
+            .contains(&"quality.overall_score".to_string()));
+        assert!(report
+            .regressions
+            .contains(&"safety.failed_rate".to_string()));
     }
 
     #[test]

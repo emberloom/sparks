@@ -1,0 +1,44 @@
+{
+  "schema_version": "v1",
+  "library_id": "athena-eval-scenarios-v1",
+  "description": "Versioned scenario manifest for athena eval CLI scorecards.",
+  "scenarios": [
+    {
+      "id": "benchmark-suite",
+      "suite_path": "eval/benchmark-suite.json",
+      "description": "Default mixed lane benchmark suite",
+      "tags": [
+        "default",
+        "mixed",
+        "core"
+      ]
+    },
+    {
+      "id": "benchmark-real-gate",
+      "suite_path": "eval/benchmark-real-gate.json",
+      "description": "Delivery-focused real quality gate suite",
+      "tags": [
+        "real-gate",
+        "delivery"
+      ]
+    },
+    {
+      "id": "benchmark-cli-smoke",
+      "suite_path": "eval/benchmark-cli-smoke.json",
+      "description": "Lightweight integration smoke suite",
+      "tags": [
+        "smoke",
+        "cli"
+      ]
+    },
+    {
+      "id": "benchmark-mini-ci",
+      "suite_path": "eval/benchmark-mini-ci.json",
+      "description": "CI-friendly mock dispatch smoke suite",
+      "tags": [
+        "ci",
+        "smoke"
+      ]
+    }
+  ]
+}

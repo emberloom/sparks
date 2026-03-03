@@ -8,6 +8,7 @@ mod doctor;
 mod dynamic_tools;
 mod embeddings;
 mod error;
+mod eval;
 mod executor;
 mod feature_contract;
 mod heartbeat;
@@ -218,6 +219,11 @@ enum Commands {
         /// Output file path (default depends on --output-format)
         #[arg(long)]
         out_file: Option<PathBuf>,
+    },
+    /// Run versioned eval suites and compare scorecards
+    Eval {
+        #[command(subcommand)]
+        action: eval::EvalAction,
     },
     /// Execute multi-task feature contracts with DAG dependency ordering
     Feature {
@@ -612,6 +618,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
     }
+    // Handle eval subcommand early — it shells out to eval harness and does
+    // not require booting core/runtime services.
+    if let Some(Commands::Eval { action }) = &cli.command {
+        return eval::handle_eval(action.clone(), cli.config.as_deref());
+    }
 
     match dotenvy::dotenv_override() {
         Ok(path) => eprintln!("Loaded .env from {}", path.display()),
@@ -819,6 +830,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
         Some(Commands::Dashboard { .. }) => unreachable!(), // handled above
+        Some(Commands::Eval { .. }) => unreachable!(),      // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
