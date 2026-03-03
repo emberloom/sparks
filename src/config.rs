@@ -370,6 +370,16 @@ pub struct MemoryConfig {
     pub dedup_threshold: f32,
     #[serde(default = "default_retrieval_cache_capacity")]
     pub retrieval_cache_capacity: usize,
+    #[serde(default = "default_hnsw_enabled")]
+    pub hnsw_enabled: bool,
+    #[serde(default = "default_hnsw_min_index_size")]
+    pub hnsw_min_index_size: usize,
+    #[serde(default = "default_hnsw_m")]
+    pub hnsw_m: usize,
+    #[serde(default = "default_hnsw_ef_construction")]
+    pub hnsw_ef_construction: usize,
+    #[serde(default = "default_hnsw_ef_search")]
+    pub hnsw_ef_search: usize,
 }
 
 impl Default for MemoryConfig {
@@ -378,6 +388,11 @@ impl Default for MemoryConfig {
             recency_half_life_days: default_half_life(),
             dedup_threshold: default_dedup_threshold(),
             retrieval_cache_capacity: default_retrieval_cache_capacity(),
+            hnsw_enabled: default_hnsw_enabled(),
+            hnsw_min_index_size: default_hnsw_min_index_size(),
+            hnsw_m: default_hnsw_m(),
+            hnsw_ef_construction: default_hnsw_ef_construction(),
+            hnsw_ef_search: default_hnsw_ef_search(),
         }
     }
 }
@@ -390,6 +405,21 @@ fn default_dedup_threshold() -> f32 {
 }
 fn default_retrieval_cache_capacity() -> usize {
     256
+}
+fn default_hnsw_enabled() -> bool {
+    true
+}
+fn default_hnsw_min_index_size() -> usize {
+    64
+}
+fn default_hnsw_m() -> usize {
+    16
+}
+fn default_hnsw_ef_construction() -> usize {
+    200
+}
+fn default_hnsw_ef_search() -> usize {
+    64
 }
 
 #[derive(Debug, Deserialize, Clone)]

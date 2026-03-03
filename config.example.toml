@@ -180,6 +180,16 @@ enabled = true
 # dedup_threshold = 0.95
 # In-process LRU capacity for hybrid retrieval results (0 disables cache).
 # retrieval_cache_capacity = 256
+# Enable HNSW approximate nearest-neighbor index for semantic retrieval.
+# hnsw_enabled = true
+# Minimum embedded memory count before HNSW is built (below this uses exact cosine fallback).
+# hnsw_min_index_size = 64
+# HNSW graph connectivity parameter (typical range: 8-48).
+# hnsw_m = 16
+# HNSW construction breadth (higher is slower build, better recall).
+# hnsw_ef_construction = 200
+# HNSW query breadth (higher is slower query, better recall).
+# hnsw_ef_search = 64
 
 [telegram]
 # token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`

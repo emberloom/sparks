@@ -17,7 +17,7 @@ Close the repeated-query latency gap in memory retrieval without sacrificing cor
 Quality improves over time because:
 - recency decay continuously prioritizes fresher evidence;
 - dedup collapses near-duplicates on write;
-- semantic retrieval (ANN slot; currently in-process cosine scan) captures meaning beyond keywords;
+- semantic retrieval (HNSW ANN with exact fallback) captures meaning beyond keywords;
 - FTS retains strong exact/phrase recall;
 - hybrid merge combines both recall modes before recency weighting.
 

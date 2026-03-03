@@ -246,7 +246,13 @@ mod tests {
             );
             CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);"
         ).unwrap();
-        let store = crate::memory::MemoryStore::new(conn, 30.0, 0.95, 256);
+        let store = crate::memory::MemoryStore::new_with_hnsw(
+            conn,
+            30.0,
+            0.95,
+            256,
+            crate::memory::HnswIndexConfig::default(),
+        );
 
         let corpus = build_bench_corpus();
 

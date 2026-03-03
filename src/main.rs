@@ -48,7 +48,7 @@ use config::Config;
 use confirm::CliConfirmer;
 use core::{AthenaCore, CoreEvent, SessionContext};
 use embeddings::Embedder;
-use memory::MemoryStore;
+use memory::{HnswIndexConfig, MemoryStore};
 use observer::ObserverCategory;
 use scheduler::Schedule;
 
@@ -631,11 +631,18 @@ async fn main() -> anyhow::Result<()> {
     // Initialize database
     let db_path = config.db_path()?;
     let conn = db::init_db(&db_path)?;
-    let memory = Arc::new(MemoryStore::new(
+    let memory = Arc::new(MemoryStore::new_with_hnsw(
         conn,
         config.memory.recency_half_life_days,
         config.memory.dedup_threshold,
         config.memory.retrieval_cache_capacity,
+        HnswIndexConfig {
+            enabled: config.memory.hnsw_enabled,
+            min_index_size: config.memory.hnsw_min_index_size,
+            m: config.memory.hnsw_m,
+            ef_construction: config.memory.hnsw_ef_construction,
+            ef_search: config.memory.hnsw_ef_search,
+        },
     ));
 
     let needs_cli_embedder = matches!(cli.command, Some(Commands::Memory { .. }));

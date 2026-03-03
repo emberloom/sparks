@@ -1067,7 +1067,13 @@ mod tests {
             );",
         )
         .unwrap();
-        MemoryStore::new(conn, 30.0, 1.0, 256)
+        MemoryStore::new_with_hnsw(
+            conn,
+            30.0,
+            1.0,
+            256,
+            crate::memory::HnswIndexConfig::default(),
+        )
     }
 
     fn setup_test_db_with_failure(category: &str, content: &str, age_hours: i64) -> MemoryStore {
@@ -1116,7 +1122,13 @@ mod tests {
             rusqlite::params![1i64, content],
         )
         .unwrap();
-        MemoryStore::new(conn, 30.0, 1.0, 256)
+        MemoryStore::new_with_hnsw(
+            conn,
+            30.0,
+            1.0,
+            256,
+            crate::memory::HnswIndexConfig::default(),
+        )
     }
 
     #[tokio::test]
