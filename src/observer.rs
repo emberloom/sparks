@@ -24,9 +24,11 @@ pub enum ObserverCategory {
     ChatIn,
     ChatOut,
     AutonomousTask,
+    TicketIntake,
     ToolUsage,
     ToolReload,
     SelfMetrics,
+    CiMonitor,
 }
 
 impl ObserverCategory {
@@ -47,9 +49,11 @@ impl ObserverCategory {
             Self::ChatIn => "CHAT_IN",
             Self::ChatOut => "CHAT_OUT",
             Self::AutonomousTask => "AUTO_TASK",
+            Self::TicketIntake => "TICKET",
             Self::ToolUsage => "TOOL_USE",
             Self::ToolReload => "TOOL_RELOAD",
             Self::SelfMetrics => "SELF_METRICS",
+            Self::CiMonitor => "CI_MON",
         }
     }
 
@@ -71,9 +75,11 @@ impl ObserverCategory {
             Self::ChatIn => "\x1b[1;34m",         // bright blue
             Self::ChatOut => "\x1b[1;35m",        // bright magenta
             Self::AutonomousTask => "\x1b[1;33m", // bright yellow
+            Self::TicketIntake => "\x1b[1;36m",   // bright cyan
             Self::ToolUsage => "\x1b[36m",        // cyan
             Self::ToolReload => "\x1b[1;33m",     // bright yellow
             Self::SelfMetrics => "\x1b[2;36m",    // dim cyan
+            Self::CiMonitor => "\x1b[1;36m",      // bright cyan
         }
     }
 }

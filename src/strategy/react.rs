@@ -7,11 +7,11 @@ use crate::error::{AthenaError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{
-    self, ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
+    ChatMessage, ChatResponse, LlmProvider, Message, StreamEvent, TokenBudget, ToolCall,
 };
 use crate::tools::ToolRegistry;
 
-use super::{LoopStrategy, StatusSender, TaskContract};
+use super::{materialize_tool_result, LoopStrategy, StatusSender, TaskContract};
 
 pub struct ReactStrategy;
 
@@ -167,7 +167,7 @@ impl ReactStrategy {
 
                     let results = futures::future::join_all(futs).await;
                     for (tc, result) in results {
-                        let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                        let output = materialize_tool_result(result)?;
                         tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
                         history.push(ChatMessage::Tool {
                             tool_call_id: tc.id.clone(),
@@ -242,7 +242,7 @@ impl ReactStrategy {
 
                         let results = futures::future::join_all(futs).await;
                         for (tc, result) in results {
-                            let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                            let output = materialize_tool_result(result)?;
                             tracing::debug!(step, tool = %tc.name, path = "native", "Tool executed");
                             history.push(ChatMessage::Tool {
                                 tool_call_id: tc.id.clone(),
@@ -295,10 +295,10 @@ impl ReactStrategy {
             history.push(Message::assistant(&response));
 
             // Try to extract a tool call from the response
-            let json = match llm::extract_json(&response) {
-                Some(v) if v.get("tool").is_some() => v,
-                _ => {
-                    // No tool call — LLM is giving a final answer.
+            let json = match parse_text_tool_envelope(&response) {
+                Some(v) => v,
+                None => {
+                    // No valid tool envelope — LLM is giving a final answer.
                     tracing::info!(step, path = "text", "ReAct complete (text response)");
                     return Ok(response);
                 }
@@ -318,6 +318,23 @@ impl ReactStrategy {
     }
 }
 
+fn parse_text_tool_envelope(response: &str) -> Option<serde_json::Value> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let tool = json.get("tool")?.as_str()?;
+    if tool.is_empty() {
+        return None;
+    }
+    let params = json.get("params")?;
+    if !params.is_object() {
+        return None;
+    }
+    Some(json)
+}
+
 /// Truncate a string at a UTF-8 boundary for Langfuse output fields.
 fn lf_truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -325,6 +342,34 @@ fn lf_truncate(s: &str, max: usize) -> String {
     } else {
         let end = s.floor_char_boundary(max);
         format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_text_tool_envelope;
+    use serde_json::json;
+
+    #[test]
+    fn parse_text_tool_envelope_accepts_valid_json() {
+        let payload = json!({
+            "tool": "grep",
+            "params": { "pattern": "todo" }
+        });
+        let parsed = parse_text_tool_envelope(&payload.to_string());
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn parse_text_tool_envelope_rejects_prose_without_json() {
+        let parsed = parse_text_tool_envelope("Sure, I'll do that next.");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_text_tool_envelope_rejects_malformed_json() {
+        let parsed = parse_text_tool_envelope("{\"tool\": \"grep\", \"params\": }");
+        assert!(parsed.is_none());
     }
 }
 

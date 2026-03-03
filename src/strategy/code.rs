@@ -13,7 +13,7 @@ use crate::llm::{
 };
 use crate::tools::ToolRegistry;
 
-use super::{LoopStrategy, StatusSender, TaskContract};
+use super::{materialize_tool_result, LoopStrategy, StatusSender, TaskContract};
 
 /// Read-only tools allowed in the EXPLORE phase
 const EXPLORE_TOOLS: &[&str] = &[
@@ -56,6 +56,7 @@ const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 
 const MAX_EXPLORE_STEPS: usize = 5;
 const MAX_VERIFY_STEPS: usize = 5;
+const MAX_SELF_HEAL_ATTEMPTS: usize = 2;
 const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +80,146 @@ struct ExplorationResult {
     plan: String,
     context: String,
     files: String,
+}
+
+/// Build a ripple-effect warning from exploration file list.
+fn build_ripple_section(files: &str) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let file_names: Vec<&str> = files
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_start_matches("- ");
+            if trimmed.ends_with(".rs")
+                || trimmed.ends_with(".py")
+                || trimmed.ends_with(".ts")
+                || trimmed.ends_with(".go")
+                || trimmed.contains("src/")
+            {
+                Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
+            } else {
+                None
+            }
+        })
+        .take(10)
+        .collect();
+    if file_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
+             Check for breaking changes to public APIs.",
+            file_names.join(", ")
+        )
+    }
+}
+
+/// Build the full execution prompt from exploration results, contract, and ripple analysis.
+fn build_execution_prompt(
+    exploration: &ExplorationResult,
+    contract: &TaskContract,
+    ripple_section: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if !exploration.context.is_empty() {
+        parts.push(format!("CODEBASE CONTEXT:\n{}", exploration.context));
+    }
+    parts.push(format!("TASK:\n{}", exploration.plan));
+    if !contract.constraints.is_empty() {
+        parts.push(format!(
+            "CONSTRAINTS:\n{}",
+            contract
+                .constraints
+                .iter()
+                .map(|c| format!("- {}", c))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !ripple_section.is_empty() {
+        parts.push(ripple_section.to_string());
+    }
+    parts.join("\n\n")
+}
+
+fn build_cli_candidate_order(
+    preferred: Option<&str>,
+    routed: &[String],
+    available: &[&str],
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Some(pref) = preferred.filter(|pref| available.contains(pref)) {
+        candidates.push(pref.to_string());
+    }
+
+    for tool in routed {
+        if available.contains(&tool.as_str()) && !candidates.iter().any(|c| c == tool) {
+            candidates.push(tool.clone());
+        }
+    }
+
+    for &name in CODING_TOOLS {
+        if available.contains(&name) && !candidates.iter().any(|c| c == name) {
+            candidates.push(name.to_string());
+        }
+    }
+
+    candidates
+}
+
+/// Attempt a prompt-rewrite retry when the coding tool fails on the last candidate.
+async fn retry_with_prompt_rewrite(
+    tool_name: &str,
+    tool: &dyn crate::tools::Tool,
+    docker: &DockerSession,
+    llm: &dyn LlmProvider,
+    full_prompt: &str,
+    context: &str,
+    files: &str,
+    error_output: &str,
+    failures: &mut Vec<String>,
+) -> Result<Option<String>> {
+    tracing::warn!(
+        tool = tool_name,
+        "EXECUTE: coding tool failed, attempting retry"
+    );
+    let retry_messages = vec![
+        Message::system(
+            "You are helping with a coding task. The coding tool failed. \
+             Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
+        ),
+        Message::user(&format!(
+            "Original prompt:\n{}\n\nError output:\n{}\n\n\
+             Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
+            full_prompt, error_output
+        )),
+    ];
+
+    let revised_prompt = llm.chat(&retry_messages).await?;
+    let retry_params = serde_json::json!({
+        "prompt": revised_prompt,
+        "context": format!("{}\n\nPrevious attempt failed with:\n{}", context, error_output),
+        "files": files,
+    });
+
+    tracing::info!(tool = tool_name, "EXECUTE: retrying with revised prompt");
+    match tool.execute(docker, &retry_params).await {
+        Ok(retry_result) if retry_result.success => Ok(Some(retry_result.output)),
+        Ok(retry_result) => {
+            failures.push(format!(
+                "{} (retry): {}",
+                tool_name,
+                lf_truncate(&retry_result.output, 250)
+            ));
+            Ok(None)
+        }
+        Err(e) => {
+            failures.push(format!("{} (retry): {}", tool_name, e));
+            Ok(None)
+        }
+    }
 }
 
 pub struct CodeStrategy;
@@ -188,76 +329,164 @@ impl LoopStrategy for CodeStrategy {
             s.end(Some(&lf_truncate(&summary, 500)));
         }
 
-        // Phase 3b: SELF-HEAL — if test failures detected, attempt one corrective cycle
+        // Phase 3b: SELF-HEAL — if test failures detected, attempt corrective cycles
         if contract.test_generation {
-            if let Some(fix_contract) = crate::self_heal::attempt_test_fix(&summary, &contract.goal)
+            if let Some(fix_summary) = self
+                .run_self_heal(
+                    contract, tools, docker, llm, executor, confirmer, status_tx, trace,
+                    use_native, &summary,
+                )
+                .await?
             {
-                tracing::warn!("CodeStrategy: test failures detected, attempting self-heal");
-                send_status(status_tx, "Test failures detected — attempting fix...").await;
-                let heal_span =
-                    trace.map(|t| t.span("phase:self_heal", Some(&lf_truncate(&summary, 300))));
-
-                // Re-run EXECUTE with the corrective contract
-                let fix_exploration = ExplorationResult {
-                    plan: fix_contract.goal.clone(),
-                    context: fix_contract.context.clone(),
-                    files: String::new(),
-                };
-
-                match self
-                    .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
-                    .instrument(tracing::info_span!("self_heal_execute"))
-                    .await
-                {
-                    Ok(fix_result) => {
-                        // Re-verify after fix
-                        send_status(status_tx, "Re-verifying after fix...").await;
-                        let fix_summary = if use_native {
-                            self.verify_native(
-                                contract,
-                                tools,
-                                docker,
-                                llm,
-                                &fix_result,
-                                executor,
-                                confirmer,
-                                status_tx,
-                                trace,
-                            )
-                            .instrument(tracing::info_span!("self_heal_verify"))
-                            .await?
-                        } else {
-                            self.verify_text_fallback(
-                                contract,
-                                tools,
-                                docker,
-                                llm,
-                                &fix_result,
-                                executor,
-                                confirmer,
-                                status_tx,
-                                trace,
-                            )
-                            .instrument(tracing::info_span!("self_heal_verify"))
-                            .await?
-                        };
-                        tracing::info!("CodeStrategy: self-heal cycle complete");
-                        if let Some(s) = heal_span {
-                            s.end(Some("fixed"));
-                        }
-                        return Ok(fix_summary);
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
-                        if let Some(s) = heal_span {
-                            s.end(Some(&format!("failed: {}", e)));
-                        }
-                    }
-                }
+                return Ok(fix_summary);
             }
         }
 
         Ok(summary)
+    }
+}
+
+impl CodeStrategy {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "signature kept explicit for orchestration wiring"
+    )]
+    async fn run_self_heal(
+        &self,
+        contract: &TaskContract,
+        tools: &ToolRegistry,
+        docker: &DockerSession,
+        llm: &dyn LlmProvider,
+        executor: &Executor,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        use_native: bool,
+        initial_summary: &str,
+    ) -> Result<Option<String>> {
+        let mut summary = initial_summary.to_string();
+        for attempt in 0..MAX_SELF_HEAL_ATTEMPTS {
+            let error_category =
+                crate::self_heal::classify_test_failure_category(&summary).to_string();
+
+            let prior_success_pattern = contract.memory.as_ref().and_then(|memory| {
+                crate::self_heal::find_successful_fix_pattern(memory, &error_category)
+            });
+
+            let Some(mut fix_contract) =
+                crate::self_heal::attempt_test_fix(&summary, &contract.goal)
+            else {
+                // No test failures detected. If a previous attempt already
+                // applied a fix, return the current (now-passing) summary so
+                // the caller uses the post-fix result instead of the original.
+                if attempt > 0 {
+                    return Ok(Some(summary));
+                }
+                return Ok(None);
+            };
+
+            if let Some(pattern) = prior_success_pattern {
+                fix_contract.context = format!(
+                    "{}\n\nRecent successful fix pattern for {}:\n{}",
+                    fix_contract.context, error_category, pattern
+                );
+            }
+
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = MAX_SELF_HEAL_ATTEMPTS,
+                "CodeStrategy: test failures detected, attempting self-heal"
+            );
+            send_status(status_tx, "Test failures detected — attempting fix...").await;
+            let heal_span =
+                trace.map(|t| t.span("phase:self_heal", Some(&lf_truncate(&summary, 300))));
+
+            let fix_exploration = ExplorationResult {
+                plan: fix_contract.goal.clone(),
+                context: fix_contract.context.clone(),
+                files: String::new(),
+            };
+
+            let fix_result = match self
+                .execute_code(&fix_contract, tools, docker, llm, &fix_exploration, true)
+                .instrument(tracing::info_span!("self_heal_execute"))
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "CodeStrategy: self-heal EXECUTE failed");
+                    if let Some(memory) = contract.memory.as_ref() {
+                        crate::self_heal::store_self_heal_outcome(
+                            memory,
+                            &error_category,
+                            &fix_contract.goal,
+                            false,
+                        );
+                    }
+                    if let Some(s) = heal_span {
+                        s.end(Some(&format!("failed: {}", e)));
+                    }
+                    return Ok(None);
+                }
+            };
+
+            send_status(status_tx, "Re-verifying after fix...").await;
+            summary = if use_native {
+                self.verify_native(
+                    contract,
+                    tools,
+                    docker,
+                    llm,
+                    &fix_result,
+                    executor,
+                    confirmer,
+                    status_tx,
+                    trace,
+                )
+                .instrument(tracing::info_span!("self_heal_verify"))
+                .await?
+            } else {
+                self.verify_text_fallback(
+                    contract,
+                    tools,
+                    docker,
+                    llm,
+                    &fix_result,
+                    executor,
+                    confirmer,
+                    status_tx,
+                    trace,
+                )
+                .instrument(tracing::info_span!("self_heal_verify"))
+                .await?
+            };
+
+            let success = crate::self_heal::infer_verification_success(&summary).unwrap_or(false);
+            if success == false && !crate::self_heal::has_test_failures(&summary) {
+                tracing::debug!(
+                    "CodeStrategy: self-heal verification result ambiguous, storing as unsuccessful"
+                );
+            }
+            if let Some(memory) = contract.memory.as_ref() {
+                crate::self_heal::store_self_heal_outcome(
+                    memory,
+                    &error_category,
+                    &fix_contract.goal,
+                    success,
+                );
+            }
+            tracing::info!("CodeStrategy: self-heal cycle complete");
+            if let Some(s) = heal_span {
+                s.end(Some("fixed"));
+            }
+
+            if attempt + 1 >= MAX_SELF_HEAL_ATTEMPTS {
+                tracing::warn!("CodeStrategy: self-heal attempts exhausted");
+                return Ok(Some(summary));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -375,7 +604,7 @@ impl CodeStrategy {
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
-                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    let output = materialize_tool_result(result)?;
                     tracing::debug!(step, tool = %tc.name, path = "native", "EXPLORE tool executed");
                     history.push(ChatMessage::Tool {
                         tool_call_id: tc.id.clone(),
@@ -521,89 +750,28 @@ impl CodeStrategy {
         exploration: &ExplorationResult,
         allow_retry_rewrite: bool,
     ) -> Result<String> {
-        let mut candidates: Vec<&str> = Vec::new();
-        if let Some(pref) = contract
-            .cli_tool_preference
-            .as_deref()
-            .filter(|pref| tools.get(pref).is_some())
-        {
-            candidates.push(pref);
-        }
-        for &name in CODING_TOOLS {
-            if tools.get(name).is_some() && !candidates.contains(&name) {
-                candidates.push(name);
-            }
-        }
+        let available: Vec<&str> = CODING_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| tools.get(name).is_some())
+            .collect();
+        let candidates = build_cli_candidate_order(
+            contract.cli_tool_preference.as_deref(),
+            &contract.cli_tool_routing_order,
+            &available,
+        );
         if candidates.is_empty() {
             return Err(AthenaError::Tool(
                 "No coding CLI tool available (need claude_code, codex, or opencode)".into(),
             ));
         }
 
-        // Ripple effect: analyze files from exploration to warn about dependents
-        let ripple_section = if !exploration.files.is_empty() {
-            // Extract file paths from the exploration summary
-            let file_names: Vec<&str> = exploration
-                .files
-                .lines()
-                .filter_map(|line| {
-                    let trimmed = line.trim().trim_start_matches("- ");
-                    if trimmed.ends_with(".rs")
-                        || trimmed.ends_with(".py")
-                        || trimmed.ends_with(".ts")
-                        || trimmed.ends_with(".go")
-                        || trimmed.contains("src/")
-                    {
-                        // Extract just the filename/path portion
-                        Some(trimmed.split_whitespace().next().unwrap_or(trimmed))
-                    } else {
-                        None
-                    }
-                })
-                .take(10)
-                .collect();
+        let ripple_section = build_ripple_section(&exploration.files);
 
-            if file_names.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\nRIPPLE WARNING: Changes to these files may affect other modules that import from them: {}. \
-                     Check for breaking changes to public APIs.",
-                    file_names.join(", ")
-                )
-            }
-        } else {
-            String::new()
-        };
-
-        let mut prompt_parts = Vec::new();
-
-        if !exploration.context.is_empty() {
-            prompt_parts.push(format!("CODEBASE CONTEXT:\n{}", exploration.context));
-        }
-
-        prompt_parts.push(format!("TASK:\n{}", exploration.plan));
-
-        if !contract.constraints.is_empty() {
-            prompt_parts.push(format!(
-                "CONSTRAINTS:\n{}",
-                contract
-                    .constraints
-                    .iter()
-                    .map(|c| format!("- {}", c))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
-
-        if !ripple_section.is_empty() {
-            prompt_parts.push(ripple_section);
-        }
-
-        let full_prompt = prompt_parts.join("\n\n");
+        let full_prompt = build_execution_prompt(exploration, contract, &ripple_section);
         let mut failures: Vec<String> = Vec::new();
 
-        for (idx, &tool_name) in candidates.iter().enumerate() {
+        for (idx, tool_name) in candidates.iter().enumerate() {
             if tool_name == "claude_code" && std::env::var_os("CLAUDECODE").is_some() {
                 let msg = "Skipping claude_code: running inside a Claude Code session";
                 tracing::warn!("{}", msg);
@@ -611,7 +779,7 @@ impl CodeStrategy {
                 continue;
             }
 
-            let tool = match tools.get(tool_name) {
+            let tool = match tools.get(tool_name.as_str()) {
                 Some(t) => t,
                 None => {
                     failures.push(format!("{}: not available", tool_name));
@@ -636,7 +804,10 @@ impl CodeStrategy {
 
             if result.success {
                 tracing::info!(tool = tool_name, "EXECUTE: coding tool succeeded");
-                return Ok(result.output);
+                return Ok(format!(
+                    "{}\n\n[athena_cli_tool_used:{}]",
+                    result.output, tool_name
+                ));
             }
             let policy = parse_cli_failure_policy(&result.output);
 
@@ -654,7 +825,12 @@ impl CodeStrategy {
                     "EXECUTE: retrying same coding tool based on policy"
                 );
                 match tool.execute(docker, &params).await {
-                    Ok(retry_once) if retry_once.success => return Ok(retry_once.output),
+                    Ok(retry_once) if retry_once.success => {
+                        return Ok(format!(
+                            "{}\n\n[athena_cli_tool_used:{}]",
+                            retry_once.output, tool_name
+                        ))
+                    }
                     Ok(retry_once) => {
                         let retry_policy = parse_cli_failure_policy(&retry_once.output);
                         failures.push(format!(
@@ -665,14 +841,15 @@ impl CodeStrategy {
                         ));
                         if !retry_policy.fallback {
                             return Err(AthenaError::Tool(format!(
-                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
                                 tool_name,
                                 retry_policy.code,
                                 failures
                                     .iter()
                                     .map(|f| format!("- {}", f))
                                     .collect::<Vec<_>>()
-                                    .join("\n")
+                                    .join("\n"),
+                                tool_name
                             )));
                         }
                     }
@@ -682,67 +859,48 @@ impl CodeStrategy {
 
             if !policy.fallback {
                 return Err(AthenaError::Tool(format!(
-                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}",
+                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
                     tool_name,
                     policy.code,
                     failures
                         .iter()
                         .map(|f| format!("- {}", f))
                         .collect::<Vec<_>>()
-                        .join("\n")
+                        .join("\n"),
+                    tool_name
                 )));
             }
 
-            // On the last candidate, try one prompt rewrite retry before failing.
             if allow_retry_rewrite && policy.fallback && idx + 1 == candidates.len() {
-                tracing::warn!(
-                    tool = tool_name,
-                    "EXECUTE: coding tool failed, attempting retry"
-                );
-                let retry_messages = vec![
-                    Message::system(
-                        "You are helping with a coding task. The coding tool failed. \
-                         Analyze the error and produce a revised, more detailed prompt that addresses the issue.",
-                    ),
-                    Message::user(&format!(
-                        "Original prompt:\n{}\n\nError output:\n{}\n\n\
-                         Provide a revised prompt that addresses the error. Output ONLY the revised prompt text.",
-                        full_prompt, result.output
-                    )),
-                ];
-
-                let revised_prompt = llm.chat(&retry_messages).await?;
-                let retry_params = serde_json::json!({
-                    "prompt": revised_prompt,
-                    "context": format!(
-                        "{}\n\nPrevious attempt failed with:\n{}",
-                        contract.context, result.output
-                    ),
-                    "files": exploration.files,
-                });
-
-                tracing::info!(tool = tool_name, "EXECUTE: retrying with revised prompt");
-                match tool.execute(docker, &retry_params).await {
-                    Ok(retry_result) if retry_result.success => return Ok(retry_result.output),
-                    Ok(retry_result) => {
-                        failures.push(format!(
-                            "{} (retry): {}",
-                            tool_name,
-                            lf_truncate(&retry_result.output, 250)
-                        ));
-                    }
-                    Err(e) => failures.push(format!("{} (retry): {}", tool_name, e)),
+                if let Some(output) = retry_with_prompt_rewrite(
+                    tool_name,
+                    tool,
+                    docker,
+                    llm,
+                    &full_prompt,
+                    &contract.context,
+                    &exploration.files,
+                    &result.output,
+                    &mut failures,
+                )
+                .await?
+                {
+                    return Ok(format!(
+                        "{}\n\n[athena_cli_tool_used:{}]",
+                        output, tool_name
+                    ));
                 }
             }
         }
 
         Err(AthenaError::Tool(format!(
-            "All coding CLI tools failed.\n{}",
+            "All coding CLI tools failed.\n{}\n[athena_cli_tool_used:{}]",
             failures
                 .iter()
                 .map(|f| format!("- {}", f))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            candidates.first().map(String::as_str).unwrap_or("unknown")
         )))
     }
 
@@ -857,7 +1015,7 @@ impl CodeStrategy {
 
                 let results = futures::future::join_all(futs).await;
                 for (tc, result) in results {
-                    let output = result.unwrap_or_else(|e| format!("[tool error]\n{}", e));
+                    let output = materialize_tool_result(result)?;
                     tracing::debug!(step, tool = %tc.name, path = "native", "VERIFY tool executed");
                     history.push(ChatMessage::Tool {
                         tool_call_id: tc.id.clone(),
@@ -965,24 +1123,50 @@ fn is_benchmark_fast_cli_mode(contract: &TaskContract) -> bool {
 
 fn parse_cli_failure_policy(output: &str) -> CliFailurePolicy {
     let mut policy = CliFailurePolicy::default();
-    let Some(line) = output.lines().next() else {
+    let Some(line) = output
+        .lines()
+        .find(|line| line.contains(CLI_CONTRACT_PREFIX))
+    else {
         return policy;
     };
-    if !line.starts_with(CLI_CONTRACT_PREFIX) {
+    let Some(start) = line.find(CLI_CONTRACT_PREFIX) else {
         return policy;
-    }
-    for token in line.split_whitespace().skip(1) {
+    };
+    let contract = &line[start..];
+    for token in contract.split_whitespace().skip(1) {
         let Some((k, v)) = token.split_once('=') else {
             continue;
         };
         match k {
-            "code" => policy.code = v.to_string(),
-            "retry_same" => policy.retry_same = v.eq_ignore_ascii_case("true"),
-            "fallback" => policy.fallback = v.eq_ignore_ascii_case("true"),
+            "code" => {
+                if !v.is_empty() {
+                    policy.code = v.to_string();
+                }
+            }
+            "retry_same" => {
+                if let Some(parsed) = parse_cli_contract_bool(v) {
+                    policy.retry_same = parsed;
+                }
+            }
+            "fallback" => {
+                if let Some(parsed) = parse_cli_contract_bool(v) {
+                    policy.fallback = parsed;
+                }
+            }
             _ => {}
         }
     }
     policy
+}
+
+fn parse_cli_contract_bool(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Build tool schemas filtered to only the tools allowed in a given phase.
@@ -1238,7 +1422,7 @@ INSTRUCTIONS:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli_failure_policy, CliFailurePolicy};
+    use super::{build_cli_candidate_order, parse_cli_failure_policy, CliFailurePolicy};
 
     #[test]
     fn parse_cli_failure_policy_defaults_for_plain_text() {
@@ -1254,12 +1438,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_failure_policy_reads_contract_fields() {
+    fn parse_cli_failure_policy_reads_contract_fields_marker_first_line() {
         let policy = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true",
+            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true\nstderr noise",
         );
         assert_eq!(policy.code, "transient_upstream");
         assert!(policy.retry_same);
+        assert!(policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_reads_contract_fields_marker_middle_line() {
+        let policy = parse_cli_failure_policy(
+            "warning: something\nstderr: [athena_cli_contract] tool=codex code=rate_limit retry_same=false fallback=false\nmore noise",
+        );
+        assert_eq!(policy.code, "rate_limit");
+        assert!(!policy.retry_same);
+        assert!(!policy.fallback);
+    }
+
+    #[test]
+    fn parse_cli_failure_policy_ignores_malformed_tokens() {
+        let policy = parse_cli_failure_policy(
+            "[athena_cli_contract] tool=codex code=invalid_request retry_same=maybe fallback=TRUEE",
+        );
+        assert_eq!(policy.code, "invalid_request");
+        assert!(!policy.retry_same);
         assert!(policy.fallback);
     }
 
@@ -1275,5 +1479,50 @@ mod tests {
         assert_eq!(a.code, "invalid_request");
         assert!(!a.retry_same);
         assert!(!a.fallback);
+    }
+
+    #[test]
+    fn build_cli_candidate_order_prefers_routed_when_no_explicit_preference() {
+        let routed = vec!["opencode".to_string(), "codex".to_string()];
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(None, &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "opencode".to_string(),
+                "codex".to_string(),
+                "claude_code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cli_candidate_order_explicit_preference_wins_tiebreak() {
+        let routed = vec!["opencode".to_string(), "codex".to_string()];
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(Some("codex"), &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "codex".to_string(),
+                "opencode".to_string(),
+                "claude_code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cli_candidate_order_cold_start_falls_back_to_defaults() {
+        let routed: Vec<String> = Vec::new();
+        let available = vec!["claude_code", "codex", "opencode"];
+        let order = build_cli_candidate_order(None, &routed, &available);
+        assert_eq!(
+            order,
+            vec![
+                "claude_code".to_string(),
+                "codex".to_string(),
+                "opencode".to_string()
+            ]
+        );
     }
 }

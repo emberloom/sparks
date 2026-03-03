@@ -186,6 +186,12 @@ Gate passes when:
 Render combined KPI + eval trend dashboard:
 
 ```bash
+cargo run -- dashboard --repo athena
+```
+
+Equivalent script invocation (used by soak/gate scripts):
+
+```bash
 python3 scripts/eval_dashboard.py --config config.toml --repo athena
 ```
 

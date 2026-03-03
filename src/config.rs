@@ -1,17 +1,25 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
 
 use crate::error::{AthenaError, Result};
-use crate::llm::{LlmProvider, OllamaClient, OpenAiCompatibleClient, OpenAiCompatibleConfig};
+use crate::llm::{
+    LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
+};
+use crate::prompt_scanner::PromptScannerConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
+    #[serde(default, alias = "ouath")]
+    pub openai: Option<OpenAiConfig>,
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
     #[serde(default)]
@@ -43,9 +51,39 @@ pub struct Config {
     #[serde(default)]
     pub github: GithubConfig,
     #[serde(default)]
+    pub ticket_intake: TicketIntakeConfig,
+    #[serde(default)]
+    pub prompt_scanner: PromptScannerConfig,
+    #[serde(default)]
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
+    #[serde(skip)]
+    inline_secret_labels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProfile {
+    #[serde(alias = "container_strict")]
+    #[default]
+    Standard,
+    LocalOnly,
+    SelfDevTrusted,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub profile: RuntimeProfile,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            profile: RuntimeProfile::Standard,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -63,7 +101,85 @@ impl Default for LlmConfig {
 }
 
 fn default_provider() -> String {
-    "ollama".into()
+    "openai".into()
+}
+
+#[derive(Deserialize, Clone)]
+pub struct OpenAiConfig {
+    #[serde(default = "default_openai_url")]
+    pub url: String,
+    /// Optional API style override: "responses" or "chat_completions".
+    pub api_style: Option<String>,
+    #[serde(default = "default_openai_model")]
+    pub model: String,
+    pub classifier_model: Option<String>,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    #[serde(default = "default_openai_auth_file")]
+    pub auth_file: String,
+    /// Override the OAuth redirect URI (default: http://localhost:1455/auth/callback)
+    pub redirect_uri: Option<String>,
+    /// Optional reasoning effort for responses API (e.g., "low", "medium", "high")
+    pub reasoning_effort: Option<String>,
+    /// Optional reasoning summary behavior for responses API (e.g., "auto")
+    pub reasoning_summary: Option<String>,
+    /// Optional include fields for responses API (e.g., ["reasoning.encrypted_content"])
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+
+impl std::fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiConfig")
+            .field("url", &self.url)
+            .field("api_style", &self.api_style)
+            .field("model", &self.model)
+            .field("classifier_model", &self.classifier_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
+            .field("auth_file", &self.auth_file)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("reasoning_summary", &self.reasoning_summary)
+            .field("include", &self.include)
+            .finish()
+    }
+}
+
+fn default_openai_url() -> String {
+    "https://chatgpt.com/backend-api/codex".into()
+}
+
+fn default_openai_model() -> String {
+    "gpt-5.3-codex".into()
+}
+
+fn default_openai_auth_file() -> String {
+    "~/.athena/openai.json".into()
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            url: default_openai_url(),
+            api_style: None,
+            model: default_openai_model(),
+            classifier_model: None,
+            temperature: default_temperature(),
+            max_tokens: default_max_tokens(),
+            context_window: default_context_window(),
+            auth_file: default_openai_auth_file(),
+            redirect_uri: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            include: Vec::new(),
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -139,6 +255,8 @@ fn default_zen_url() -> String {
 pub struct TelegramConfig {
     /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
+    /// Optional LLM provider override for Telegram (default: "openai")
+    pub provider: Option<String>,
     /// Allowed chat IDs (empty = deny all unless allow_all = true)
     #[serde(default)]
     pub allowed_chats: Vec<i64>,
@@ -148,6 +266,15 @@ pub struct TelegramConfig {
     /// Confirmation timeout in seconds
     #[serde(default = "default_confirm_timeout")]
     pub confirm_timeout_secs: u64,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview when messages look like planning requests
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
     /// Speech-to-text API URL (OpenAI Whisper-compatible endpoint)
     pub stt_url: Option<String>,
     /// STT API key (or set ATHENA_STT_API_KEY env var)
@@ -160,9 +287,13 @@ impl std::fmt::Debug for TelegramConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TelegramConfig")
             .field("token", &"[REDACTED]")
+            .field("provider", &self.provider)
             .field("allowed_chats", &self.allowed_chats)
             .field("allow_all", &self.allow_all)
             .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
             .field("stt_url", &self.stt_url)
             .field("stt_api_key", &"[REDACTED]")
             .field("stt_model", &self.stt_model)
@@ -174,9 +305,13 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             token: None,
+            provider: None,
             allowed_chats: vec![],
             allow_all: false,
             confirm_timeout_secs: default_confirm_timeout(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
             stt_url: None,
             stt_api_key: None,
             stt_model: None,
@@ -186,6 +321,18 @@ impl Default for TelegramConfig {
 
 fn default_confirm_timeout() -> u64 {
     300
+}
+
+fn default_planning_enabled() -> bool {
+    true
+}
+
+fn default_planning_auto() -> bool {
+    true
+}
+
+fn default_planning_timeout() -> u64 {
+    900
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -218,6 +365,8 @@ pub struct MemoryConfig {
     pub recency_half_life_days: f32,
     #[serde(default = "default_dedup_threshold")]
     pub dedup_threshold: f32,
+    #[serde(default = "default_retrieval_cache_capacity")]
+    pub retrieval_cache_capacity: usize,
 }
 
 impl Default for MemoryConfig {
@@ -225,6 +374,7 @@ impl Default for MemoryConfig {
         Self {
             recency_half_life_days: default_half_life(),
             dedup_threshold: default_dedup_threshold(),
+            retrieval_cache_capacity: default_retrieval_cache_capacity(),
         }
     }
 }
@@ -234,6 +384,9 @@ fn default_half_life() -> f32 {
 }
 fn default_dedup_threshold() -> f32 {
     0.95
+}
+fn default_retrieval_cache_capacity() -> usize {
+    256
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -360,6 +513,10 @@ fn default_tolerance() -> f32 {
 pub struct SelfDevConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Trusted repo names allowed to run in host execution mode when
+    /// runtime.profile = "self_dev_trusted".
+    #[serde(default)]
+    pub trusted_repos: Vec<String>,
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval_secs: u64,
     #[serde(default)]
@@ -376,6 +533,7 @@ impl Default for SelfDevConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            trusted_repos: Vec::new(),
             metrics_interval_secs: default_metrics_interval(),
             code_indexer_enabled: false,
             code_indexer_interval_secs: default_code_indexer_interval(),
@@ -438,6 +596,140 @@ impl std::fmt::Debug for GithubConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_intake_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default)]
+    pub mock_dispatch: bool,
+    #[serde(default)]
+    pub sources: Vec<TicketIntakeSourceConfig>,
+    #[serde(default)]
+    pub webhook: TicketIntakeWebhookConfig,
+    #[serde(default)]
+    pub ci_autopilot: TicketIntakeCiAutopilotConfig,
+}
+
+impl Default for TicketIntakeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: default_ticket_intake_interval(),
+            mock_dispatch: false,
+            sources: Vec::new(),
+            webhook: TicketIntakeWebhookConfig::default(),
+            ci_autopilot: TicketIntakeCiAutopilotConfig::default(),
+        }
+    }
+}
+
+fn default_ticket_intake_interval() -> u64 {
+    300
+}
+
+fn default_ticket_ci_autopilot_enabled() -> bool {
+    true
+}
+fn default_ticket_ci_auto_merge() -> bool {
+    true
+}
+fn default_ticket_ci_heal() -> bool {
+    true
+}
+fn default_ticket_ci_max_heal_attempts() -> u8 {
+    2
+}
+fn default_ticket_ci_poll_interval_secs() -> u64 {
+    45
+}
+fn default_ticket_ci_timeout_secs() -> u64 {
+    1200
+}
+
+fn default_ticket_intake_label() -> Option<String> {
+    Some("athena".to_string())
+}
+
+fn default_ticket_intake_webhook_bind() -> String {
+    "127.0.0.1:8765".to_string()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeCiAutopilotConfig {
+    #[serde(default = "default_ticket_ci_autopilot_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_ci_auto_merge")]
+    pub auto_merge: bool,
+    #[serde(default = "default_ticket_ci_heal")]
+    pub heal: bool,
+    #[serde(default = "default_ticket_ci_max_heal_attempts")]
+    pub max_heal_attempts: u8,
+    #[serde(default = "default_ticket_ci_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_ticket_ci_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for TicketIntakeCiAutopilotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_ticket_ci_autopilot_enabled(),
+            auto_merge: default_ticket_ci_auto_merge(),
+            heal: default_ticket_ci_heal(),
+            max_heal_attempts: default_ticket_ci_max_heal_attempts(),
+            poll_interval_secs: default_ticket_ci_poll_interval_secs(),
+            timeout_secs: default_ticket_ci_timeout_secs(),
+        }
+    }
+}
+
+// Fields are read by the webhook feature (ticket_intake/webhook.rs)
+#[cfg_attr(not(feature = "webhook"), allow(dead_code))]
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeWebhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ticket_intake_webhook_bind")]
+    pub bind: String,
+    #[serde(default)]
+    pub github_secret_env: Option<String>,
+    #[serde(default)]
+    pub gitlab_secret_env: Option<String>,
+    #[serde(default)]
+    pub linear_secret_env: Option<String>,
+    #[serde(default)]
+    pub jira_secret_env: Option<String>,
+}
+
+impl Default for TicketIntakeWebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_ticket_intake_webhook_bind(),
+            github_secret_env: None,
+            gitlab_secret_env: None,
+            linear_secret_env: None,
+            jira_secret_env: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TicketIntakeSourceConfig {
+    pub provider: String,
+    pub repo: String,
+    #[serde(default = "default_ticket_intake_label")]
+    pub filter_label: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub email_env: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct OllamaConfig {
     #[serde(default = "default_ollama_url")]
     pub url: String,
@@ -456,8 +748,6 @@ pub struct DockerConfig {
     pub image: String,
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
-    #[serde(default = "default_runtime")]
-    pub runtime: String,
     #[serde(default = "default_memory_limit")]
     pub memory_limit: i64,
     #[serde(default = "default_cpu_quota")]
@@ -478,8 +768,20 @@ pub struct ManagerConfig {
     pub max_steps: usize,
     #[serde(default = "default_sensitive_patterns")]
     pub sensitive_patterns: Vec<String>,
+    #[serde(default)]
+    pub loop_guard: LoopGuardConfig,
     /// Directory containing dynamic tool YAML definitions (default: ~/.athena/dynamic_tools/)
     pub dynamic_tools_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoopGuardConfig {
+    #[serde(default = "default_loop_guard_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_loop_guard_window_size")]
+    pub window_size: usize,
+    #[serde(default = "default_loop_guard_repeat_threshold")]
+    pub repeat_threshold: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -542,13 +844,10 @@ fn default_max_tokens() -> u32 {
     4096
 }
 fn default_image() -> String {
-    "rust:1.84-slim".into()
+    "rust:1.93".into()
 }
 fn default_socket_path() -> String {
     "/var/run/docker.sock".into()
-}
-fn default_runtime() -> String {
-    "runc".into()
 }
 fn default_memory_limit() -> i64 {
     268_435_456
@@ -557,13 +856,22 @@ fn default_cpu_quota() -> i64 {
     50_000
 }
 fn default_timeout_secs() -> u64 {
-    120
+    600
 }
 fn default_db_path() -> String {
     "~/.athena/athena.db".into()
 }
 fn default_max_steps() -> usize {
     15
+}
+fn default_loop_guard_enabled() -> bool {
+    true
+}
+fn default_loop_guard_window_size() -> usize {
+    12
+}
+fn default_loop_guard_repeat_threshold() -> usize {
+    2
 }
 fn default_strategy() -> String {
     "react".into()
@@ -608,7 +916,6 @@ impl Default for DockerConfig {
         Self {
             image: default_image(),
             socket_path: default_socket_path(),
-            runtime: default_runtime(),
             memory_limit: default_memory_limit(),
             cpu_quota: default_cpu_quota(),
             timeout_secs: default_timeout_secs(),
@@ -629,7 +936,18 @@ impl Default for ManagerConfig {
         Self {
             max_steps: default_max_steps(),
             sensitive_patterns: default_sensitive_patterns(),
+            loop_guard: LoopGuardConfig::default(),
             dynamic_tools_path: None,
+        }
+    }
+}
+
+impl Default for LoopGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_loop_guard_enabled(),
+            window_size: default_loop_guard_window_size(),
+            repeat_threshold: default_loop_guard_repeat_threshold(),
         }
     }
 }
@@ -656,8 +974,10 @@ impl ManagerConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime: RuntimeConfig::default(),
             llm: LlmConfig::default(),
             ollama: OllamaConfig::default(),
+            openai: Some(OpenAiConfig::default()),
             openrouter: None,
             zen: None,
             docker: DockerConfig::default(),
@@ -673,8 +993,11 @@ impl Default for Config {
             proactive: ProactiveConfig::default(),
             initiative: InitiativeConfig::default(),
             github: GithubConfig::default(),
+            ticket_intake: TicketIntakeConfig::default(),
+            prompt_scanner: PromptScannerConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
+            inline_secret_labels: Vec::new(),
         }
     }
 }
@@ -717,35 +1040,134 @@ fn default_ghosts() -> Vec<GhostConfig> {
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = if let Some(p) = path {
-            p.to_path_buf()
+            Some(p.to_path_buf())
         } else {
             // Look in current directory, then ~/.athena/
             let local = PathBuf::from("config.toml");
             if local.exists() {
-                local
+                Some(local)
             } else {
                 let home = dirs::home_dir()
                     .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
                 let global = home.join(".athena").join("config.toml");
                 if global.exists() {
-                    global
+                    Some(global)
                 } else {
                     tracing::info!("No config file found, using defaults");
-                    return Ok(Config::default());
+                    None
                 }
             }
         };
 
-        let contents = std::fs::read_to_string(&config_path).map_err(|e| {
-            AthenaError::Config(format!("Failed to read {}: {}", config_path.display(), e))
-        })?;
+        let mut config = if let Some(path) = config_path {
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                AthenaError::Config(format!("Failed to read {}: {}", path.display(), e))
+            })?;
+            toml::from_str(&contents)
+                .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?
+        } else {
+            Config::default()
+        };
+        if config.ghosts.is_empty() {
+            tracing::warn!(
+                "No ghosts configured in config; applying built-in defaults (coder, scout)"
+            );
+            config.ghosts = default_ghosts();
+        }
 
-        let mut config: Config = toml::from_str(&contents)
-            .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?;
+        config.inline_secret_labels = config.collect_inline_secret_labels();
+        if !config.inline_secret_labels.is_empty() && !allow_inline_secrets() {
+            return Err(AthenaError::Config(format!(
+                "Inline secrets found in config: {}. Move these to env vars or a .env file (gitignored). Set ATHENA_ALLOW_INLINE_SECRETS=1 to override.",
+                config.inline_secret_labels.join(", ")
+            )));
+        }
+        if !config.inline_secret_labels.is_empty() {
+            tracing::warn!(
+                fields = %config.inline_secret_labels.join(", "),
+                "Inline secrets found in config; prefer environment variables or a local secret manager"
+            );
+        }
 
+        config.apply_env_overrides();
         config.validate();
         config.load_souls();
         Ok(config)
+    }
+
+    pub fn inline_secret_labels(&self) -> &[String] {
+        &self.inline_secret_labels
+    }
+
+    fn collect_inline_secret_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if self.github.token.is_some() && std::env::var("GH_TOKEN").is_err() {
+            labels.push("github.token".to_string());
+        }
+        if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
+            labels.push("telegram.token".to_string());
+        }
+        if self.telegram.stt_api_key.is_some() && std::env::var("ATHENA_STT_API_KEY").is_err() {
+            labels.push("telegram.stt_api_key".to_string());
+        }
+        if self
+            .openrouter
+            .as_ref()
+            .and_then(|c| c.api_key.as_ref())
+            .is_some()
+            && std::env::var("OPENROUTER_API_KEY").is_err()
+        {
+            labels.push("openrouter.api_key".to_string());
+        }
+        if self.zen.as_ref().and_then(|c| c.api_key.as_ref()).is_some()
+            && std::env::var("OPENCODE_API_KEY").is_err()
+        {
+            labels.push("zen.api_key".to_string());
+        }
+        if self.langfuse.public_key.is_some() && std::env::var("LANGFUSE_PUBLIC_KEY").is_err() {
+            labels.push("langfuse.public_key".to_string());
+        }
+        if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
+            labels.push("langfuse.secret_key".to_string());
+        }
+        labels
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(token) = std::env::var("ATHENA_TELEGRAM_TOKEN") {
+            self.telegram.token = Some(token);
+        }
+        if let Ok(key) = std::env::var("ATHENA_STT_API_KEY") {
+            self.telegram.stt_api_key = Some(key);
+        }
+        if let Ok(token) = std::env::var("GH_TOKEN") {
+            self.github.token = Some(token);
+        }
+        if let Some(openrouter) = self.openrouter.as_mut() {
+            if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+                openrouter.api_key = Some(key);
+            }
+        }
+        if let Some(zen) = self.zen.as_mut() {
+            if let Ok(key) = std::env::var("OPENCODE_API_KEY") {
+                zen.api_key = Some(key);
+            }
+        }
+        if let Ok(key) = std::env::var("LANGFUSE_PUBLIC_KEY") {
+            self.langfuse.public_key = Some(key);
+        }
+        if let Ok(key) = std::env::var("LANGFUSE_SECRET_KEY") {
+            self.langfuse.secret_key = Some(key);
+        }
+        if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
+            self.langfuse.base_url = Some(url);
+        }
+        if self.langfuse.enabled == false
+            && self.langfuse.public_key.is_some()
+            && self.langfuse.secret_key.is_some()
+        {
+            self.langfuse.enabled = true;
+        }
     }
 
     /// Load soul file contents for persona and all ghosts
@@ -800,58 +1222,55 @@ impl Config {
         // M3: Warn on non-loopback HTTP URLs
         let url = &self.ollama.url;
         if url.starts_with("http://") {
-            if let Some(host) = url
-                .strip_prefix("http://")
-                .and_then(|s| s.split(':').next())
-            {
-                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
-                    tracing::warn!(
-                        url = %url,
-                        "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
-                    );
-                }
+            if !self.ollama_url_is_loopback() {
+                tracing::warn!(
+                    url = %url,
+                    "Ollama URL uses unencrypted HTTP to a non-loopback address — traffic may be intercepted"
+                );
             }
         }
+    }
 
-        let mut inline_secrets = Vec::new();
-        if self.github.token.is_some() {
-            inline_secrets.push("github.token");
+    pub fn runtime_profile_name(&self) -> &'static str {
+        match self.runtime.profile {
+            RuntimeProfile::Standard => "container_strict",
+            RuntimeProfile::LocalOnly => "local_only",
+            RuntimeProfile::SelfDevTrusted => "self_dev_trusted",
         }
-        if self.telegram.token.is_some() {
-            inline_secrets.push("telegram.token");
-        }
-        if self.telegram.stt_api_key.is_some() {
-            inline_secrets.push("telegram.stt_api_key");
-        }
-        if self
-            .openrouter
-            .as_ref()
-            .and_then(|c| c.api_key.as_ref())
-            .is_some()
-        {
-            inline_secrets.push("openrouter.api_key");
-        }
-        if self.zen.as_ref().and_then(|c| c.api_key.as_ref()).is_some() {
-            inline_secrets.push("zen.api_key");
-        }
-        if self.langfuse.public_key.is_some() {
-            inline_secrets.push("langfuse.public_key");
-        }
-        if self.langfuse.secret_key.is_some() {
-            inline_secrets.push("langfuse.secret_key");
-        }
-        if !inline_secrets.is_empty() {
-            tracing::warn!(
-                fields = %inline_secrets.join(", "),
-                "Inline secrets found in config; prefer environment variables or a local secret manager"
-            );
-        }
+    }
+
+    pub fn local_only_enabled(&self) -> bool {
+        matches!(self.runtime.profile, RuntimeProfile::LocalOnly)
+    }
+
+    pub fn self_dev_trusted_enabled(&self) -> bool {
+        matches!(self.runtime.profile, RuntimeProfile::SelfDevTrusted)
+    }
+
+    pub fn trusted_self_dev_repos(&self) -> Vec<String> {
+        self.self_dev
+            .trusted_repos
+            .iter()
+            .map(|repo| repo.trim().to_ascii_lowercase())
+            .filter(|repo| !repo.is_empty())
+            .collect()
+    }
+
+    pub fn ollama_url_host(&self) -> Option<String> {
+        parse_url_host(&self.ollama.url)
+    }
+
+    pub fn ollama_url_is_loopback(&self) -> bool {
+        self.ollama_url_host()
+            .as_deref()
+            .map(is_loopback_host)
+            .unwrap_or(false)
     }
 
     /// Ordered provider candidates: configured provider first, then common fallbacks.
     pub fn provider_candidates(&self) -> Vec<String> {
         let mut out = vec![self.llm.provider.clone()];
-        for p in ["openrouter", "zen", "ollama"] {
+        for p in ["openai", "ollama", "openrouter", "zen", "ouath"] {
             if !out.iter().any(|x| x == p) {
                 out.push(p.to_string());
             }
@@ -863,6 +1282,10 @@ impl Config {
     pub fn build_llm_provider_for(&self, provider: &str) -> Result<Arc<dyn LlmProvider>> {
         match provider {
             "ollama" => Ok(Arc::new(OllamaClient::new(self.ollama.clone()))),
+            "openai" | "ouath" => {
+                let cfg = self.openai.clone().unwrap_or_default();
+                Ok(Arc::new(OpenAiClient::new(cfg)))
+            }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
                     AthenaError::Config(
@@ -924,11 +1347,6 @@ impl Config {
         }
     }
 
-    /// Build the configured LLM provider
-    pub fn build_llm_provider(&self) -> Result<Arc<dyn LlmProvider>> {
-        self.build_llm_provider_for(self.llm.provider.as_str())
-    }
-
     /// Build the orchestrator provider for an explicit provider name.
     pub fn build_orchestrator_provider_for(
         &self,
@@ -944,6 +1362,17 @@ impl Config {
                 }
                 None => Ok(fallback.clone()),
             },
+            "openai" | "ouath" => {
+                let cfg = self.openai.clone().unwrap_or_default();
+                match &cfg.classifier_model {
+                    Some(model) => {
+                        let mut cloned = cfg.clone();
+                        cloned.model = model.clone();
+                        Ok(Arc::new(OpenAiClient::new(cloned)))
+                    }
+                    None => Ok(fallback.clone()),
+                }
+            }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
                     AthenaError::Config(
@@ -1012,14 +1441,6 @@ impl Config {
         }
     }
 
-    /// Build the orchestrator LLM provider (falls back to main provider if no classifier_model set)
-    pub fn build_orchestrator_provider(
-        &self,
-        fallback: &Arc<dyn LlmProvider>,
-    ) -> Result<Arc<dyn LlmProvider>> {
-        self.build_orchestrator_provider_for(self.llm.provider.as_str(), fallback)
-    }
-
     /// Resolve the db path, expanding ~ to home dir
     pub fn db_path(&self) -> Result<PathBuf> {
         let path = if self.db.path.starts_with("~/") {
@@ -1060,6 +1481,15 @@ impl Config {
     }
 }
 
+fn allow_inline_secrets() -> bool {
+    matches!(
+        std::env::var("ATHENA_ALLOW_INLINE_SECRETS")
+            .as_deref()
+            .unwrap_or(""),
+        "1" | "true" | "TRUE" | "yes" | "YES"
+    )
+}
+
 /// Resolve a path (expanding ~) and read the file contents.
 pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
     let resolved = if path.starts_with("~/") {
@@ -1070,4 +1500,95 @@ pub fn load_soul_file(path: &str) -> std::result::Result<String, String> {
         PathBuf::from(path)
     };
     std::fs::read_to_string(&resolved).map_err(|e| format!("{}: {}", resolved.display(), e))
+}
+
+fn parse_url_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed
+        .host_str()?
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, RuntimeProfile};
+    use std::path::Path;
+
+    #[test]
+    fn runtime_profile_name_maps_standard_to_container_strict() {
+        let config = Config::default();
+        assert_eq!(config.runtime_profile_name(), "container_strict");
+    }
+
+    #[test]
+    fn trusted_repo_helpers_normalize_and_match() {
+        let mut config = Config::default();
+        config.runtime.profile = RuntimeProfile::SelfDevTrusted;
+        config.self_dev.trusted_repos = vec![" Athena ".to_string(), "".to_string()];
+        assert_eq!(config.trusted_self_dev_repos(), vec!["athena"]);
+    }
+
+    #[test]
+    fn load_hydrates_default_ghosts_when_missing_in_file() {
+        let path = temp_config_path("athena-config-no-ghosts");
+        std::fs::write(
+            &path,
+            r#"
+[llm]
+provider = "ollama"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(Path::new(&path))).unwrap();
+        assert!(!config.ghosts.is_empty());
+        assert!(config.ghosts.iter().any(|g| g.name == "coder"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_preserves_explicit_ghosts_from_file() {
+        let path = temp_config_path("athena-config-explicit-ghost");
+        std::fs::write(
+            &path,
+            r#"
+[llm]
+provider = "ollama"
+
+[[ghosts]]
+name = "custom"
+description = "custom ghost"
+tools = ["shell"]
+strategy = "react"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(Path::new(&path))).unwrap();
+        assert_eq!(config.ghosts.len(), 1);
+        assert_eq!(config.ghosts[0].name, "custom");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn temp_config_path(prefix: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("{}-{}.toml", prefix, uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string()
+    }
 }

@@ -22,8 +22,31 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Build release binary
         run: cargo build --release --bin athena
+
+      - name: Generate observability dashboard artifacts
+        run: |
+          cat > /tmp/athena-release.toml <<'EOF'
+          [db]
+          path = "/tmp/athena-release.db"
+          EOF
+          python3 scripts/eval_dashboard.py \
+            --config /tmp/athena-release.toml \
+            --repo athena \
+            --out-file eval/results/dashboard.md \
+            --json-out-file eval/results/dashboard_data.json
+          python3 scripts/eval_dashboard.py \
+            --config /tmp/athena-release.toml \
+            --repo athena \
+            --output-format html \
+            --out-file eval/results/dashboard.html \
+            --json-out-file eval/results/dashboard_data.json
 
       - name: Package artifacts
         run: |
@@ -31,7 +54,19 @@ jobs:
           cp target/release/athena dist/athena-linux-x86_64
           tar -C dist -czf dist/athena-linux-x86_64.tar.gz athena-linux-x86_64
           shasum -a 256 dist/athena-linux-x86_64.tar.gz > dist/athena-linux-x86_64.tar.gz.sha256
+          cp eval/results/dashboard.md dist/dashboard.md
+          cp eval/results/dashboard.html dist/dashboard.html
+          cp eval/results/dashboard_data.json dist/dashboard_data.json
           ls -lh dist
+
+      - name: Upload release dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-observability-dashboard
+          path: |
+            dist/dashboard.md
+            dist/dashboard.html
+            dist/dashboard_data.json
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -40,3 +75,6 @@ jobs:
           files: |
             dist/athena-linux-x86_64.tar.gz
             dist/athena-linux-x86_64.tar.gz.sha256
+            dist/dashboard.md
+            dist/dashboard.html
+            dist/dashboard_data.json

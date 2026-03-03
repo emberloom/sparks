@@ -65,7 +65,7 @@ pub fn spawn_heartbeat_loop(
     tokio::spawn(async move {
         loop {
             let (interval, jitter, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.heartbeat_interval_secs,
                     k.heartbeat_jitter,
@@ -84,7 +84,7 @@ pub fn spawn_heartbeat_loop(
 
             // Re-check knobs after sleeping
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.heartbeat_enabled {
                     continue;
                 }
@@ -100,8 +100,10 @@ pub fn spawn_heartbeat_loop(
             } else {
                 let sample_count = (items.len() / 3).max(1);
                 let indices = randomness::sample_indices(sample_count, items.len());
-                let mut sampled: Vec<String> =
-                    indices.into_iter().map(|i| items[i].clone()).collect();
+                let mut sampled: Vec<String> = indices
+                    .into_iter()
+                    .filter_map(|i| items.get(i).cloned())
+                    .collect();
                 sampled.push("Wildcard: think about something unexpected or creative.".to_string());
                 observer.log(
                     ObserverCategory::Heartbeat,
@@ -116,7 +118,10 @@ pub fn spawn_heartbeat_loop(
                     let indices = randomness::sample_indices(3.min(all.len()), all.len());
                     let picked: Vec<String> = indices
                         .into_iter()
-                        .map(|i| format!("- [{}] {}", all[i].category, all[i].content))
+                        .filter_map(|i| {
+                            all.get(i)
+                                .map(|m| format!("- [{}] {}", m.category, m.content))
+                        })
                         .collect();
                     observer.log(
                         ObserverCategory::StochasticRoll,

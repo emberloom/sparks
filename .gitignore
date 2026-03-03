@@ -4,7 +4,6 @@
 *~
 .DS_Store
 .env
-.env.vaultwarden.local
 *.db
 *.db-shm
 *.db-wal
@@ -13,3 +12,6 @@ eval/results/
 eval/.worktrees/
 *.log
 hello.txt
+__pycache__/
+*.pyc
+.context/

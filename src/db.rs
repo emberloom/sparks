@@ -121,6 +121,23 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_task_outcomes_lane_repo_risk_time
         ON autonomous_task_outcomes(lane, repo, risk_tier, started_at DESC);",
+    // v12: ticket intake deduplication log
+    "CREATE TABLE IF NOT EXISTS ticket_intake_log (
+        dedup_key TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'dispatched',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_ticket_intake_provider
+        ON ticket_intake_log(provider, created_at DESC);",
+    // v13: add issue_number for webhook/write-back support
+    "ALTER TABLE ticket_intake_log ADD COLUMN issue_number TEXT;",
+    // v14: persist CI monitor status for ticket write-back chain
+    "ALTER TABLE ticket_intake_log ADD COLUMN ci_monitor_status TEXT;",
+    // v15: record selected coding CLI for tool-level routing KPIs
+    "ALTER TABLE autonomous_task_outcomes ADD COLUMN cli_tool_used TEXT;",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

@@ -170,10 +170,6 @@ impl ActiveTrace {
         Self { client, trace_id }
     }
 
-    pub fn id(&self) -> &str {
-        &self.trace_id
-    }
-
     /// Open a span under this trace.
     pub fn span(&self, name: &str, input: Option<&str>) -> SpanHandle {
         let span_id = new_id();

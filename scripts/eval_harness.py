@@ -174,7 +174,10 @@ def git_status_paths(repo: Path) -> set[str]:
 
 
 def parse_dispatch_task_id(stderr: str) -> str | None:
-    m = re.search(r"task_id=([0-9a-fA-F-]{36})", stderr)
+    m = re.search(
+        r"task_id=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+        stderr,
+    )
     return m.group(1) if m else None
 
 
@@ -237,6 +240,33 @@ def score_plan_quality(response: str) -> float:
     text = response.strip()
     if not text:
         return 0.0
+    structured = score_plan_quality_structured(text)
+    if structured is not None:
+        return structured
+    return score_plan_quality_legacy(text)
+
+
+def score_plan_quality_structured(text: str) -> float | None:
+    plan = _parse_structured_plan(text)
+    if plan is None:
+        return None
+
+    score = 0.0
+    if _has_non_empty(plan, ("plan", "steps")):
+        score += 0.4
+    if _has_non_empty(plan, ("execution", "execute", "actions")):
+        score += 0.3
+    if _count_structured_steps(plan) >= 2:
+        score += 0.2
+    if _has_non_empty(
+        plan,
+        ("verification", "verify", "tests", "test_plan", "rollback", "rollback_plan"),
+    ):
+        score += 0.1
+    return min(score, 1.0)
+
+
+def score_plan_quality_legacy(text: str) -> float:
     score = 0.0
     if "PLAN:" in text:
         score += 0.4
@@ -248,6 +278,64 @@ def score_plan_quality(response: str) -> float:
     if any(k in text.lower() for k in ("verify", "test", "check", "rollback")):
         score += 0.1
     return min(score, 1.0)
+
+
+def _parse_structured_plan(text: str) -> dict[str, Any] | None:
+    candidates: list[str] = []
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+
+    for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL):
+        candidates.append(match.group(1).strip())
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and _has_non_empty(
+            parsed,
+            (
+                "plan",
+                "steps",
+                "execution",
+                "execute",
+                "actions",
+                "verification",
+                "verify",
+                "tests",
+                "test_plan",
+                "rollback",
+                "rollback_plan",
+            ),
+        ):
+            return parsed
+    return None
+
+
+def _has_non_empty(plan: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    for key in keys:
+        value = plan.get(key)
+        if isinstance(value, list) and value:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, dict) and value:
+            return True
+    return False
+
+
+def _count_structured_steps(plan: dict[str, Any]) -> int:
+    for key in ("steps", "plan"):
+        value = plan.get(key)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, str) and value.strip():
+            return len(re.findall(r"(?m)^\s*(?:\d+[.)]|[-*])\s+", value)) or len(
+                [line for line in value.splitlines() if line.strip()]
+            )
+    return 0
 
 
 def score_diff_quality(

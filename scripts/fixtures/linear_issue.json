@@ -1,0 +1,10 @@
+{
+  "id": "issue-1",
+  "identifier": "ENG-1",
+  "title": "Mock Linear issue",
+  "description": "Mock issue body.",
+  "url": "https://linear.app/ENG/issue/ENG-1",
+  "priority": 3,
+  "labels": ["athena"],
+  "creator": "Mock User"
+}

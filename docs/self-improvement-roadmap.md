@@ -30,6 +30,15 @@ Maturity estimate:
 - self-improvement optimizer: ~30%
 - end-to-end closed loop (execute -> evaluate -> evolve -> promote): ~55-60%
 
+## Parsing Hardening Status (2026-02-26)
+
+- [ ] Phase 0 — baseline telemetry counters + snapshot artifact
+- [~] Phase 1 — CLI contract parsing hardening (marker-anywhere + tests done; shared parser + param-validation markers pending)
+- [ ] Phase 2 — classifier contract schema + structured error codes
+- [~] Phase 3 — strategy text fallback normalization (strict JSON envelope done; repair turn + reason taxonomy pending)
+- [~] Phase 4 — eval harness structured plan scoring (JSON scoring + legacy fallback done; artifact-based scoring pending)
+- [ ] Phase 5 — strict parsing rollout + gates
+
 ## Operating Model (Spec-Driven)
 
 Execution must follow one contract chain:

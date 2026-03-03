@@ -246,89 +246,9 @@ mod tests {
             );
             CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);"
         ).unwrap();
-        let store = crate::memory::MemoryStore::new(conn, 30.0, 0.95);
+        let store = crate::memory::MemoryStore::new(conn, 30.0, 0.95, 256);
 
-        // ── Memory corpus: 50 memories in dense topic clusters ───
-        // Cluster labels: [PL] programming langs, [DB] databases, [FD] food,
-        // [GEO] geography/weather, [HW] hardware, [ED] education, [PET] pets,
-        // [ML] machine learning, [FIT] fitness/health, [WRK] work/career,
-        // [TOOL] dev tools, [MISC] miscellaneous
-        let corpus: Vec<(&str, &str, &str)> =
-            vec![
-            // ── [PL] Programming Languages cluster (5 confusable) ──
-            ("fact",   "pl",   "I prefer Python over Go for scripting tasks"),                           // 0
-            ("fact",   "pl",   "I use Rust for systems programming and CLI tools"),                      // 1
-            ("fact",   "pl",   "TypeScript is my go-to for frontend web development"),                   // 2
-            ("fact",   "pl",   "I learned Java in college but rarely use it now"),                        // 3
-            ("fact",   "pl",   "I write shell scripts in Bash for automation"),                           // 4
-
-            // ── [DB] Database cluster (4 confusable) ────────────────
-            ("pref",   "db",   "My preferred database is PostgreSQL for relational data"),               // 5
-            ("fact",   "db",   "I use Redis for caching and session storage"),                            // 6
-            ("fact",   "db",   "MongoDB is our document store for user profiles"),                        // 7
-            ("fact",   "db",   "We run SQLite for local development and testing"),                        // 8
-
-            // ── [FD] Food cluster (5 confusable) ────────────────────
-            ("fact",   "fd",   "My favorite food is sushi, especially salmon nigiri"),                    // 9
-            ("fact",   "fd",   "I'm allergic to peanuts and tree nuts"),                                  // 10
-            ("fact",   "fd",   "I drink oat milk lattes every morning"),                                  // 11
-            ("fact",   "fd",   "My go-to lunch is a burrito from the taqueria on Mission St"),            // 12
-            ("fact",   "fd",   "I'm trying to eat less red meat for health reasons"),                     // 13
-
-            // ── [GEO] Geography/Weather cluster (4 confusable) ──────
-            ("fact",   "geo",  "The weather is usually foggy in SF during summer"),                       // 14
-            ("fact",   "geo",  "I grew up in Portland, Oregon where it rains constantly"),                // 15
-            ("fact",   "geo",  "I moved to San Francisco three years ago for work"),                      // 16
-            ("fact",   "geo",  "I want to visit Tokyo next spring for the cherry blossoms"),              // 17
-
-            // ── [HW] Hardware/Setup cluster (4 confusable) ──────────
-            ("fact",   "hw",   "My laptop runs macOS with 32GB of RAM and M2 Pro chip"),                  // 18
-            ("fact",   "hw",   "I have a 27-inch 4K monitor on my desk at home"),                         // 19
-            ("fact",   "hw",   "My mechanical keyboard is a Keychron Q1 with brown switches"),            // 20
-            ("fact",   "hw",   "I use AirPods Pro for noise cancellation during focus time"),             // 21
-
-            // ── [ED] Education cluster (3 confusable) ───────────────
-            ("fact",   "ed",   "I studied computer science at MIT"),                                      // 22
-            ("fact",   "ed",   "I took Andrew Ng's machine learning course on Coursera"),                 // 23
-            ("fact",   "ed",   "I'm currently reading Designing Data-Intensive Applications"),            // 24
-
-            // ── [PET] Pets cluster (3 confusable) ───────────────────
-            ("fact",   "pet",  "I have a golden retriever named Max who is 4 years old"),                 // 25
-            ("fact",   "pet",  "My cat Luna likes to sleep on my keyboard"),                              // 26
-            ("fact",   "pet",  "We adopted Max from a rescue shelter in Oakland"),                        // 27
-
-            // ── [ML] Machine Learning cluster (4 confusable) ────────
-            ("lesson", "ml",   "Neural networks use gradient descent for training"),                      // 28
-            ("lesson", "ml",   "Transformer models use self-attention instead of recurrence"),            // 29
-            ("lesson", "ml",   "Random forests often outperform neural nets on tabular data"),            // 30
-            ("lesson", "ml",   "Fine-tuning a pretrained LLM requires much less data than training from scratch"), // 31
-
-            // ── [FIT] Fitness/Health cluster (4 confusable) ─────────
-            ("fact",   "fit",  "I enjoy hiking in Marin County on weekends"),                             // 32
-            ("fact",   "fit",  "I run 5K three times a week in Golden Gate Park"),                        // 33
-            ("fact",   "fit",  "I usually wake up at 7am and meditate for 10 minutes"),                   // 34
-            ("fact",   "fit",  "I've been doing yoga every Tuesday and Thursday evening"),                // 35
-
-            // ── [WRK] Work/Career cluster (4 confusable) ────────────
-            ("fact",   "wrk",  "I work at a startup in San Francisco as a senior engineer"),              // 36
-            ("fact",   "wrk",  "The project deadline is March 15th for the v2 launch"),                   // 37
-            ("fact",   "wrk",  "Our team uses two-week sprints with Monday standups"),                    // 38
-            ("fact",   "wrk",  "The API rate limit is 100 requests per minute"),                          // 39
-
-            // ── [TOOL] Dev Tools cluster (5 confusable) ─────────────
-            ("fact",   "tool", "I use VS Code as my primary code editor"),                                // 40
-            ("fact",   "tool", "I switched from vim to Neovim last year"),                                // 41
-            ("fact",   "tool", "Git and GitHub are essential to my workflow"),                             // 42
-            ("fact",   "tool", "I use Docker for local development environments"),                        // 43
-            ("fact",   "tool", "My terminal emulator is Warp with the Catppuccin theme"),                 // 44
-
-            // ── [MISC] Miscellaneous (5 unrelated) ──────────────────
-            ("fact",   "misc", "My phone number ends in 4242"),                                           // 45
-            ("fact",   "misc", "I listen to lo-fi hip hop while coding"),                                 // 46
-            ("fact",   "misc", "The office WiFi password is taped under the router"),                     // 47
-            ("fact",   "misc", "I prefer dark mode in every application"),                                // 48
-            ("fact",   "misc", "My Spotify wrapped top artist was Tycho"),                                // 49
-        ];
+        let corpus = build_bench_corpus();
 
         // Store with embeddings
         let mut memory_contents: Vec<String> = Vec::new();
@@ -338,15 +258,298 @@ mod tests {
             memory_contents.push(content.to_string());
         }
 
-        // ── Test cases: 60 queries across 8 categories ──────────────
-        struct TestCase {
-            query: &'static str,
-            expected: Vec<usize>,  // correct corpus indices
-            forbidden: Vec<usize>, // wrong but confusable (same cluster distractors)
-            category: &'static str,
+        let cases = build_bench_test_cases();
+
+        // ── Run benchmark ──────────────────────────────────────────
+        let semantic_threshold = crate::memory::SEMANTIC_THRESHOLD;
+        let mut results: Vec<QueryResult> = Vec::new();
+
+        for case in &cases {
+            let q_emb = embedder.embed(case.query).unwrap();
+            let hybrid = store.search_hybrid(case.query, Some(&q_emb), 5).unwrap();
+            let semantic: Vec<(String, f32)> = store
+                .search_semantic(&q_emb, 5)
+                .unwrap()
+                .into_iter()
+                .map(|(m, score)| (m.content, score))
+                .collect();
+            results.push(evaluate_bench_query(
+                case,
+                &hybrid,
+                &semantic,
+                &memory_contents,
+            ));
         }
 
-        let cases: Vec<TestCase> = vec![
+        // ── Print report ───────────────────────────────────────────
+        let sep = "=".repeat(100);
+        println!("\n{}", sep);
+        println!("  MEMORY RETRIEVAL PRECISION BENCHMARK");
+        println!(
+            "  {} memories | {} queries | semantic threshold: {}",
+            corpus.len(),
+            results.len(),
+            semantic_threshold
+        );
+        println!("{}\n", sep);
+
+        print_bench_per_query(&results);
+        print_bench_aggregate(&results);
+    }
+
+    #[derive(Default)]
+    struct Totals {
+        n: usize,
+        hit1: usize,
+        hit3: usize,
+        hit5: usize,
+        rr: f32,
+        p1: f32,
+        p3: f32,
+        p5: f32,
+        dist: usize,
+    }
+
+    struct TestCase {
+        query: &'static str,
+        expected: Vec<usize>,
+        forbidden: Vec<usize>,
+        category: &'static str,
+    }
+
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
+    struct QueryResult {
+        query: String,
+        category: String,
+        expected: Vec<usize>,
+        forbidden: Vec<usize>,
+        retrieved_1: Vec<usize>,
+        retrieved_3: Vec<usize>,
+        retrieved_5: Vec<usize>,
+        top_scores: Vec<f32>,
+        hit_1: bool,
+        hit_3: bool,
+        hit_5: bool,
+        rr: f32,
+        prec_1: f32,
+        prec_3: f32,
+        prec_5: f32,
+        distractor_count: usize,
+    }
+
+    fn build_bench_corpus() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            // ── [PL] Programming Languages cluster (5 confusable) ──
+            ("fact", "pl", "I prefer Python over Go for scripting tasks"), // 0
+            (
+                "fact",
+                "pl",
+                "I use Rust for systems programming and CLI tools",
+            ), // 1
+            (
+                "fact",
+                "pl",
+                "TypeScript is my go-to for frontend web development",
+            ), // 2
+            (
+                "fact",
+                "pl",
+                "I learned Java in college but rarely use it now",
+            ), // 3
+            ("fact", "pl", "I write shell scripts in Bash for automation"), // 4
+            // ── [DB] Database cluster (4 confusable) ────────────────
+            (
+                "pref",
+                "db",
+                "My preferred database is PostgreSQL for relational data",
+            ), // 5
+            ("fact", "db", "I use Redis for caching and session storage"), // 6
+            (
+                "fact",
+                "db",
+                "MongoDB is our document store for user profiles",
+            ), // 7
+            (
+                "fact",
+                "db",
+                "We run SQLite for local development and testing",
+            ), // 8
+            // ── [FD] Food cluster (5 confusable) ────────────────────
+            (
+                "fact",
+                "fd",
+                "My favorite food is sushi, especially salmon nigiri",
+            ), // 9
+            ("fact", "fd", "I'm allergic to peanuts and tree nuts"), // 10
+            ("fact", "fd", "I drink oat milk lattes every morning"), // 11
+            (
+                "fact",
+                "fd",
+                "My go-to lunch is a burrito from the taqueria on Mission St",
+            ), // 12
+            (
+                "fact",
+                "fd",
+                "I'm trying to eat less red meat for health reasons",
+            ), // 13
+            // ── [GEO] Geography/Weather cluster (4 confusable) ──────
+            (
+                "fact",
+                "geo",
+                "The weather is usually foggy in SF during summer",
+            ), // 14
+            (
+                "fact",
+                "geo",
+                "I grew up in Portland, Oregon where it rains constantly",
+            ), // 15
+            (
+                "fact",
+                "geo",
+                "I moved to San Francisco three years ago for work",
+            ), // 16
+            (
+                "fact",
+                "geo",
+                "I want to visit Tokyo next spring for the cherry blossoms",
+            ), // 17
+            // ── [HW] Hardware/Setup cluster (4 confusable) ──────────
+            (
+                "fact",
+                "hw",
+                "My laptop runs macOS with 32GB of RAM and M2 Pro chip",
+            ), // 18
+            (
+                "fact",
+                "hw",
+                "I have a 27-inch 4K monitor on my desk at home",
+            ), // 19
+            (
+                "fact",
+                "hw",
+                "My mechanical keyboard is a Keychron Q1 with brown switches",
+            ), // 20
+            (
+                "fact",
+                "hw",
+                "I use AirPods Pro for noise cancellation during focus time",
+            ), // 21
+            // ── [ED] Education cluster (3 confusable) ───────────────
+            ("fact", "ed", "I studied computer science at MIT"), // 22
+            (
+                "fact",
+                "ed",
+                "I took Andrew Ng's machine learning course on Coursera",
+            ), // 23
+            (
+                "fact",
+                "ed",
+                "I'm currently reading Designing Data-Intensive Applications",
+            ), // 24
+            // ── [PET] Pets cluster (3 confusable) ───────────────────
+            (
+                "fact",
+                "pet",
+                "I have a golden retriever named Max who is 4 years old",
+            ), // 25
+            ("fact", "pet", "My cat Luna likes to sleep on my keyboard"), // 26
+            (
+                "fact",
+                "pet",
+                "We adopted Max from a rescue shelter in Oakland",
+            ), // 27
+            // ── [ML] Machine Learning cluster (4 confusable) ────────
+            (
+                "lesson",
+                "ml",
+                "Neural networks use gradient descent for training",
+            ), // 28
+            (
+                "lesson",
+                "ml",
+                "Transformer models use self-attention instead of recurrence",
+            ), // 29
+            (
+                "lesson",
+                "ml",
+                "Random forests often outperform neural nets on tabular data",
+            ), // 30
+            (
+                "lesson",
+                "ml",
+                "Fine-tuning a pretrained LLM requires much less data than training from scratch",
+            ), // 31
+            // ── [FIT] Fitness/Health cluster (4 confusable) ─────────
+            ("fact", "fit", "I enjoy hiking in Marin County on weekends"), // 32
+            (
+                "fact",
+                "fit",
+                "I run 5K three times a week in Golden Gate Park",
+            ), // 33
+            (
+                "fact",
+                "fit",
+                "I usually wake up at 7am and meditate for 10 minutes",
+            ), // 34
+            (
+                "fact",
+                "fit",
+                "I've been doing yoga every Tuesday and Thursday evening",
+            ), // 35
+            // ── [WRK] Work/Career cluster (4 confusable) ────────────
+            (
+                "fact",
+                "wrk",
+                "I work at a startup in San Francisco as a senior engineer",
+            ), // 36
+            (
+                "fact",
+                "wrk",
+                "The project deadline is March 15th for the v2 launch",
+            ), // 37
+            (
+                "fact",
+                "wrk",
+                "Our team uses two-week sprints with Monday standups",
+            ), // 38
+            (
+                "fact",
+                "wrk",
+                "The API rate limit is 100 requests per minute",
+            ), // 39
+            // ── [TOOL] Dev Tools cluster (5 confusable) ─────────────
+            ("fact", "tool", "I use VS Code as my primary code editor"), // 40
+            ("fact", "tool", "I switched from vim to Neovim last year"), // 41
+            (
+                "fact",
+                "tool",
+                "Git and GitHub are essential to my workflow",
+            ), // 42
+            (
+                "fact",
+                "tool",
+                "I use Docker for local development environments",
+            ), // 43
+            (
+                "fact",
+                "tool",
+                "My terminal emulator is Warp with the Catppuccin theme",
+            ), // 44
+            // ── [MISC] Miscellaneous (5 unrelated) ──────────────────
+            ("fact", "misc", "My phone number ends in 4242"), // 45
+            ("fact", "misc", "I listen to lo-fi hip hop while coding"), // 46
+            (
+                "fact",
+                "misc",
+                "The office WiFi password is taped under the router",
+            ), // 47
+            ("fact", "misc", "I prefer dark mode in every application"), // 48
+            ("fact", "misc", "My Spotify wrapped top artist was Tycho"), // 49
+        ]
+    }
+
+    fn build_bench_test_cases() -> Vec<TestCase> {
+        vec![
             // ═══════════════════════════════════════════════════════════
             // CATEGORY: "disambig" — pick the right one from a dense cluster
             // ═══════════════════════════════════════════════════════════
@@ -731,154 +934,99 @@ mod tests {
                 forbidden: vec![40, 41, 42, 44],
                 category: "paraphrase",
             },
-        ];
+        ]
+    }
 
-        // ── Run benchmark ──────────────────────────────────────────
-        let semantic_threshold = crate::memory::SEMANTIC_THRESHOLD;
+    fn evaluate_bench_query(
+        case: &TestCase,
+        hybrid: &[crate::memory::Memory],
+        semantic_scores: &[(String, f32)],
+        memory_contents: &[String],
+    ) -> QueryResult {
+        let top_scores: Vec<f32> = semantic_scores.iter().map(|(_, s)| *s).collect();
+        let top_first = top_scores.first().copied().unwrap_or(0.0);
+        let all_indices: Vec<usize> = hybrid
+            .iter()
+            .filter_map(|m| memory_contents.iter().position(|c| c == &m.content))
+            .collect();
 
-        struct QueryResult {
-            query: String,
-            category: String,
-            expected: Vec<usize>,
-            forbidden: Vec<usize>,
-            retrieved_1: Vec<usize>, // top-1
-            retrieved_3: Vec<usize>, // top-3
-            retrieved_5: Vec<usize>, // top-5
-            top_scores: Vec<f32>,    // raw semantic scores
-            hit_1: bool,
-            hit_3: bool,
-            hit_5: bool,
-            rr: f32,
-            prec_1: f32,
-            prec_3: f32,
-            prec_5: f32,
-            distractor_count: usize, // forbidden items that appeared in top-5
-        }
+        let retrieved_1: Vec<usize> = all_indices.iter().take(1).copied().collect();
+        let retrieved_3: Vec<usize> = all_indices.iter().take(3).copied().collect();
+        let retrieved_5: Vec<usize> = all_indices.clone();
 
-        let mut results: Vec<QueryResult> = Vec::new();
+        let compute_hit = |retrieved: &[usize]| -> bool {
+            if case.expected.is_empty() {
+                return top_first <= 0.4;
+            }
+            retrieved.iter().any(|idx| case.expected.contains(idx))
+        };
 
-        for case in &cases {
-            let q_emb = embedder.embed(case.query).unwrap();
-
-            // Get top-5 from hybrid search
-            let hybrid = store.search_hybrid(case.query, Some(&q_emb), 5).unwrap();
-
-            // Raw semantic scores for report
-            let semantic = store.search_semantic(&q_emb, 5).unwrap();
-            let top_scores: Vec<f32> = semantic.iter().map(|(_, s)| *s).collect();
-
-            // Map to corpus indices
-            let all_indices: Vec<usize> = hybrid
+        let precision_at = |retrieved: &[usize], k: usize| -> f32 {
+            if case.expected.is_empty() {
+                return if top_first <= 0.4 { 1.0 } else { 0.0 };
+            }
+            let hits = retrieved
                 .iter()
-                .filter_map(|m| memory_contents.iter().position(|c| c == &m.content))
-                .collect();
-
-            let retrieved_1: Vec<usize> = all_indices.iter().take(1).copied().collect();
-            let retrieved_3: Vec<usize> = all_indices.iter().take(3).copied().collect();
-            let retrieved_5: Vec<usize> = all_indices.clone();
-
-            let compute_metrics = |retrieved: &[usize]| -> (bool, f32) {
-                if case.expected.is_empty() {
-                    let fp = top_scores.first().copied().unwrap_or(0.0) > 0.4;
-                    return (!fp, if !fp { 1.0 } else { 0.0 });
-                }
-                let mut first_rank = 0usize;
-                for (rank, idx) in retrieved.iter().enumerate() {
-                    if case.expected.contains(idx) && first_rank == 0 {
-                        first_rank = rank + 1;
-                    }
-                }
-                let hit = first_rank > 0;
-                let rr = if first_rank > 0 {
-                    1.0 / first_rank as f32
-                } else {
-                    0.0
-                };
-                (hit, rr)
-            };
-
-            let precision_at = |retrieved: &[usize], k: usize| -> f32 {
-                if case.expected.is_empty() {
-                    // For negatives: precision = fraction of top-K that are correctly empty
-                    let fp = top_scores.first().copied().unwrap_or(0.0) > 0.4;
-                    return if !fp { 1.0 } else { 0.0 };
-                }
-                let hits = retrieved
-                    .iter()
-                    .filter(|i| case.expected.contains(i))
-                    .count();
-                hits as f32 / k as f32
-            };
-
-            let (hit_1, _) = compute_metrics(&retrieved_1);
-            let (hit_3, _) = compute_metrics(&retrieved_3);
-            let (hit_5, _) = compute_metrics(&retrieved_5);
-
-            // RR is based on deepest retrieval
-            let rr = if case.expected.is_empty() {
-                if top_scores.first().copied().unwrap_or(0.0) > 0.4 {
-                    0.0
-                } else {
-                    1.0
-                }
-            } else {
-                let mut first_rank = 0usize;
-                for (rank, idx) in retrieved_5.iter().enumerate() {
-                    if case.expected.contains(idx) && first_rank == 0 {
-                        first_rank = rank + 1;
-                    }
-                }
-                if first_rank > 0 {
-                    1.0 / first_rank as f32
-                } else {
-                    0.0
-                }
-            };
-
-            let prec_1 = precision_at(&retrieved_1, 1);
-            let prec_3 = precision_at(&retrieved_3, 3);
-            let prec_5 = precision_at(&retrieved_5, 5);
-
-            let distractor_count = retrieved_5
-                .iter()
-                .filter(|i| case.forbidden.contains(i))
+                .filter(|i| case.expected.contains(i))
                 .count();
+            hits as f32 / k as f32
+        };
 
-            results.push(QueryResult {
-                query: case.query.to_string(),
-                category: case.category.to_string(),
-                expected: case.expected.clone(),
-                forbidden: case.forbidden.clone(),
-                retrieved_1,
-                retrieved_3,
-                retrieved_5,
-                top_scores,
-                hit_1,
-                hit_3,
-                hit_5,
-                rr,
-                prec_1,
-                prec_3,
-                prec_5,
-                distractor_count,
-            });
+        let hit_1 = compute_hit(&retrieved_1);
+        let hit_3 = compute_hit(&retrieved_3);
+        let hit_5 = compute_hit(&retrieved_5);
+
+        let rr = if case.expected.is_empty() {
+            if top_first > 0.4 {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            let mut first_rank = 0usize;
+            for (rank, idx) in retrieved_5.iter().enumerate() {
+                if case.expected.contains(idx) && first_rank == 0 {
+                    first_rank = rank + 1;
+                }
+            }
+            if first_rank > 0 {
+                1.0 / first_rank as f32
+            } else {
+                0.0
+            }
+        };
+
+        let distractor_count = retrieved_5
+            .iter()
+            .filter(|i| case.forbidden.contains(i))
+            .count();
+
+        let prec_1 = precision_at(&retrieved_1, 1);
+        let prec_3 = precision_at(&retrieved_3, 3);
+        let prec_5 = precision_at(&retrieved_5, 5);
+
+        QueryResult {
+            query: case.query.to_string(),
+            category: case.category.to_string(),
+            expected: case.expected.clone(),
+            forbidden: case.forbidden.clone(),
+            retrieved_1,
+            retrieved_3,
+            retrieved_5,
+            top_scores,
+            hit_1,
+            hit_3,
+            hit_5,
+            rr,
+            prec_1,
+            prec_3,
+            prec_5,
+            distractor_count,
         }
+    }
 
-        // ── Print report ───────────────────────────────────────────
-        let sep = "=".repeat(100);
-        let thin = "-".repeat(100);
-        println!("\n{}", sep);
-        println!("  MEMORY RETRIEVAL PRECISION BENCHMARK");
-        println!(
-            "  {} memories | {} queries | semantic threshold: {}",
-            corpus.len(),
-            results.len(),
-            semantic_threshold
-        );
-        println!("{}\n", sep);
-
-        // Per-query detail
-        for r in &results {
+    fn print_bench_per_query(results: &[QueryResult]) {
+        for r in results {
             let status = if r.hit_1 {
                 " @1"
             } else if r.hit_3 {
@@ -923,8 +1071,10 @@ mod tests {
                 expected_str, retrieved_str, scores_str, r.rr,
                 r.prec_1 * 100.0, r.prec_3 * 100.0, r.prec_5 * 100.0, dist_warn);
         }
+    }
 
-        // ── Aggregate by category ──────────────────────────────────
+    fn print_bench_aggregate(results: &[QueryResult]) {
+        let thin = "-".repeat(100);
         println!("\n{}", thin);
         println!("  AGGREGATE METRICS BY CATEGORY\n");
         println!(
@@ -992,24 +1142,19 @@ mod tests {
             totals.dist, totals.n * 5);
         println!();
 
-        // ── Cluster confusion matrix (distractor analysis) ─────────
+        // Distractor analysis
         let disambig_results: Vec<&QueryResult> = results
             .iter()
             .filter(|r| {
                 r.category == "disambig" || r.category == "paraphrase" || r.category == "exact"
             })
             .collect();
-        let total_distractor_opps: usize = disambig_results
-            .iter()
-            .map(|r| r.forbidden.len().min(5))
-            .sum();
         let total_distractors: usize = disambig_results.iter().map(|r| r.distractor_count).sum();
-        let distractor_rate = if total_distractor_opps > 0 {
+        let distractor_rate = if !disambig_results.is_empty() {
             total_distractors as f32 / disambig_results.len() as f32
         } else {
             0.0
         };
-
         println!("  DISTRACTOR ANALYSIS (disambig + paraphrase + exact)");
         println!(
             "  Queries with distractors in top-5: {}/{}",
@@ -1025,11 +1170,10 @@ mod tests {
         );
         println!();
 
-        // ── Hard-fail assertions ───────────────────────────────────
+        // Hard-fail assertions
         let overall_hit3 = totals.hit3 as f32 / totals.n as f32;
         let overall_mrr = totals.rr / totals.n as f32;
         let overall_hit1 = totals.hit1 as f32 / totals.n as f32;
-
         assert!(
             overall_hit3 >= 0.75,
             "FAIL: Hit@3 = {:.0}% (threshold 75%)",
@@ -1045,25 +1189,11 @@ mod tests {
             "FAIL: Hit@1 = {:.0}% (threshold 55%)",
             overall_hit1 * 100.0
         );
-
         println!("  All assertions passed:");
         println!("    Hit@1 {:.0}% >= 55%", overall_hit1 * 100.0);
         println!("    Hit@3 {:.0}% >= 75%", overall_hit3 * 100.0);
         println!("    MRR   {:.3} >= 0.60", overall_mrr);
         println!();
-    }
-
-    #[derive(Default)]
-    struct Totals {
-        n: usize,
-        hit1: usize,
-        hit3: usize,
-        hit5: usize,
-        rr: f32,
-        p1: f32,
-        p3: f32,
-        p5: f32,
-        dist: usize,
     }
 
     #[test]

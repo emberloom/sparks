@@ -20,6 +20,7 @@ pub fn should_speak(relevance: f32, spontaneity: f32) -> bool {
 }
 
 /// Weighted random selection — returns index into `weights`.
+#[cfg(test)]
 pub fn weighted_select(weights: &[f32]) -> usize {
     if weights.is_empty() {
         return 0;

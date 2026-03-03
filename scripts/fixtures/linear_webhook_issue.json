@@ -1,0 +1,18 @@
+{
+  "type": "Issue",
+  "data": {
+    "id": "issue-1",
+    "identifier": "ENG-1",
+    "title": "Mock Linear issue",
+    "description": "Mock issue body.",
+    "url": "https://linear.app/ENG/issue/ENG-1",
+    "priority": 3,
+    "team": { "key": "ENG" },
+    "creator": { "name": "Mock User" },
+    "labels": {
+      "nodes": [
+        { "name": "athena" }
+      ]
+    }
+  }
+}

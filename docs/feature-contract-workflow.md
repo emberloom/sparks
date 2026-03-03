@@ -1,151 +1,135 @@
 # Feature Contract Workflow
 
-Date: 2026-02-17
+Date: 2026-03-03
 
 ## Purpose
 
-Run multi-task feature delivery with explicit DAG dependencies using `athena feature`.
+Run multi-task feature delivery with explicit dependency DAGs and auditable run artifacts.
 
-## Contract File
+## 1. Author Contract
 
-Use YAML or JSON with:
-
-- `feature_id`
-- optional defaults: `lane`, `risk`, `repo`
-- `acceptance_criteria[]` (required):
-  - `id`
-  - optional `description`
-- `verification_checks[]` (recommended, required for `feature verify`):
-  - `id`
-  - `command`
-  - optional `profile` (`fast` or `strict`, default `strict`)
-  - `mapped_acceptance[]`
-  - optional `required` (default `true`)
-- `tasks[]` with:
-  - `id`, `goal`
-  - required `mapped_acceptance[]` (one or more acceptance IDs)
-  - optional `depends_on[]`, `ghost`, `context`
-  - optional `lane`, `risk`, `repo` overrides
-  - optional `wait_secs`, `auto_store`, `cli_tool`, `cli_model`
-  - optional `enabled` (default `true`)
-
-Example file:
-
-- `eval/feature-contract-example.yaml`
-
-## Validate
+Create a template with defaults:
 
 ```bash
-athena feature validate --file eval/feature-contract-example.yaml
+athena feature init --file feature-contract.toml --pattern fanout-fanin
 ```
 
-## Plan
+Alternative pattern:
 
 ```bash
-athena feature plan --file eval/feature-contract-example.yaml
+athena feature init --file feature-contract-linear.toml --pattern linear
 ```
 
-This prints batch groups derived from DAG levels.
-It also prints acceptance coverage (`acceptance_id -> covered_by task IDs`).
+Accepted input formats for runtime commands:
+- TOML
+- YAML
+- JSON
 
-## Dispatch
+## 2. Validate/Lint (Fail Fast)
 
 ```bash
-athena feature dispatch --file eval/feature-contract-example.yaml --wait-secs 240
+athena feature validate --file feature-contract.toml
+# alias:
+athena feature lint --file feature-contract.toml
+```
+
+Validation exits non-zero on any contract error and prints deterministic diagnostics with field paths, cycle traces, and unknown-ID suggestions.
+
+Example diagnostics:
+
+```text
+Invalid feature contract (my-feature):
+- tasks[2].depends_on[0] references unknown task 'TSK-2' (did you mean 'TASK-2'?)
+- task dependency graph contains a cycle among enabled tasks: T3 -> T2 -> T3. remaining_blocked_tasks=T2,T3
+```
+
+## 3. Inspect DAG Plan
+
+```bash
+athena feature plan --file feature-contract.toml
+```
+
+This prints:
+- DAG execution batches
+- acceptance coverage
+- verification-check coverage
+
+## 4. Dispatch Tasks
+
+```bash
+athena feature dispatch --file feature-contract.toml --wait-secs 240
 ```
 
 Useful options:
-
-- `--continue-on-failure` keep running independent tasks
-- `--dry-run` resolve DAG and print execution plan without dispatching
-- `--outcome-grace-secs <n>` override adaptive DB terminal-outcome grace wait
+- `--continue-on-failure`
+- `--dry-run`
+- `--outcome-grace-secs <n>`
+- `--rollback-on-failure`
 - `--cli-tool codex|claude_code|opencode`
 - `--cli-model <model>`
 - `--lane <delivery|self_improvement>`
 - `--risk <low|medium|high>`
 - `--repo <label>`
 
-Dispatch behavior:
+Dispatch emits:
+- `eval/results/feature-<feature_id>-<timestamp>.json|md`
+- `artifacts/feature-contract-report-<feature_id>.json|md`
+- `eval/results/ci-monitor-<timestamp>-<pr>.json` (for tasks that open a GitHub PR when CI autopilot is enabled)
 
-- tasks run in topological order
-- independent tasks in the same DAG batch run in bounded parallelism (`ATHENA_FEATURE_BATCH_CONCURRENCY`, default `2`)
-- tasks with failed/skipped dependencies are skipped
-- each task waits for terminal outcome correlation via `task_id`
-- if pulse wait times out, dispatch performs an adaptive DB terminal-outcome grace wait before finalizing
-- adaptive grace defaults by risk and task profile (ghost/goal/wait timeout), but can be overridden with `--outcome-grace-secs`
-- unresolved waits are finalized with canonical reasons (`outcome_wait_timeout`, `dispatch_channel_closed`)
-- acceptance coverage and satisfaction are summarized in per-run ledgers:
-  - `eval/results/feature-<feature_id>-<timestamp>.json`
-  - `eval/results/feature-<feature_id>-<timestamp>.md`
+The contract report is emitted for both success and failure paths.
 
-## Verify
+CI autopilot behavior for dispatch:
+- Default is **enabled** via `[ticket_intake.ci_autopilot]` in config.
+- For successful tasks that open a PR, Athena monitors CI, attempts bounded self-heal, and records `ci_monitor_status` in dispatch/report artifacts.
+- Non-green CI autopilot outcomes are treated as task failures in dispatch summaries.
+
+## 5. Run Verification
 
 ```bash
-athena feature verify --file eval/feature-contract-example.yaml --profile strict
+athena feature verify --file feature-contract.toml --profile strict
 ```
 
 Profile behavior:
+- `fast`: only checks with `profile: fast`
+- `strict`: checks with `profile: fast|strict`
 
-- `--profile fast` runs only checks tagged `profile: fast`
-- `--profile strict` runs both `fast` and `strict` checks
+Verify emits:
+- `eval/results/feature-verify-<feature_id>-<timestamp>.json|md`
 
-Verify behavior:
-
-- runs each `verification_checks[].command` via shell (`zsh -lc`)
-- records pass/fail with exit codes and output tails
-- computes acceptance satisfaction from passing mapped checks
-- emits ledgers:
-  - `eval/results/feature-verify-<feature_id>-<timestamp>.json`
-  - `eval/results/feature-verify-<feature_id>-<timestamp>.md`
-- fails non-zero if promotion gate fails
-
-## Gate (Dispatch + Verify + Promote)
+## 6. Gate (Dispatch + Verify + Promote)
 
 ```bash
 athena feature gate \
-  --file eval/feature-contract-example.yaml \
+  --file feature-contract.toml \
   --wait-secs 240 \
   --verify-profile strict
 ```
 
-Gate behavior:
+Gate emits:
+- dispatch ledger
+- verify ledger
+- promotion decision
+- consolidated gate ledger
+- contract run report (`artifacts/feature-contract-report-<feature_id>.json|md`)
 
-- runs dispatch flow and emits dispatch ledger
-- runs verify flow with selected verification profile
-- computes promotion decision using risk-tier policy
-- emits consolidated gate artifacts:
-  - `eval/results/feature-gate-<feature_id>-<timestamp>.json`
-  - `eval/results/feature-gate-<feature_id>-<timestamp>.md`
-- exits non-zero when `gate_ok=false`
-
-## Promote (Supervised Decision)
+## 7. Promote (Supervised Decision)
 
 ```bash
-athena feature promote --file eval/feature-contract-example.yaml
+athena feature promote --file feature-contract.toml
 ```
 
 Optional explicit ledgers:
 
 ```bash
 athena feature promote \
-  --file eval/feature-contract-example.yaml \
+  --file feature-contract.toml \
   --dispatch-ledger eval/results/feature-<feature_id>-<timestamp>.json \
   --verify-ledger eval/results/feature-verify-<feature_id>-<timestamp>.json
 ```
 
-Promote behavior:
+## Migration Guide
 
-- loads dispatch + verify ledgers (latest for feature by default)
-- loads latest real eval gate status from `eval/results/history.jsonl` (suite `athena-core-v2-real`) and blocks auto-promotion when gate is missing or failing
-- applies risk-tier policy:
-  - `low`: auto-promote allowed only when both ledgers are promotable
-  - `medium/high`: always approval-required (PR-only)
-- emits decision artifacts:
-  - `eval/results/feature-promote-<feature_id>-<timestamp>.json`
-  - `eval/results/feature-promote-<feature_id>-<timestamp>.md`
-
-Validation guarantees:
-
-- every enabled task maps at least one acceptance criterion
-- every mapped acceptance ID must exist in `acceptance_criteria`
-- every acceptance criterion must be covered by at least one enabled task
+If you have older workflows:
+1. Replace `--contract` with `--file` when convenient (`--contract` still works as an alias).
+2. Existing YAML/JSON files continue to work.
+3. For TOML adoption, start with `feature init` and copy your existing DAG/check definitions.

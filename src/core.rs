@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -18,9 +19,13 @@ use crate::mood::MoodState;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::proactive::{self, ActivityTracker};
 use crate::profiles;
+use crate::prompt_scanner::{
+    PromptScanner, ScanDecision, ScanMetadata, ScanReport, ScanRuntimeOverrides,
+};
 use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
+use crate::ticket_intake::{self, TicketIntakeStore, TicketProvider};
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
@@ -57,8 +62,6 @@ pub enum CoreEvent {
     Response(String),
     /// Error during execution
     Error(String),
-    /// Proactive pulse from background tasks
-    Pulse(String),
 }
 
 /// An autonomous task submitted by a background process (cron, heartbeat, etc.).
@@ -96,7 +99,6 @@ pub struct GhostInfo {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
-    pub strategy: String,
 }
 
 /// Info about a stored memory (returned by list_memories).
@@ -117,6 +119,8 @@ pub struct CoreHandle {
     pub knobs: SharedKnobs,
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
+    // activity is read by the telegram feature
+    #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
     pub activity: Arc<ActivityTracker>,
     pub mood: Arc<MoodState>,
     pub cron_engine: Option<Arc<CronEngine>>,
@@ -199,10 +203,9 @@ struct CoreRuntimeHandles {
 
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
-        let (llm, selected_provider) = connect_main_llm(&config).await?;
+        let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
         let llm_for_handle = llm.clone();
-        let orchestrator = connect_orchestrator(&config, &selected_provider, &llm).await?;
-        let embedder = init_embedder_opt(&config).await;
+        let prompt_scanner = Arc::new(PromptScanner::new(config.prompt_scanner.clone()));
 
         spawn_embedding_backfill(memory.clone(), embedder.clone());
 
@@ -238,12 +241,15 @@ impl AthenaCore {
         );
         let persona_soul_for_reentry = config.persona.soul.clone();
 
-        let (tx, rx) = mpsc::channel::<CoreRequest>(32);
+        let (tx, rx) = init_core_channel();
 
         let llm_for_reentry = manager.llm_ref();
-        spawn_core_event_loop(
+        spawn_core_loops(
             rx,
-            manager.clone(),
+            manager,
+            auto_rx,
+            config.clone(),
+            prompt_scanner,
             activity.clone(),
             knobs.clone(),
             observer.clone(),
@@ -252,14 +258,8 @@ impl AthenaCore {
             llm_for_reentry,
             persona_soul_for_reentry,
             langfuse.clone(),
-        );
-        spawn_autonomous_task_consumer(
-            auto_rx,
-            manager,
-            observer.clone(),
-            pulse_bus.clone(),
-            memory.clone(),
             outcome_store,
+            config.ticket_intake.mock_dispatch,
         );
 
         Ok(CoreHandle {
@@ -278,6 +278,67 @@ impl AthenaCore {
             metrics,
         })
     }
+}
+
+async fn init_llm_stack(
+    config: &Config,
+) -> Result<(
+    Arc<dyn LlmProvider>,
+    Arc<dyn LlmProvider>,
+    Option<Arc<Embedder>>,
+)> {
+    let (llm, selected_provider) = connect_main_llm(config).await?;
+    let orchestrator = connect_orchestrator(config, &selected_provider, &llm).await?;
+    let embedder = init_embedder_opt(config).await;
+    Ok((llm, orchestrator, embedder))
+}
+
+fn init_core_channel() -> (mpsc::Sender<CoreRequest>, mpsc::Receiver<CoreRequest>) {
+    mpsc::channel::<CoreRequest>(32)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+fn spawn_core_loops(
+    rx: mpsc::Receiver<CoreRequest>,
+    manager: Arc<Manager>,
+    auto_rx: mpsc::Receiver<AutonomousTask>,
+    config: Config,
+    prompt_scanner: Arc<PromptScanner>,
+    activity: Arc<ActivityTracker>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    memory: Arc<MemoryStore>,
+    _llm_for_reentry: Arc<dyn LlmProvider>,
+    persona_soul_for_reentry: Option<String>,
+    _langfuse: SharedLangfuse,
+    outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
+) {
+    spawn_core_event_loop(
+        rx,
+        manager.clone(),
+        prompt_scanner.clone(),
+        activity,
+        knobs,
+        observer.clone(),
+        memory.clone(),
+        persona_soul_for_reentry,
+    );
+    spawn_autonomous_task_consumer(
+        auto_rx,
+        manager,
+        config,
+        prompt_scanner,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+        mock_ticket_intake_dispatch,
+    );
 }
 
 fn init_runtime_handles(
@@ -315,10 +376,8 @@ fn init_runtime_handles(
     let cron_engine = init_cron_engine(
         memory.clone(),
         observer.clone(),
-        pulse_bus.clone(),
-        llm,
+        auto_tx.clone(),
         knobs.clone(),
-        langfuse.clone(),
     );
     let metrics = init_metrics_collector(
         config,
@@ -380,7 +439,10 @@ fn init_pulse_bus(
     (pulse_bus, delivered_rx)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_housekeeping_loops(
     config: &Config,
     memory: Arc<MemoryStore>,
@@ -446,6 +508,59 @@ fn spawn_housekeeping_loops(
         auto_tx.clone(),
         langfuse.clone(),
     );
+
+    let providers = build_ticket_intake_providers(config, &observer);
+    let webhook_enabled = config.ticket_intake.webhook.enabled;
+    let has_sources = !config.ticket_intake.sources.is_empty();
+    if has_sources || webhook_enabled {
+        match create_ticket_intake_store(config) {
+            Ok(store) => {
+                let provider_list = providers.values().cloned().collect::<Vec<_>>();
+                if !provider_list.is_empty() {
+                    ticket_intake::spawn_ticket_intake(
+                        knobs.clone(),
+                        observer.clone(),
+                        auto_tx.clone(),
+                        provider_list,
+                        store.clone(),
+                    );
+                }
+
+                ticket_intake::sync::spawn_ticket_status_sync(
+                    knobs.clone(),
+                    observer.clone(),
+                    store.clone(),
+                    providers,
+                    webhook_enabled,
+                );
+
+                #[cfg(feature = "webhook")]
+                if webhook_enabled {
+                    let webhook_config = config.ticket_intake.webhook.clone();
+                    let sources = config.ticket_intake.sources.clone();
+                    let observer_clone = observer.clone();
+                    let store_clone = store.clone();
+                    let auto_tx_clone = auto_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ticket_intake::webhook::spawn_ticket_intake_webhook(
+                            webhook_config,
+                            sources,
+                            observer_clone,
+                            store_clone,
+                            auto_tx_clone,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Ticket webhook failed: {}", e);
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Ticket intake store unavailable: {}", e);
+            }
+        }
+    }
 }
 
 fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: ObserverHandle) {
@@ -474,14 +589,10 @@ fn spawn_stale_started_sweeper(outcome_store: Arc<TaskOutcomeStore>, observer: O
 fn init_cron_engine(
     memory: Arc<MemoryStore>,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
-    llm: Arc<dyn LlmProvider>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
     knobs: SharedKnobs,
-    langfuse: SharedLangfuse,
 ) -> Arc<CronEngine> {
-    let cron_engine = Arc::new(CronEngine::new(
-        memory, observer, pulse_bus, llm, knobs, langfuse,
-    ));
+    let cron_engine = Arc::new(CronEngine::new(memory, observer, auto_tx, knobs));
     cron_engine.clone().spawn_tick_loop();
     cron_engine
 }
@@ -510,7 +621,10 @@ fn init_metrics_collector(
     metrics
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn build_manager(
     config: &Config,
     merged_ghosts: Vec<GhostConfig>,
@@ -540,6 +654,7 @@ fn build_manager(
         usage_store,
         metrics,
         langfuse,
+        observer.clone(),
     ));
     if let Some(dt_path) = manager.dynamic_tools_path() {
         crate::dynamic_tools::spawn_hot_reload(
@@ -552,18 +667,19 @@ fn build_manager(
     manager
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn spawn_core_event_loop(
     mut rx: mpsc::Receiver<CoreRequest>,
     manager: Arc<Manager>,
+    prompt_scanner: Arc<PromptScanner>,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
-    llm: Arc<dyn LlmProvider>,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -573,14 +689,12 @@ fn spawn_core_event_loop(
                 handle_core_request(
                     req,
                     manager.clone(),
+                    prompt_scanner.clone(),
                     activity.clone(),
                     knobs.clone(),
                     observer.clone(),
-                    pulse_bus.clone(),
                     memory.clone(),
-                    llm.clone(),
                     persona_soul.clone(),
-                    langfuse.clone(),
                 )
                 .instrument(request_span),
             );
@@ -588,18 +702,155 @@ fn spawn_core_event_loop(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
+fn parse_context_value(context: &str, key: &str) -> Option<String> {
+    context
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_external_id_from_dedup_key(dedup_key: &str) -> String {
+    dedup_key
+        .rsplit_once(':')
+        .map(|(_, id)| id.to_string())
+        .unwrap_or_else(|| dedup_key.to_string())
+}
+
+fn scan_metadata_for_chat(req: &CoreRequest) -> ScanMetadata {
+    let dedup = req.session.session_key();
+    ScanMetadata {
+        dedup_key: dedup.clone(),
+        external_id: dedup,
+        number: None,
+        provider: format!("chat:{}", req.session.platform),
+        repo: "chat".to_string(),
+        author: Some(req.session.user_id.clone()),
+    }
+}
+
+fn scan_metadata_for_task(task: &AutonomousTask, task_id: &str) -> ScanMetadata {
+    let source = parse_context_value(&task.context, "Source: ")
+        .unwrap_or_else(|| format!("lane:{}", task.lane));
+    let dedup_key = task_id
+        .strip_prefix("ticket:")
+        .unwrap_or(task_id)
+        .to_string();
+    let number = parse_context_value(&task.context, "Number: ");
+    let author = parse_context_value(&task.context, "Author: ");
+    ScanMetadata {
+        dedup_key: dedup_key.clone(),
+        external_id: parse_external_id_from_dedup_key(&dedup_key),
+        number,
+        provider: source,
+        repo: task.repo.clone(),
+        author,
+    }
+}
+
+fn log_prompt_scan(
+    observer: &ObserverHandle,
+    category: ObserverCategory,
+    surface: &str,
+    report: &ScanReport,
+    metadata: &ScanMetadata,
+) {
+    if report.findings.is_empty() {
+        return;
+    }
+    observer.log(
+        category,
+        format!(
+            "Prompt scanner {} decision={} score={} mode={} allowlisted={} rules={} provider={} repo={} excerpt={}",
+            surface,
+            report.decision.as_str(),
+            report.score,
+            report.mode_used.as_str(),
+            report.allowlisted,
+            report.finding_ids_csv(),
+            metadata.provider,
+            metadata.repo,
+            report.redacted_excerpt
+        ),
+    );
+}
+
+async fn should_block_chat_input(
+    req: &CoreRequest,
+    prompt_scanner: &PromptScanner,
+    observer: &ObserverHandle,
+    session_key: &str,
+) -> bool {
+    let scan_metadata = scan_metadata_for_chat(req);
+    let scan_report =
+        prompt_scanner.scan(&req.input, &scan_metadata, ScanRuntimeOverrides::default());
+    log_prompt_scan(
+        observer,
+        ObserverCategory::ChatIn,
+        "chat_intake",
+        &scan_report,
+        &scan_metadata,
+    );
+    if scan_report.decision != ScanDecision::Block {
+        return false;
+    }
+    let blocked_reason = format!(
+        "Input blocked by prompt scanner (rules: {})",
+        scan_report.finding_ids_csv()
+    );
+    observer.log(
+        ObserverCategory::ChatOut,
+        format!("{} ERROR: {}", session_key, blocked_reason),
+    );
+    let _ = req.event_tx.send(CoreEvent::Error(blocked_reason)).await;
+    true
+}
+
+fn scan_autonomous_task_input(
+    task: &AutonomousTask,
+    task_id: &str,
+    prompt_scanner: &PromptScanner,
+    observer: &ObserverHandle,
+) -> std::result::Result<(), crate::error::AthenaError> {
+    let scan_metadata = scan_metadata_for_task(task, task_id);
+    let scan_input = format!("{}\n\n{}", task.goal, task.context);
+    let scan_report =
+        prompt_scanner.scan(&scan_input, &scan_metadata, ScanRuntimeOverrides::default());
+    let scan_category = if task.lane == "ticket_intake" {
+        ObserverCategory::TicketIntake
+    } else {
+        ObserverCategory::AutonomousTask
+    };
+    log_prompt_scan(
+        observer,
+        scan_category,
+        "autonomous_task_intake",
+        &scan_report,
+        &scan_metadata,
+    );
+    if scan_report.decision == ScanDecision::Block {
+        return Err(crate::error::AthenaError::Tool(format!(
+            "Prompt scanner blocked task intake (rules: {})",
+            scan_report.finding_ids_csv()
+        )));
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn handle_core_request(
     req: CoreRequest,
     manager: Arc<Manager>,
+    prompt_scanner: Arc<PromptScanner>,
     activity: Arc<ActivityTracker>,
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
-    llm: Arc<dyn LlmProvider>,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     activity.touch();
     let session_key = req.session.session_key();
@@ -607,6 +858,9 @@ async fn handle_core_request(
         ObserverCategory::ChatIn,
         format!("{} \"{}\"", session_key, truncate_obs(&req.input, 80)),
     ));
+    if should_block_chat_input(&req, &prompt_scanner, &observer, &session_key).await {
+        return;
+    }
     let _ = req
         .event_tx
         .send(CoreEvent::Status("Thinking...".into()))
@@ -650,16 +904,7 @@ async fn handle_core_request(
         }
     }
 
-    proactive::maybe_schedule_reentry(
-        knobs,
-        observer,
-        pulse_bus,
-        llm,
-        memory,
-        session_key,
-        persona_soul,
-        langfuse,
-    );
+    proactive::maybe_schedule_reentry(knobs, observer, memory, session_key, persona_soul);
 }
 
 fn spawn_status_bridge(
@@ -676,21 +921,37 @@ fn spawn_status_bridge(
 fn spawn_autonomous_task_consumer(
     mut auto_rx: mpsc::Receiver<AutonomousTask>,
     manager: Arc<Manager>,
+    config: Config,
+    prompt_scanner: Arc<PromptScanner>,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
 ) {
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
             let manager = manager.clone();
+            let config = config.clone();
+            let prompt_scanner = prompt_scanner.clone();
             let observer = observer.clone();
             let pulse_bus = pulse_bus.clone();
             let memory = memory.clone();
             let outcome_store = outcome_store.clone();
+            let mock_ticket_intake_dispatch = mock_ticket_intake_dispatch;
             tokio::spawn(async move {
-                execute_autonomous_task(task, manager, observer, pulse_bus, memory, outcome_store)
-                    .await;
+                execute_autonomous_task(
+                    task,
+                    manager,
+                    config,
+                    prompt_scanner,
+                    observer,
+                    pulse_bus,
+                    memory,
+                    outcome_store,
+                    mock_ticket_intake_dispatch,
+                )
+                .await;
             });
         }
     });
@@ -699,10 +960,13 @@ fn spawn_autonomous_task_consumer(
 async fn execute_autonomous_task(
     task: AutonomousTask,
     manager: Arc<Manager>,
+    config: Config,
+    prompt_scanner: Arc<PromptScanner>,
     observer: ObserverHandle,
     pulse_bus: PulseBus,
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
+    mock_ticket_intake_dispatch: bool,
 ) {
     let confirmer = AutoConfirmer;
     expire_stale_started_tasks(&outcome_store, &observer);
@@ -716,38 +980,201 @@ async fn execute_autonomous_task(
     log_autonomous_dispatch(&observer, &task, &ghost_label);
     introspect::inc_active_tasks();
 
+    if maybe_handle_mock_ticket_intake_dispatch(
+        mock_ticket_intake_dispatch,
+        &task,
+        &task_id,
+        &ghost_label,
+        &goal_summary,
+        &config,
+        &observer,
+        &pulse_bus,
+        &memory,
+        &outcome_store,
+    )
+    .await
+    {
+        introspect::dec_active_tasks();
+        return;
+    }
+
     let (verification_total_on_fail, _) = infer_verification_counters(&task.goal, None, false);
     let rolled_back_on_fail = infer_rollback_flag(&task.goal, None);
-    match manager
-        .execute_task(&task.goal, &task.context, task.ghost.as_deref(), &confirmer)
-        .await
-    {
-        Ok(result) => handle_autonomous_task_success(
+    if let Err(err) = scan_autonomous_task_input(&task, &task_id, &prompt_scanner, &observer) {
+        fail_autonomous_task(
             &task,
             &task_id,
             &ghost_label,
             &goal_summary,
-            result,
-            &observer,
-            &pulse_bus,
-            &memory,
-            &outcome_store,
-        ),
-        Err(e) => handle_autonomous_task_failure(
-            &task,
-            &task_id,
-            &ghost_label,
-            &goal_summary,
-            &e,
+            &err,
             verification_total_on_fail,
             rolled_back_on_fail,
             &observer,
             &pulse_bus,
             &memory,
             &outcome_store,
+        );
+        introspect::dec_active_tasks();
+        return;
+    }
+    let manager_result = run_manager_autonomous_task(&manager, &task, &confirmer).await;
+    finalize_autonomous_task_run(
+        &task,
+        &task_id,
+        &ghost_label,
+        &goal_summary,
+        manager_result,
+        &config,
+        verification_total_on_fail,
+        rolled_back_on_fail,
+        &observer,
+        &pulse_bus,
+        &memory,
+        &outcome_store,
+    )
+    .await;
+    introspect::dec_active_tasks();
+}
+
+async fn run_manager_autonomous_task(
+    manager: &Manager,
+    task: &AutonomousTask,
+    confirmer: &dyn Confirmer,
+) -> Result<String> {
+    manager
+        .execute_task(
+            &task.goal,
+            &task.context,
+            task.ghost.as_deref(),
+            Some(&task.lane),
+            Some(&task.repo),
+            confirmer,
+        )
+        .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+fn fail_autonomous_task(
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    err: &crate::error::AthenaError,
+    verification_total_on_fail: u64,
+    rolled_back_on_fail: bool,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    handle_autonomous_task_failure(
+        task,
+        task_id,
+        ghost_label,
+        goal_summary,
+        err,
+        verification_total_on_fail,
+        rolled_back_on_fail,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+async fn finalize_autonomous_task_run(
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    manager_result: Result<String>,
+    config: &Config,
+    verification_total_on_fail: u64,
+    rolled_back_on_fail: bool,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) {
+    match manager_result {
+        Ok(result) => {
+            handle_autonomous_task_success(
+                task,
+                task_id,
+                ghost_label,
+                goal_summary,
+                result,
+                config,
+                observer,
+                pulse_bus,
+                memory,
+                outcome_store,
+            )
+            .await
+        }
+        Err(e) => fail_autonomous_task(
+            task,
+            task_id,
+            ghost_label,
+            goal_summary,
+            &e,
+            verification_total_on_fail,
+            rolled_back_on_fail,
+            observer,
+            pulse_bus,
+            memory,
+            outcome_store,
         ),
     }
-    introspect::dec_active_tasks();
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+async fn maybe_handle_mock_ticket_intake_dispatch(
+    mock_ticket_intake_dispatch: bool,
+    task: &AutonomousTask,
+    task_id: &str,
+    ghost_label: &str,
+    goal_summary: &str,
+    config: &Config,
+    observer: &ObserverHandle,
+    pulse_bus: &PulseBus,
+    memory: &MemoryStore,
+    outcome_store: &TaskOutcomeStore,
+) -> bool {
+    if !(mock_ticket_intake_dispatch && task.lane == "ticket_intake") {
+        return false;
+    }
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!(
+            "Mock dispatch enabled for ticket intake task [{}]: skipping execution",
+            task_id
+        ),
+    );
+    handle_autonomous_task_success(
+        task,
+        task_id,
+        ghost_label,
+        goal_summary,
+        "Mock dispatch: ticket intake task auto-completed without ghost execution.".to_string(),
+        config,
+        observer,
+        pulse_bus,
+        memory,
+        outcome_store,
+    )
+    .await;
+    true
 }
 
 fn record_autonomous_task_start(
@@ -779,18 +1206,34 @@ fn log_autonomous_dispatch(observer: &ObserverHandle, task: &AutonomousTask, gho
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_autonomous_task_success(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
+async fn handle_autonomous_task_success(
     task: &AutonomousTask,
     task_id: &str,
     ghost_label: &str,
     goal_summary: &str,
-    result: String,
+    mut result: String,
+    config: &Config,
     observer: &ObserverHandle,
     pulse_bus: &PulseBus,
     memory: &MemoryStore,
     outcome_store: &TaskOutcomeStore,
 ) {
+    if task.lane == "ticket_intake" {
+        if let Some(ci_status) =
+            run_ticket_ci_monitor(task_id, &result, config, observer, outcome_store).await
+        {
+            result.push_str(&format!("\n\n[ci_monitor_status:{}]", ci_status));
+        }
+    }
+    let cli_tool_used = extract_cli_tool_used_marker(&result);
+    if cli_tool_used.is_some() {
+        result = strip_cli_tool_used_marker(&result);
+    }
+
     let (verification_total, verification_passed) =
         infer_verification_counters(&task.goal, Some(&result), true);
     let rolled_back = infer_rollback_flag(&task.goal, Some(&result));
@@ -801,11 +1244,42 @@ fn handle_autonomous_task_success(
         verification_passed,
         rolled_back,
         None,
+        cli_tool_used.as_deref(),
     );
     observer.log(
         ObserverCategory::AutonomousTask,
         format!("Completed: {} ({} chars)", ghost_label, result.len()),
     );
+    if task.lane == "reentry" {
+        let trimmed = result.trim();
+        if proactive::is_refusal(trimmed) {
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Re-entry suppressed: refusal/no-followup",
+            );
+            return;
+        }
+        if trimmed.len() < 30 {
+            observer.log(
+                ObserverCategory::AutonomousTask,
+                "Re-entry suppressed: response too short",
+            );
+            return;
+        }
+
+        let _ = memory.store("reentry", trimmed, None);
+        let pulse = Pulse::new(
+            crate::pulse::PulseSource::ConversationReentry,
+            crate::pulse::Urgency::Medium,
+            trimmed.to_string(),
+        )
+        .with_task_id(task_id.to_string())
+        .with_target(task.target.clone())
+        .with_ghost(ghost_label.to_string());
+        pulse_bus.send(pulse);
+        return;
+    }
+
     auto_store_task_result(task, &result, observer, memory);
 
     let outcome = format!(
@@ -815,6 +1289,15 @@ fn handle_autonomous_task_success(
         truncate_obs(&result, 200),
     );
     let _ = memory.store("code_change", &outcome, None);
+    if let Some(signature) = extract_health_alert_signature(&task.context) {
+        let fix_note = format!(
+            "{} | {} | {}",
+            signature,
+            goal_summary,
+            truncate_obs(&result, 200)
+        );
+        let _ = memory.store("health_fix", &fix_note, None);
+    }
 
     let pulse = Pulse::new(
         crate::pulse::PulseSource::AutonomousTask,
@@ -827,7 +1310,10 @@ fn handle_autonomous_task_success(
     pulse_bus.send(pulse);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 fn handle_autonomous_task_failure(
     task: &AutonomousTask,
     task_id: &str,
@@ -841,30 +1327,38 @@ fn handle_autonomous_task_failure(
     memory: &MemoryStore,
     outcome_store: &TaskOutcomeStore,
 ) {
+    let err_text = err.to_string();
+    let cli_tool_used = extract_cli_tool_used_marker(&err_text);
+    let clean_error = strip_cli_tool_used_marker(&err_text);
     let _ = outcome_store.record_finish(
         task_id,
         "failed",
         verification_total,
         0,
         rolled_back,
-        Some(&err.to_string()),
+        Some(&clean_error),
+        cli_tool_used.as_deref(),
     );
     observer.log(
         ObserverCategory::AutonomousTask,
-        format!("Failed: {} — {}", ghost_label, err),
+        format!("Failed: {} — {}", ghost_label, clean_error),
     );
-    tracing::error!(ghost = %ghost_label, error = %err, "Autonomous task failed");
+    tracing::error!(
+        ghost = %ghost_label,
+        error = %clean_error,
+        "Autonomous task failed"
+    );
 
     let outcome = format!(
         "Autonomous task FAILED [{}]: {}\nError: {}",
-        ghost_label, goal_summary, err,
+        ghost_label, goal_summary, clean_error,
     );
     let _ = memory.store(failure_category(goal_summary), &outcome, None);
 
     let pulse = Pulse::new(
         crate::pulse::PulseSource::AutonomousTask,
         crate::pulse::Urgency::High,
-        format!("Task failed [{}]: {}", ghost_label, err),
+        format!("Task failed [{}]: {}", ghost_label, clean_error),
     )
     .with_task_id(task_id.to_string())
     .with_target(task.target.clone())
@@ -875,6 +1369,105 @@ fn handle_autonomous_task_failure(
         format!("Failure pulse emitted for task_id={}", task_id),
     );
     pulse_bus.send(pulse);
+}
+
+async fn run_ticket_ci_monitor(
+    task_id: &str,
+    result: &str,
+    config: &Config,
+    observer: &ObserverHandle,
+    outcome_store: &TaskOutcomeStore,
+) -> Option<String> {
+    let dedup_key = task_id.strip_prefix("ticket:")?;
+    let pr_url = extract_pull_request_url(result)?;
+    let autopilot = &config.ticket_intake.ci_autopilot;
+    if !autopilot.enabled {
+        let disabled_status = "ci_monitor_disabled".to_string();
+        let _ = outcome_store.update_ticket_ci_monitor_status(dedup_key, &disabled_status);
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!(
+                "Ticket intake CI monitor skipped task_id={} status={}",
+                task_id, disabled_status
+            ),
+        );
+        return Some(disabled_status);
+    }
+
+    let _ = outcome_store.update_ticket_ci_monitor_status(dedup_key, "monitoring");
+    observer.log(
+        ObserverCategory::TicketIntake,
+        format!(
+            "Ticket intake CI monitor started task_id={} pr_url={} auto_merge={} heal={} max_heal={}",
+            task_id,
+            pr_url,
+            autopilot.auto_merge,
+            autopilot.heal,
+            autopilot.max_heal_attempts
+        ),
+    );
+
+    let repo_root = std::env::current_dir().ok()?;
+    let max_heal_attempts = if autopilot.heal {
+        autopilot.max_heal_attempts
+    } else {
+        0
+    };
+    let report = crate::ci_monitor::monitor_pr_ci(
+        &pr_url,
+        None,
+        &repo_root,
+        config,
+        autopilot.auto_merge,
+        autopilot.heal,
+        autopilot.poll_interval_secs.max(5),
+        autopilot.timeout_secs.max(30),
+        max_heal_attempts,
+    )
+    .await;
+    let mut ci_status = report.final_status.clone();
+    if report.post_merge_status != "not_merged" && report.post_merge_status != "not_checked" {
+        ci_status = format!("{} / {}", report.final_status, report.post_merge_status);
+    }
+    if let Some(url) = report.revert_pr_url.as_deref() {
+        ci_status.push_str(&format!(" (revert_pr={})", url));
+    }
+    if let Err(e) = outcome_store.update_ticket_ci_monitor_status(dedup_key, &ci_status) {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!(
+                "Ticket intake CI monitor status persist failed task_id={} error={}",
+                task_id, e
+            ),
+        );
+    }
+    observer.log(
+        ObserverCategory::TicketIntake,
+        format!(
+            "Ticket intake CI monitor finished task_id={} status={}",
+            task_id, ci_status
+        ),
+    );
+    Some(ci_status)
+}
+
+fn extract_pull_request_url(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/\d+").ok()?;
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn extract_cli_tool_used_marker(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"\[athena_cli_tool_used:([a-zA-Z0-9_]+)\]").ok()?;
+    let captures = re.captures(text)?;
+    captures.get(1).map(|m| m.as_str().to_string())
+}
+
+fn strip_cli_tool_used_marker(text: &str) -> String {
+    let re = match regex::Regex::new(r"\s*\[athena_cli_tool_used:[a-zA-Z0-9_]+\]") {
+        Ok(re) => re,
+        Err(_) => return text.to_string(),
+    };
+    re.replace_all(text, "").trim().to_string()
 }
 
 fn infer_verification_counters(goal: &str, result: Option<&str>, success: bool) -> (u64, u64) {
@@ -929,6 +1522,14 @@ fn auto_store_task_result(
     }
 }
 
+fn extract_health_alert_signature(context: &str) -> Option<String> {
+    let marker = "health_alert_signature=";
+    context
+        .lines()
+        .find_map(|line| line.strip_prefix(marker).map(|v| v.trim().to_string()))
+        .filter(|v| !v.is_empty())
+}
+
 fn failure_category(goal_summary: &str) -> &'static str {
     let goal_lower = goal_summary.to_lowercase();
     if goal_lower.contains("refactor") {
@@ -944,6 +1545,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
     let mut llm: Option<Arc<dyn LlmProvider>> = None;
     let mut selected_provider = config.llm.provider.clone();
     let mut last_err: Option<crate::error::AthenaError> = None;
+    let skip_health = llm_health_check_disabled();
 
     for provider_name in config.provider_candidates() {
         let candidate = match config.build_llm_provider_for(&provider_name) {
@@ -958,6 +1560,16 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
                 continue;
             }
         };
+
+        if skip_health {
+            eprintln!(
+                "Skipping LLM health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+                candidate.provider_name()
+            );
+            selected_provider = provider_name;
+            llm = Some(candidate);
+            break;
+        }
 
         eprint!("Connecting to {}... ", candidate.provider_name());
         match candidate.health_check().await {
@@ -998,6 +1610,14 @@ async fn connect_orchestrator(
         return Ok(orchestrator);
     }
 
+    if llm_health_check_disabled() {
+        eprintln!(
+            "Skipping orchestrator health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+            orchestrator.provider_name()
+        );
+        return Ok(orchestrator);
+    }
+
     eprint!("Connecting to {}... ", orchestrator.provider_name());
     match orchestrator.health_check().await {
         Ok(()) => {
@@ -1013,6 +1633,16 @@ async fn connect_orchestrator(
             Ok(llm.clone())
         }
     }
+}
+
+fn llm_health_check_disabled() -> bool {
+    matches!(
+        std::env::var("ATHENA_SKIP_LLM_HEALTHCHECK")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 async fn init_embedder_opt(config: &Config) -> Option<Arc<Embedder>> {
@@ -1046,14 +1676,13 @@ fn load_ghost_profiles(config: &Config) -> Result<(Vec<GhostConfig>, Vec<GhostIn
             name: g.name.clone(),
             description: g.description.clone(),
             tools: g.tools.clone(),
-            strategy: g.strategy.clone(),
         })
         .collect();
     Ok((merged_ghosts, ghosts))
 }
 
 fn init_langfuse_client(config: &Config, knobs: &SharedKnobs) -> SharedLangfuse {
-    let k = knobs.read().unwrap();
+    let k = knobs.read().unwrap_or_else(|e| e.into_inner());
     if !k.langfuse_enabled {
         return None;
     }
@@ -1106,7 +1735,7 @@ fn spawn_mood_drift_loop(
     tokio::spawn(async move {
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (k.mood_drift_interval_secs, k.mood_enabled, k.all_proactive)
             };
             if !all || !enabled {
@@ -1116,7 +1745,7 @@ fn spawn_mood_drift_loop(
             let dur = randomness::jitter_interval(interval, 0.2);
             tokio::time::sleep(dur).await;
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.mood_enabled {
                     continue;
                 }
@@ -1149,6 +1778,197 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(TaskOutcomeStore::new(conn)))
+}
+
+fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>> {
+    let db_path = config.db_path().map_err(|e| {
+        crate::error::AthenaError::Config(format!(
+            "Failed to resolve DB path for ticket intake store: {}",
+            e
+        ))
+    })?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    Ok(Arc::new(TicketIntakeStore::new(conn)))
+}
+
+fn build_ticket_intake_providers(
+    config: &Config,
+    observer: &ObserverHandle,
+) -> HashMap<String, Arc<dyn ticket_intake::TicketProvider>> {
+    if config.ticket_intake.sources.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut providers: HashMap<String, Arc<dyn ticket_intake::TicketProvider>> = HashMap::new();
+
+    let read_env = |key: &str| -> Option<String> {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
+    };
+
+    let clean_opt = |value: &Option<String>| -> Option<String> {
+        value.as_ref().and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    };
+
+    for source in &config.ticket_intake.sources {
+        let provider = source.provider.trim().to_lowercase();
+        let repo = source.repo.trim().to_string();
+        if repo.is_empty() {
+            observer.log(
+                ObserverCategory::TicketIntake,
+                "Ticket intake source skipped: empty repo identifier",
+            );
+            continue;
+        }
+        let filter_label = source
+            .filter_label
+            .clone()
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "athena".to_string());
+
+        match provider.as_str() {
+            "github" => {
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "GH_TOKEN".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake github:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://api.github.com".to_string());
+                let provider = Arc::new(ticket_intake::github::GitHubProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                    api_base,
+                ));
+                providers.insert(provider.name(), provider);
+            }
+            "gitlab" => {
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "GITLAB_TOKEN".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake gitlab:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string());
+                let provider = Arc::new(ticket_intake::gitlab::GitLabProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                    api_base,
+                ));
+                providers.insert(provider.name(), provider);
+            }
+            "linear" => {
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "LINEAR_API_KEY".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!(
+                            "Ticket intake linear:{} skipped: missing {}",
+                            repo, token_env
+                        ),
+                    );
+                    continue;
+                };
+                let api_base = clean_opt(&source.api_base)
+                    .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
+                let provider = Arc::new(ticket_intake::linear::LinearProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    token,
+                    api_base,
+                ));
+                providers.insert(provider.name(), provider);
+            }
+            "jira" => {
+                let token_env =
+                    clean_opt(&source.token_env).unwrap_or_else(|| "JIRA_API_TOKEN".to_string());
+                let email_env =
+                    clean_opt(&source.email_env).unwrap_or_else(|| "JIRA_EMAIL".to_string());
+                let Some(token) = read_env(&token_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!("Ticket intake jira:{} skipped: missing {}", repo, token_env),
+                    );
+                    continue;
+                };
+                let Some(email) = read_env(&email_env) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!("Ticket intake jira:{} skipped: missing {}", repo, email_env),
+                    );
+                    continue;
+                };
+                let Some(base_url) = clean_opt(&source.api_base) else {
+                    observer.log(
+                        ObserverCategory::TicketIntake,
+                        format!("Ticket intake jira:{} skipped: missing api_base", repo),
+                    );
+                    continue;
+                };
+                let provider = Arc::new(ticket_intake::jira::JiraProvider::new(
+                    reqwest::Client::new(),
+                    repo,
+                    filter_label,
+                    base_url,
+                    email,
+                    token,
+                ));
+                providers.insert(provider.name(), provider);
+            }
+            _ => {
+                observer.log(
+                    ObserverCategory::TicketIntake,
+                    format!(
+                        "Ticket intake source skipped: unknown provider '{}'",
+                        source.provider
+                    ),
+                );
+            }
+        }
+    }
+
+    if providers.is_empty() {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            "Ticket intake configured but no providers are active",
+        );
+    } else {
+        observer.log(
+            ObserverCategory::TicketIntake,
+            format!("Ticket intake providers active: {}", providers.len()),
+        );
+    }
+
+    providers
 }
 
 fn expire_stale_started_tasks(outcome_store: &TaskOutcomeStore, observer: &ObserverHandle) {

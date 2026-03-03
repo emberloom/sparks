@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import sqlite3
 import sys
 import unittest
@@ -175,6 +176,48 @@ class EvalHarnessRegressionTests(unittest.TestCase):
         ok, reasons = eval_harness.evaluate_gate(results, threshold=0.7, suite=suite, overall=0.85)
         self.assertTrue(ok)
         self.assertEqual(reasons, [])
+
+    def test_score_plan_quality_structured_json(self) -> None:
+        payload = {
+            "plan": ["step one", "step two"],
+            "execution": ["do work"],
+            "verification": "run tests",
+            "rollback_plan": ["git reset --hard HEAD~1"],
+        }
+        score = eval_harness.score_plan_quality(json.dumps(payload))
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_score_plan_quality_fallback_legacy(self) -> None:
+        response = "\n".join(
+            [
+                "PLAN:",
+                "- step one",
+                "- step two",
+                "EXECUTION:",
+                "- run command",
+                "- verify tests",
+            ]
+        )
+        score = eval_harness.score_plan_quality(response)
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_parse_dispatch_task_id_picks_first_match(self) -> None:
+        stderr = (
+            "task_id=11111111-1111-1111-1111-111111111111 "
+            "task_id=22222222-2222-2222-2222-222222222222"
+        )
+        self.assertEqual(
+            eval_harness.parse_dispatch_task_id(stderr),
+            "11111111-1111-1111-1111-111111111111",
+        )
+
+    def test_parse_dispatch_task_id_rejects_malformed_uuid(self) -> None:
+        stderr = "task_id=not-a-uuid"
+        self.assertIsNone(eval_harness.parse_dispatch_task_id(stderr))
+
+    def test_parse_dispatch_task_id_returns_none_when_missing(self) -> None:
+        stderr = "no task id here"
+        self.assertIsNone(eval_harness.parse_dispatch_task_id(stderr))
 
 
 if __name__ == "__main__":

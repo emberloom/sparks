@@ -29,5 +29,24 @@ jobs:
 
       - name: Render dashboard
         run: |
-          python3 scripts/eval_dashboard.py --config config.toml --repo athena
+          python3 scripts/eval_dashboard.py \
+            --config config.toml \
+            --repo athena \
+            --out-file eval/results/dashboard.md \
+            --json-out-file eval/results/dashboard_data.json
+          python3 scripts/eval_dashboard.py \
+            --config config.toml \
+            --repo athena \
+            --output-format html \
+            --out-file eval/results/dashboard.html \
+            --json-out-file eval/results/dashboard_data.json
           tail -n 120 eval/results/dashboard.md
+
+      - name: Upload dashboard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-real-gate-dashboard
+          path: |
+            eval/results/dashboard.md
+            eval/results/dashboard.html
+            eval/results/dashboard_data.json

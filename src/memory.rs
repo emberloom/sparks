@@ -1,5 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
+use std::time::Instant;
 
 use chrono::{NaiveDateTime, Utc};
 use rusqlite::Connection;
@@ -10,26 +13,214 @@ use crate::error::{AthenaError, Result};
 /// Minimum cosine similarity to keep a semantic result.
 pub const SEMANTIC_THRESHOLD: f32 = 0.25;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub id: String,
     pub category: String,
     pub content: String,
+    // Filtering by active is done in SQL (WHERE active = 1); not read in Rust
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub active: bool,
     pub created_at: String,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetrievalCacheStats {
+    pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+    pub stale_rejections: u64,
+    pub hit_ratio: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RetrievalCacheKey {
+    normalized_query: String,
+    limit: usize,
+    embedding_fingerprint: Option<u64>,
+}
+
+impl RetrievalCacheKey {
+    fn new(query: &str, query_embedding: Option<&[f32]>, limit: usize) -> Self {
+        Self {
+            normalized_query: normalize_query(query),
+            limit,
+            embedding_fingerprint: query_embedding.map(fingerprint_embedding),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RetrievalCacheEntry {
+    results: Vec<Memory>,
+    generation: u64,
+    inserted_at: Instant,
+}
+
+#[derive(Debug)]
+struct RetrievalLruCache {
+    capacity: usize,
+    entries: HashMap<RetrievalCacheKey, RetrievalCacheEntry>,
+    order: VecDeque<RetrievalCacheKey>,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    invalidations: u64,
+    stale_rejections: u64,
+}
+
+impl RetrievalLruCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            invalidations: 0,
+            stale_rejections: 0,
+        }
+    }
+
+    fn get(&mut self, key: &RetrievalCacheKey, generation: u64) -> Option<Vec<Memory>> {
+        if self.capacity == 0 {
+            self.misses += 1;
+            return None;
+        }
+
+        let cached = self
+            .entries
+            .get(key)
+            .map(|entry| (entry.generation, entry.results.clone(), entry.inserted_at));
+        match cached {
+            Some((entry_generation, results, _inserted_at)) if entry_generation == generation => {
+                self.hits += 1;
+                self.touch(key);
+                Some(results)
+            }
+            Some(_) => {
+                self.misses += 1;
+                self.stale_rejections += 1;
+                self.remove(key);
+                None
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+
+    fn put(&mut self, key: RetrievalCacheKey, results: Vec<Memory>, generation: u64) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.results = results;
+            entry.generation = generation;
+            entry.inserted_at = Instant::now();
+            self.touch(&key);
+            return;
+        }
+
+        while self.entries.len() >= self.capacity {
+            self.evict_lru();
+        }
+
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            RetrievalCacheEntry {
+                results,
+                generation,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
+
+    fn invalidate_all(&mut self) {
+        self.invalidations += 1;
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    #[cfg(test)]
+    fn reset_stats(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+        self.evictions = 0;
+        self.invalidations = 0;
+        self.stale_rejections = 0;
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self, generation: u64) -> RetrievalCacheStats {
+        let total = self.hits + self.misses;
+        let hit_ratio = if total > 0 {
+            self.hits as f64 / total as f64
+        } else {
+            0.0
+        };
+        let _ = generation;
+        RetrievalCacheStats {
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            invalidations: self.invalidations,
+            stale_rejections: self.stale_rejections,
+            hit_ratio,
+        }
+    }
+
+    fn touch(&mut self, key: &RetrievalCacheKey) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.clone());
+    }
+
+    fn remove(&mut self, key: &RetrievalCacheKey) {
+        self.entries.remove(key);
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+    }
+
+    fn evict_lru(&mut self) {
+        if let Some(oldest) = self.order.pop_front() {
+            self.entries.remove(&oldest);
+            self.evictions += 1;
+        }
+    }
 }
 
 pub struct MemoryStore {
     conn: Mutex<Connection>,
     embedding_cache: RwLock<HashMap<String, Vec<f32>>>,
+    retrieval_cache: Mutex<RetrievalLruCache>,
+    memory_generation: AtomicU64,
     recency_half_life_days: f32,
     dedup_threshold: f32,
 }
 
 impl MemoryStore {
-    pub fn new(conn: Connection, recency_half_life_days: f32, dedup_threshold: f32) -> Self {
+    pub fn new(
+        conn: Connection,
+        recency_half_life_days: f32,
+        dedup_threshold: f32,
+        retrieval_cache_capacity: usize,
+    ) -> Self {
         let store = Self {
             conn: Mutex::new(conn),
             embedding_cache: RwLock::new(HashMap::new()),
+            retrieval_cache: Mutex::new(RetrievalLruCache::new(retrieval_cache_capacity)),
+            memory_generation: AtomicU64::new(0),
             recency_half_life_days,
             dedup_threshold,
         };
@@ -44,6 +235,66 @@ impl MemoryStore {
         self.conn
             .lock()
             .map_err(|e| AthenaError::Internal(format!("Database lock poisoned: {}", e)))
+    }
+
+    fn current_memory_generation(&self) -> u64 {
+        self.memory_generation.load(Ordering::Relaxed)
+    }
+
+    fn invalidate_retrieval_cache(&self) {
+        let generation = self.memory_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        match self.retrieval_cache.lock() {
+            Ok(mut cache) => cache.invalidate_all(),
+            Err(e) => {
+                tracing::warn!(
+                    generation,
+                    "Retrieval cache lock poisoned during invalidation: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    fn lookup_retrieval_cache(&self, key: &RetrievalCacheKey) -> Option<Vec<Memory>> {
+        let generation = self.current_memory_generation();
+        match self.retrieval_cache.lock() {
+            Ok(mut cache) => cache.get(key, generation),
+            Err(e) => {
+                tracing::warn!("Retrieval cache lock poisoned during lookup: {}", e);
+                None
+            }
+        }
+    }
+
+    fn fill_retrieval_cache(&self, key: RetrievalCacheKey, results: &[Memory]) {
+        let generation = self.current_memory_generation();
+        if let Ok(mut cache) = self.retrieval_cache.lock() {
+            cache.put(key, results.to_vec(), generation);
+        } else {
+            tracing::warn!("Retrieval cache lock poisoned during fill");
+        }
+    }
+
+    #[cfg(test)]
+    pub fn retrieval_cache_stats(&self) -> RetrievalCacheStats {
+        let generation = self.current_memory_generation();
+        match self.retrieval_cache.lock() {
+            Ok(cache) => cache.snapshot(generation),
+            Err(e) => {
+                tracing::warn!("Retrieval cache lock poisoned while reading stats: {}", e);
+                let _ = generation;
+                RetrievalCacheStats::default()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn reset_retrieval_cache_stats(&self) {
+        if let Ok(mut cache) = self.retrieval_cache.lock() {
+            cache.reset_stats();
+        } else {
+            tracing::warn!("Retrieval cache lock poisoned while resetting stats");
+        }
     }
 
     /// Load all active embeddings into the in-memory cache.
@@ -137,6 +388,7 @@ impl MemoryStore {
                 if let Ok(mut cache) = self.embedding_cache.write() {
                     cache.insert(dup_id.clone(), emb.to_vec());
                 }
+                self.invalidate_retrieval_cache();
                 return Ok(dup_id);
             }
         }
@@ -161,6 +413,7 @@ impl MemoryStore {
                 cache.insert(id.clone(), emb.to_vec());
             }
         }
+        self.invalidate_retrieval_cache();
         Ok(id)
     }
 
@@ -293,6 +546,11 @@ impl MemoryStore {
         query_embedding: Option<&[f32]>,
         limit: usize,
     ) -> Result<Vec<Memory>> {
+        let cache_key = RetrievalCacheKey::new(query, query_embedding, limit);
+        if let Some(cached) = self.lookup_retrieval_cache(&cache_key) {
+            return Ok(cached);
+        }
+
         let mut scored: HashMap<String, (Memory, f32)> = HashMap::new();
 
         // 1. FTS5 keyword search with BM25 ranking
@@ -324,8 +582,9 @@ impl MemoryStore {
         let mut results: Vec<(Memory, f32)> = scored.into_values().collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
-
-        Ok(results.into_iter().map(|(m, _)| m).collect())
+        let final_results: Vec<Memory> = results.into_iter().map(|(m, _)| m).collect();
+        self.fill_retrieval_cache(cache_key, &final_results);
+        Ok(final_results)
     }
 
     /// Update a single memory's embedding (for backfilling existing records).
@@ -341,6 +600,7 @@ impl MemoryStore {
         if let Ok(mut cache) = self.embedding_cache.write() {
             cache.insert(id.to_string(), embedding.to_vec());
         }
+        self.invalidate_retrieval_cache();
         Ok(())
     }
 
@@ -367,6 +627,91 @@ impl MemoryStore {
              WHERE active = 1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                content: row.get(2)?,
+                active: row.get::<_, i32>(3)? != 0,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        Ok(memories)
+    }
+
+    /// List active memories in a category, newest first, optionally bounded by recency.
+    pub fn list_by_category_recent(
+        &self,
+        category: &str,
+        limit: usize,
+        within_days: i64,
+    ) -> Result<Vec<Memory>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, category, content, active, created_at FROM memories
+             WHERE active = 1
+               AND category = ?1
+               AND created_at >= datetime('now', ?2)
+             ORDER BY created_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                category,
+                format!("-{} days", within_days.max(1)),
+                limit as i64
+            ],
+            |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    category: row.get(1)?,
+                    content: row.get(2)?,
+                    active: row.get::<_, i32>(3)? != 0,
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        let mut memories = Vec::new();
+        for row in rows {
+            memories.push(row?);
+        }
+        Ok(memories)
+    }
+
+    /// List active memories from any of the provided categories, newest first,
+    /// bounded by an exact recency window in hours.
+    pub fn list_by_categories_recent_hours(
+        &self,
+        categories: &[&str],
+        limit: usize,
+        within_hours: i64,
+    ) -> Result<Vec<Memory>> {
+        if categories.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn()?;
+        let placeholders = std::iter::repeat_n("?", categories.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, category, content, active, created_at FROM memories
+             WHERE active = 1
+               AND category IN ({})
+               AND created_at >= datetime('now', ?{})
+             ORDER BY created_at DESC
+             LIMIT ?{}",
+            placeholders,
+            categories.len() + 1,
+            categories.len() + 2
+        );
+        let mut values: Vec<String> = categories.iter().map(|c| (*c).to_string()).collect();
+        values.push(format!("-{} hours", within_hours.max(1)));
+        values.push(limit.to_string());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
             Ok(Memory {
                 id: row.get(0)?,
                 category: row.get(1)?,
@@ -412,6 +757,7 @@ impl MemoryStore {
             if let Ok(mut cache) = self.embedding_cache.write() {
                 cache.remove(id);
             }
+            self.invalidate_retrieval_cache();
         }
         Ok(updated > 0)
     }
@@ -471,18 +817,6 @@ impl MemoryStore {
         Ok(profile)
     }
 
-    /// Upsert a single key-value pair in a user's profile.
-    pub fn set_user_profile(&self, user_id: &str, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO user_profiles (user_id, key, value, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            rusqlite::params![user_id, key, value],
-        )?;
-        Ok(())
-    }
-
     // --- Mood state persistence ---
 
     /// Load the singleton mood state row.
@@ -522,13 +856,23 @@ impl MemoryStore {
         schedule_data: &str,
         ghost: Option<&str>,
         prompt: &str,
+        target: &str,
         next_run: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO scheduled_jobs (id, name, schedule_type, schedule_data, ghost, prompt, next_run)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![id, name, schedule_type, schedule_data, ghost, prompt, next_run],
+            "INSERT INTO scheduled_jobs (id, name, schedule_type, schedule_data, ghost, prompt, target, next_run)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                id,
+                name,
+                schedule_type,
+                schedule_data,
+                ghost,
+                prompt,
+                target,
+                next_run
+            ],
         )?;
         Ok(())
     }
@@ -673,6 +1017,15 @@ impl MemoryStore {
         Ok(deleted > 0)
     }
 
+    pub fn delete_scheduled_jobs_by_name(&self, name: &str) -> Result<usize> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM scheduled_jobs WHERE name = ?1",
+            rusqlite::params![name],
+        )?;
+        Ok(deleted as usize)
+    }
+
     pub fn toggle_scheduled_job(&self, id: &str, enabled: bool) -> Result<bool> {
         let conn = self.conn()?;
         let updated = conn.execute(
@@ -680,6 +1033,18 @@ impl MemoryStore {
             rusqlite::params![enabled as i32, id],
         )?;
         Ok(updated > 0)
+    }
+
+    pub fn cleanup_stale_disabled_oneshots(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM scheduled_jobs
+             WHERE schedule_type = 'oneshot'
+               AND enabled = 0
+               AND datetime(COALESCE(last_run, created_at)) <= datetime('now', '-24 hours')",
+            [],
+        )?;
+        Ok(deleted as usize)
     }
 
     // --- Relationship tracking ---
@@ -701,16 +1066,13 @@ impl MemoryStore {
     pub fn get_relationship(&self, user_id: &str) -> Result<Option<UserRelationship>> {
         let conn = self.conn()?;
         match conn.query_row(
-            "SELECT user_id, total_interactions, last_interaction, avg_message_length, warmth_level
+            "SELECT total_interactions, warmth_level
              FROM relationship_stats WHERE user_id = ?1",
             rusqlite::params![user_id],
             |row| {
                 Ok(UserRelationship {
-                    user_id: row.get(0)?,
-                    total_interactions: row.get(1)?,
-                    last_interaction: row.get(2)?,
-                    avg_message_length: row.get::<_, f64>(3)? as f32,
-                    warmth_level: row.get::<_, f64>(4)? as f32,
+                    total_interactions: row.get(0)?,
+                    warmth_level: row.get::<_, f64>(1)? as f32,
                 })
             },
         ) {
@@ -736,10 +1098,7 @@ struct JobRow {
 
 #[derive(Debug, Clone)]
 pub struct UserRelationship {
-    pub user_id: String,
     pub total_interactions: i64,
-    pub last_interaction: String,
-    pub avg_message_length: f32,
     pub warmth_level: f32,
 }
 
@@ -754,6 +1113,23 @@ fn time_decay_factor(created_at: &str, half_life_days: f32) -> f32 {
         return 1.0;
     }
     0.5_f32.powf(days_old / half_life_days)
+}
+
+fn normalize_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|part| part.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fingerprint_embedding(embedding: &[f32]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    embedding.len().hash(&mut hasher);
+    for value in embedding {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Extract significant keywords from a query string.
@@ -797,12 +1173,26 @@ fn blob_to_embedding(blob: &[u8]) -> Option<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
 
     fn setup_test_db() -> MemoryStore {
-        setup_test_db_with_config(30.0, 1.0) // dedup disabled in most tests
+        setup_test_db_with_config_and_cache(30.0, 1.0, 256)
+        // dedup disabled in most tests
     }
 
     fn setup_test_db_with_config(half_life: f32, dedup_threshold: f32) -> MemoryStore {
+        setup_test_db_with_config_and_cache(half_life, dedup_threshold, 256)
+    }
+
+    fn setup_test_db_with_config_and_cache(
+        half_life: f32,
+        dedup_threshold: f32,
+        retrieval_cache_capacity: usize,
+    ) -> MemoryStore {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE memories (
@@ -831,7 +1221,7 @@ mod tests {
                 PRIMARY KEY (user_id, key)
             );"
         ).unwrap();
-        MemoryStore::new(conn, half_life, dedup_threshold)
+        MemoryStore::new(conn, half_life, dedup_threshold, retrieval_cache_capacity)
     }
 
     fn fake_embedding(seed: f32) -> Vec<f32> {
@@ -1068,6 +1458,149 @@ mod tests {
     }
 
     #[test]
+    fn test_retrieval_cache_hits_repeated_query() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 8);
+        let emb = fake_embedding(0.42);
+        store
+            .store("fact", "Rust cache hit behavior", Some(&emb))
+            .unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let first = store.search_hybrid("Rust cache", Some(&emb), 10).unwrap();
+        let second = store.search_hybrid("Rust cache", Some(&emb), 10).unwrap();
+        assert_eq!(first, second);
+
+        let stats = store.retrieval_cache_stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn test_retrieval_cache_lru_eviction_order() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 2);
+        store.store("fact", "alpha token", None).unwrap();
+        store.store("fact", "beta token", None).unwrap();
+        store.store("fact", "gamma token", None).unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let _ = store.search_hybrid("alpha", None, 10).unwrap(); // miss
+        let _ = store.search_hybrid("beta", None, 10).unwrap(); // miss
+        let _ = store.search_hybrid("alpha", None, 10).unwrap(); // hit; beta now LRU
+        let _ = store.search_hybrid("gamma", None, 10).unwrap(); // miss + evict beta
+        let _ = store.search_hybrid("beta", None, 10).unwrap(); // miss (beta was evicted)
+
+        let stats = store.retrieval_cache_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 4);
+        assert!(stats.evictions >= 1);
+        assert_eq!(stats.entries, 2);
+    }
+
+    #[test]
+    fn test_retrieval_cache_keys_do_not_collide() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 8);
+        store.store("fact", "Rust one", None).unwrap();
+        store.store("fact", "Rust two", None).unwrap();
+        let emb = fake_embedding(0.6);
+        store.reset_retrieval_cache_stats();
+
+        let _ = store.search_hybrid("Rust", None, 1).unwrap(); // miss
+        let _ = store.search_hybrid("Rust", None, 1).unwrap(); // hit
+        let _ = store.search_hybrid("Rust", None, 2).unwrap(); // miss: different limit
+        let _ = store.search_hybrid("Rust", Some(&emb), 2).unwrap(); // miss: embedding fingerprint
+
+        let stats = store.retrieval_cache_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 3);
+    }
+
+    #[test]
+    fn test_retrieval_cache_stale_results_blocked_after_write() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 8);
+        store.store("fact", "Rust original", None).unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let before = store.search_hybrid("Rust", None, 10).unwrap();
+        let _ = store.search_hybrid("Rust", None, 10).unwrap(); // hit
+
+        store.store("fact", "Rust after write", None).unwrap(); // invalidates cache
+
+        let after = store.search_hybrid("Rust", None, 10).unwrap();
+        let stats = store.retrieval_cache_stats();
+
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.invalidations, 1);
+        assert!(after.len() >= before.len());
+        assert!(after.iter().any(|m| m.content == "Rust after write"));
+    }
+
+    #[test]
+    fn test_retrieval_cache_generation_mismatch_forces_miss() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 8);
+        let emb = fake_embedding(0.5);
+        store
+            .store("fact", "generation mismatch guard", Some(&emb))
+            .unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let _ = store
+            .search_hybrid("generation mismatch", Some(&emb), 10)
+            .unwrap(); // miss + fill
+        store.memory_generation.fetch_add(1, Ordering::Relaxed); // simulate out-of-band bump
+        let _ = store
+            .search_hybrid("generation mismatch", Some(&emb), 10)
+            .unwrap(); // stale reject + miss
+
+        let stats = store.retrieval_cache_stats();
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.stale_rejections, 1);
+    }
+
+    #[test]
+    fn test_retrieval_cache_invalidation_on_backfill_and_retire() {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, 8);
+        let id = store
+            .store("fact", "cache invalidation target", None)
+            .unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let _ = store
+            .search_hybrid("invalidation target", None, 10)
+            .unwrap();
+        let emb = fake_embedding(0.33);
+        store.backfill_embedding(&id, &emb).unwrap();
+        let after_backfill = store.retrieval_cache_stats();
+        assert_eq!(after_backfill.invalidations, 1);
+        assert_eq!(after_backfill.entries, 0);
+
+        let _ = store
+            .search_hybrid("invalidation target", None, 10)
+            .unwrap();
+        store.retire(&id).unwrap();
+        let after_retire = store.retrieval_cache_stats();
+        assert_eq!(after_retire.invalidations, 2);
+        assert_eq!(after_retire.entries, 0);
+    }
+
+    #[test]
+    fn test_retrieval_cache_invalidation_on_dedup_update() {
+        let store = setup_test_db_with_config_and_cache(30.0, 0.95, 8);
+        let emb1 = fake_embedding(0.5);
+        let emb2 = fake_embedding(0.51);
+        store.store("fact", "first", Some(&emb1)).unwrap();
+        store.reset_retrieval_cache_stats();
+
+        let _ = store.search_hybrid("first", Some(&emb1), 10).unwrap();
+        let _ = store.store("fact", "first updated", Some(&emb2)).unwrap(); // dedup path
+        let stats = store.retrieval_cache_stats();
+
+        assert_eq!(stats.invalidations, 1);
+        assert_eq!(stats.entries, 0);
+    }
+
+    #[test]
     fn test_keyword_search_still_works() {
         let store = setup_test_db();
         store
@@ -1199,5 +1732,264 @@ mod tests {
     fn test_time_decay_factor_invalid() {
         let factor = time_decay_factor("not-a-date", 30.0);
         assert_eq!(factor, 1.0, "Invalid date should return 1.0 (no penalty)");
+    }
+
+    #[test]
+    fn test_list_by_category_recent_respects_window_and_limit() {
+        let store = setup_test_db();
+        store.store("self_heal_outcome", "recent 1", None).unwrap();
+        store.store("self_heal_outcome", "recent 2", None).unwrap();
+        let old_id = store.store("self_heal_outcome", "old", None).unwrap();
+        // Force one record to be outside recency window.
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE memories
+                 SET created_at = datetime('now', '-40 days')
+                 WHERE id = ?1",
+                rusqlite::params![old_id],
+            )
+            .unwrap();
+        }
+
+        let rows = store
+            .list_by_category_recent("self_heal_outcome", 1, 30)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_ne!(rows[0].content, "old");
+    }
+
+    #[test]
+    fn test_list_by_categories_recent_hours_filters_categories_and_window() {
+        let store = setup_test_db();
+        let recent_refactor = store
+            .store("refactoring_failed", "recent refactor fail", None)
+            .unwrap();
+        let old_code = store
+            .store("code_change_failed", "old code fail", None)
+            .unwrap();
+        let recent_other = store.store("other", "recent other", None).unwrap();
+
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE memories
+                 SET created_at = datetime('now', '-60 hours')
+                 WHERE id = ?1",
+                rusqlite::params![old_code],
+            )
+            .unwrap();
+        }
+
+        let rows = store
+            .list_by_categories_recent_hours(&["code_change_failed", "refactoring_failed"], 10, 48)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, recent_refactor);
+        assert_ne!(rows[0].id, recent_other);
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct HotPathBenchRun {
+        cache_capacity: usize,
+        query_count: usize,
+        hit_ratio: f64,
+        hits: u64,
+        misses: u64,
+        evictions: u64,
+        invalidations: u64,
+        stale_incidents: usize,
+        p50_latency_us: u64,
+        p95_latency_us: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct HotPathBenchDelta {
+        hit_ratio_delta: f64,
+        p50_improvement_pct: f64,
+        p95_improvement_pct: f64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct HotPathBenchReport {
+        timestamp_utc: String,
+        baseline: HotPathBenchRun,
+        cached: HotPathBenchRun,
+        delta: HotPathBenchDelta,
+    }
+
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_memory_hot_path_lru_cache() {
+        let baseline = run_hot_path_workload(0);
+        let cached = run_hot_path_workload(256);
+
+        let report = HotPathBenchReport {
+            timestamp_utc: Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+            delta: HotPathBenchDelta {
+                hit_ratio_delta: cached.hit_ratio - baseline.hit_ratio,
+                p50_improvement_pct: pct_improvement(
+                    baseline.p50_latency_us,
+                    cached.p50_latency_us,
+                ),
+                p95_improvement_pct: pct_improvement(
+                    baseline.p95_latency_us,
+                    cached.p95_latency_us,
+                ),
+            },
+            baseline,
+            cached,
+        };
+
+        write_hot_path_report(&report);
+
+        println!("\n{}", render_hot_path_markdown(&report));
+
+        assert_eq!(report.cached.stale_incidents, 0);
+        assert!(report.cached.hit_ratio > 0.5);
+        assert!(report.cached.p50_latency_us < report.baseline.p50_latency_us);
+    }
+
+    fn run_hot_path_workload(cache_capacity: usize) -> HotPathBenchRun {
+        let store = setup_test_db_with_config_and_cache(30.0, 1.0, cache_capacity);
+        let mut queries: Vec<(String, Vec<f32>)> = Vec::new();
+
+        for i in 0..48 {
+            let seed = 0.05 + (i as f32 / 48.0) * 0.9;
+            let emb = fake_embedding(seed);
+            let content = format!("topic{} cache benchmark memory payload {}", i, i);
+            store.store("fact", &content, Some(&emb)).unwrap();
+            if i < 24 {
+                queries.push((format!("topic{}", i), emb));
+            }
+        }
+
+        let sentinel_query = "stale sentinel";
+        let mut sentinel_seed = 0.72f32;
+        let mut sentinel_emb = fake_embedding(sentinel_seed);
+        let mut sentinel_id = store
+            .store("fact", "stale sentinel generation 0", Some(&sentinel_emb))
+            .unwrap();
+        let mut retired_ids: Vec<String> = Vec::new();
+
+        for i in 0..240 {
+            let (q, emb) = &queries[i % queries.len()];
+            let _ = store.search_hybrid(q, Some(emb), 10).unwrap();
+        }
+        store.reset_retrieval_cache_stats();
+
+        let iterations = 3000usize;
+        let mut latencies_us: Vec<u64> = Vec::with_capacity(iterations);
+        let mut stale_incidents = 0usize;
+
+        for i in 0..iterations {
+            let (query, emb): (&str, &[f32]) = if i % 5 == 0 {
+                (sentinel_query, &sentinel_emb)
+            } else {
+                let (q, e) = &queries[i % queries.len()];
+                (q.as_str(), e.as_slice())
+            };
+
+            let start = Instant::now();
+            let results = store.search_hybrid(query, Some(emb), 10).unwrap();
+            latencies_us.push(start.elapsed().as_micros() as u64);
+
+            if retired_ids
+                .iter()
+                .any(|retired| results.iter().any(|m| &m.id == retired))
+            {
+                stale_incidents += 1;
+            }
+
+            if i > 0 && i % 300 == 0 {
+                store.retire(&sentinel_id).unwrap();
+                retired_ids.push(sentinel_id.clone());
+                sentinel_seed += 0.04;
+                if sentinel_seed > 0.95 {
+                    sentinel_seed = 0.41;
+                }
+                sentinel_emb = fake_embedding(sentinel_seed);
+                sentinel_id = store
+                    .store(
+                        "fact",
+                        &format!("stale sentinel generation {}", i / 300),
+                        Some(&sentinel_emb),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let stats = store.retrieval_cache_stats();
+        HotPathBenchRun {
+            cache_capacity,
+            query_count: iterations,
+            hit_ratio: stats.hit_ratio,
+            hits: stats.hits,
+            misses: stats.misses,
+            evictions: stats.evictions,
+            invalidations: stats.invalidations,
+            stale_incidents,
+            p50_latency_us: percentile(&latencies_us, 50.0),
+            p95_latency_us: percentile(&latencies_us, 95.0),
+        }
+    }
+
+    fn percentile(samples: &[u64], percentile: f64) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let idx = ((percentile / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx]
+    }
+
+    fn pct_improvement(before: u64, after: u64) -> f64 {
+        if before == 0 {
+            return 0.0;
+        }
+        ((before as f64 - after as f64) / before as f64) * 100.0
+    }
+
+    fn write_hot_path_report(report: &HotPathBenchReport) {
+        let out_dir = Path::new("eval/results");
+        fs::create_dir_all(out_dir).unwrap();
+
+        let stem = format!("memory-hot-path-lru-bench-{}", report.timestamp_utc);
+        let json = serde_json::to_string_pretty(report).unwrap();
+        let md = render_hot_path_markdown(report);
+
+        fs::write(out_dir.join(format!("{}.json", stem)), &json).unwrap();
+        fs::write(out_dir.join(format!("{}.md", stem)), &md).unwrap();
+        fs::write(out_dir.join("memory-hot-path-lru-bench-latest.json"), json).unwrap();
+        fs::write(out_dir.join("memory-hot-path-lru-bench-latest.md"), md).unwrap();
+    }
+
+    fn render_hot_path_markdown(report: &HotPathBenchReport) -> String {
+        format!(
+            "# Memory Hot-Path LRU Benchmark ({})\n\n| Scenario | Capacity | Hit Ratio | p50 (us) | p95 (us) | Hits | Misses | Evictions | Invalidations | Stale Incidents |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| Baseline | {} | {:.3} | {} | {} | {} | {} | {} | {} | {} |\n| Cached | {} | {:.3} | {} | {} | {} | {} | {} | {} | {} |\n\n## Delta\n- Hit ratio delta: {:.3}\n- p50 latency improvement: {:.2}%\n- p95 latency improvement: {:.2}%\n",
+            report.timestamp_utc,
+            report.baseline.cache_capacity,
+            report.baseline.hit_ratio,
+            report.baseline.p50_latency_us,
+            report.baseline.p95_latency_us,
+            report.baseline.hits,
+            report.baseline.misses,
+            report.baseline.evictions,
+            report.baseline.invalidations,
+            report.baseline.stale_incidents,
+            report.cached.cache_capacity,
+            report.cached.hit_ratio,
+            report.cached.p50_latency_us,
+            report.cached.p95_latency_us,
+            report.cached.hits,
+            report.cached.misses,
+            report.cached.evictions,
+            report.cached.invalidations,
+            report.cached.stale_incidents,
+            report.delta.hit_ratio_delta,
+            report.delta.p50_improvement_pct,
+            report.delta.p95_improvement_pct,
+        )
     }
 }

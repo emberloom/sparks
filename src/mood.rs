@@ -74,6 +74,7 @@ impl MoodState {
         };
 
         let old_modifier = inner.active_modifier.clone();
+        let old_energy = inner.energy;
 
         // Energy follows time-of-day curve
         let target_energy = self.time_of_day_energy();
@@ -95,6 +96,20 @@ impl MoodState {
         let energy = inner.energy;
         let valence = inner.valence;
         let modifier = inner.active_modifier.clone();
+
+        let energy_delta = (energy - old_energy).abs();
+        if energy_delta >= 0.1 {
+            observer.log(
+                ObserverCategory::EnergyShift,
+                format!(
+                    "Energy {}: {:.2} -> {:.2} (delta {:.2})",
+                    if energy > old_energy { "up" } else { "down" },
+                    old_energy,
+                    energy,
+                    energy_delta
+                ),
+            );
+        }
 
         if modifier != old_modifier {
             observer.log(
@@ -145,12 +160,14 @@ impl MoodState {
         )
     }
 
-    /// Get current energy level.
+    /// Get current energy level (used by telegram feature).
+    #[cfg(feature = "telegram")]
     pub fn energy(&self) -> f32 {
         self.inner.read().map(|i| i.energy).unwrap_or(0.5)
     }
 
-    /// Get current modifier.
+    /// Get current modifier (used by telegram feature).
+    #[cfg(feature = "telegram")]
     pub fn modifier(&self) -> String {
         self.inner
             .read()

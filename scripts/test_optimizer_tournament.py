@@ -44,6 +44,10 @@ class OptimizerTournamentTests(unittest.TestCase):
         self.assertEqual(len(candidates), 3)
         self.assertEqual(len({c.candidate_id for c in candidates}), 3)
         self.assertTrue(all(c.candidate_id.startswith("backlog_1_") for c in candidates))
+        self.assertTrue(
+            all("constraint_strictness" in c.mutation_dimensions for c in candidates)
+        )
+        self.assertTrue(all("soul_composition" in c.mutation_dimensions for c in candidates))
 
     def test_pick_winner_no_promotion_on_non_positive_delta(self) -> None:
         baseline = opt.CandidateResult(
@@ -51,6 +55,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="baseline",
             hypothesis="baseline",
             dispatch_context="[base]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -66,6 +71,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="mutation",
             hypothesis="mutation",
             dispatch_context="[m]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -88,6 +94,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="baseline",
             hypothesis="baseline",
             dispatch_context="[base]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -103,6 +110,7 @@ class OptimizerTournamentTests(unittest.TestCase):
             source="mutation",
             hypothesis="mutation",
             dispatch_context="[m]",
+            mutation_dimensions={},
             command=[],
             exit_code=0,
             report_json=None,
@@ -119,6 +127,99 @@ class OptimizerTournamentTests(unittest.TestCase):
         self.assertEqual(winner.candidate_id, "mutation")
         self.assertTrue(promote)
         self.assertTrue(any(g["candidate_id"] == "mutation" and g["gate_ok"] for g in gates))
+
+    def test_validate_mutation_axes_rejects_unknown_values(self) -> None:
+        with self.assertRaises(ValueError):
+            opt.validate_mutation_axes("invalid", "minimal")
+        with self.assertRaises(ValueError):
+            opt.validate_mutation_axes("strict", "invalid")
+
+    def test_generate_specialized_ghost_profiles_filters_incomplete(self) -> None:
+        good = opt.CandidateResult(
+            candidate_id="candidate_good",
+            source="backlog:runtime_failures",
+            hypothesis="good",
+            dispatch_context="[ctx]",
+            mutation_dimensions={
+                "constraint_strictness": "strict",
+                "soul_composition": "balanced",
+            },
+            command=[],
+            exit_code=0,
+            report_json=None,
+            gate_ok=True,
+            overall_score=0.95,
+            exec_success_rate=1.0,
+            avg_task_overall=0.94,
+            task_count=3,
+            error=None,
+        )
+        bad = opt.CandidateResult(
+            candidate_id="candidate_bad",
+            source="backlog:runtime_failures",
+            hypothesis="bad",
+            dispatch_context="[ctx]",
+            mutation_dimensions={"constraint_strictness": "strict"},
+            command=[],
+            exit_code=0,
+            report_json=None,
+            gate_ok=True,
+            overall_score=0.90,
+            exec_success_rate=1.0,
+            avg_task_overall=0.90,
+            task_count=3,
+            error=None,
+        )
+        profiles = opt.generate_specialized_ghost_profiles([good, bad], "20260301T000000Z")
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0]["source_candidate_id"], "candidate_good")
+
+    def test_adaptive_guardrail_policy_relaxes_on_clean_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            payload = {
+                "candidates": [
+                    {"candidate_id": "baseline", "exit_code": 0, "gate_ok": True},
+                    {"candidate_id": "m1", "exit_code": 0, "gate_ok": True},
+                ]
+            }
+            for i in range(10):
+                (out_dir / f"optimizer-tournament-20260301T00000{i}Z.json").write_text(
+                    json.dumps(payload)
+                )
+            policy = opt.derive_adaptive_guardrail_policy(
+                out_dir=out_dir,
+                history_window=10,
+                base_min_improvement=0.01,
+                base_max_regression=0.02,
+                strict_promotion=True,
+            )
+        self.assertEqual(policy["band"], "relaxed_noncritical")
+        self.assertFalse(policy["strict_promotion"])
+        self.assertTrue(policy["safety_floor"]["require_gate_ok"])
+
+    def test_adaptive_guardrail_policy_tightens_on_poor_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            payload = {
+                "candidates": [
+                    {"candidate_id": "baseline", "exit_code": 1, "gate_ok": False},
+                ]
+            }
+            for i in range(6):
+                (out_dir / f"optimizer-tournament-20260301T01000{i}Z.json").write_text(
+                    json.dumps(payload)
+                )
+            policy = opt.derive_adaptive_guardrail_policy(
+                out_dir=out_dir,
+                history_window=10,
+                base_min_improvement=0.01,
+                base_max_regression=0.02,
+                strict_promotion=False,
+            )
+        self.assertEqual(policy["band"], "tightened")
+        self.assertTrue(policy["strict_promotion"])
+        self.assertGreater(policy["min_improvement"], 0.01)
 
 
 if __name__ == "__main__":

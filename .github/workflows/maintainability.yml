@@ -35,7 +35,19 @@ jobs:
       - name: Doctor guard
         env:
           ATHENA_DISABLE_HOME_PROFILES: "1"
-        run: cargo run --quiet -- doctor --skip-llm --ci
+        run: cargo run --quiet -- doctor --skip-llm
+
+      - name: Dead code gate
+        run: |
+          ./scripts/dead_code_check.py --telegram
+
+      - name: Wiring & plumbing check
+        run: |
+          ./scripts/wiring_check.py
+
+      - name: Hygiene check
+        run: |
+          ./scripts/hygiene_check.py
 
       - name: Maintainability regression check
         run: |

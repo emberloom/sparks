@@ -24,3 +24,130 @@ jobs:
         env:
           ATHENA_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --skip-llm --ci
+
+      - name: Write local-only smoke config
+        run: |
+          cat > /tmp/local-only-smoke.toml <<'EOF'
+          [runtime]
+          profile = "local_only"
+
+          [llm]
+          provider = "ollama"
+
+          [ollama]
+          url = "http://127.0.0.1:11434"
+          model = "qwen2.5:7b"
+          classifier_model = "qwen2.5:3b"
+
+          [db]
+          path = "~/.athena/athena.db"
+
+          [embedding]
+          enabled = true
+          model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+
+          [ticket_intake]
+          enabled = false
+          sources = []
+
+          [ticket_intake.webhook]
+          enabled = false
+
+          [langfuse]
+          enabled = false
+          EOF
+
+      - name: Local-only doctor smoke (config invariants)
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
+        run: cargo run --quiet -- --config /tmp/local-only-smoke.toml doctor --skip-llm --ci --fail-on-warn
+
+      - name: Local-only negative drift example (langfuse enabled should fail)
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
+        run: |
+          cat > /tmp/local-only-drift.toml <<'EOF'
+          [runtime]
+          profile = "local_only"
+
+          [llm]
+          provider = "ollama"
+
+          [ollama]
+          url = "http://127.0.0.1:11434"
+          model = "qwen2.5:7b"
+          classifier_model = "qwen2.5:3b"
+
+          [db]
+          path = "~/.athena/athena.db"
+
+          [embedding]
+          enabled = true
+          model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+
+          [ticket_intake]
+          enabled = false
+          sources = []
+
+          [ticket_intake.webhook]
+          enabled = false
+
+          [langfuse]
+          enabled = true
+          EOF
+
+          set +e
+          cargo run --quiet -- --config /tmp/local-only-drift.toml doctor --skip-llm --ci --fail-on-warn
+          code=$?
+          set -e
+
+          if [ "$code" -eq 0 ]; then
+            echo "expected doctor failure for local-only drift, but command succeeded"
+            exit 1
+          fi
+
+      - name: Generate security attestation (JSON)
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
+        run: cargo run --quiet -- doctor --security --json --skip-llm > security-attestation.json
+
+      - name: Enforce security attestation gate
+        run: |
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("security-attestation.json", "r", encoding="utf-8") as fh:
+              report = json.load(fh)
+
+          if report.get("schema_version") != "v1":
+              print(f"Security attestation schema mismatch: {report.get('schema_version')!r} != 'v1'")
+              sys.exit(1)
+
+          failures = []
+          for ghost in report.get("ghosts", []):
+              ghost_name = ghost.get("name", "<unknown>")
+              for check in ghost.get("checks", []):
+                  if check.get("status") != "fail":
+                      continue
+                  remediation = check.get("remediation")
+                  if not remediation:
+                      remediation = "missing remediation hint in attestation output"
+                  failures.append(
+                      f"{ghost_name}:{check.get('id', '<unknown>')} "
+                      f"observed={check.get('observed')} expected={check.get('expected')} "
+                      f"remediation={remediation}"
+                  )
+
+          if failures:
+              print("Security posture regression detected:")
+              for item in failures:
+                  print(f"- {item}")
+              sys.exit(1)
+
+          print(
+              "Security attestation gate passed: "
+              f"ghosts={report.get('summary', {}).get('ghosts_total', 0)} "
+              f"checks_fail={report.get('summary', {}).get('checks_fail', 0)}"
+          )
+          PY

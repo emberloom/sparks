@@ -1,0 +1,53 @@
+# examples/feature-contract-linear.toml
+#
+# Linear chain feature contract template.
+# Use with:
+#   athena feature validate --file examples/feature-contract-linear.toml
+
+feature_id = "athena-linear-example"
+lane = "delivery"
+risk = "low"
+repo = "athena"
+
+[[acceptance_criteria]]
+id = "AC-1"
+description = "Core implementation completed."
+
+[[acceptance_criteria]]
+id = "AC-2"
+description = "Tests cover the behavior."
+
+[[acceptance_criteria]]
+id = "AC-3"
+description = "Operator docs are updated."
+
+[[verification_checks]]
+id = "VC-fast"
+profile = "fast"
+command = "cargo check --quiet"
+mapped_acceptance = ["AC-1"]
+required = true
+
+[[verification_checks]]
+id = "VC-strict"
+profile = "strict"
+command = "cargo test --quiet"
+mapped_acceptance = ["AC-2", "AC-3"]
+required = true
+
+[[tasks]]
+id = "T1"
+goal = "Implement feature behavior"
+mapped_acceptance = ["AC-1"]
+
+[[tasks]]
+id = "T2"
+depends_on = ["T1"]
+goal = "Add focused regression tests"
+mapped_acceptance = ["AC-2"]
+
+[[tasks]]
+id = "T3"
+depends_on = ["T2"]
+goal = "Update docs and migration guidance"
+mapped_acceptance = ["AC-3"]

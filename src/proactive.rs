@@ -1,14 +1,17 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::core::SessionContext;
+use chrono::Utc;
+use uuid::Uuid;
+
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
-use crate::pulse::{Pulse, PulseBus, PulseSource, PulseTarget, Urgency};
+use crate::pulse::{Pulse, PulseBus, PulseSource, Urgency};
 use crate::randomness;
+use crate::scheduler::Schedule;
 
 /// Tracks the timestamp of the last user interaction (epoch seconds).
 pub struct ActivityTracker {
@@ -38,6 +41,202 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn build_recent_memory_lines(memories: &[crate::memory::Memory], limit: usize) -> Vec<String> {
+    memories
+        .iter()
+        .take(limit)
+        .map(|m| format!("- [{}] {}", m.category, m.content))
+        .collect()
+}
+
+fn build_memory_scan_prompt(recent: &[String]) -> String {
+    format!(
+        r#"Review these recent memories and identify any interesting patterns, connections, or insights:
+
+{}
+
+If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. If nothing stands out, respond with exactly: NO_PATTERN"#,
+        recent.join("\n")
+    )
+}
+
+fn has_similar_failure(idea: &str, past_failures: &[crate::memory::Memory]) -> bool {
+    let lower_idea = idea.to_lowercase();
+    past_failures.iter().any(|m| {
+        let failure_lower = m.content.to_lowercase();
+        lower_idea
+            .split_whitespace()
+            .filter(|w| w.len() > 5)
+            .any(|word| failure_lower.contains(word))
+    })
+}
+
+fn recent_refactoring_failures(memory: &MemoryStore) -> Vec<crate::memory::Memory> {
+    memory
+        .list_by_categories_recent_hours(&["code_change_failed", "refactoring_failed"], 20, 48)
+        .or_else(|_| memory.search_hybrid("code_change_failed refactoring_failed", None, 20))
+        .unwrap_or_default()
+}
+
+fn build_improvement_task(source_label: &str, improvement: &str) -> crate::core::AutonomousTask {
+    crate::core::AutonomousTask {
+        goal: format!(
+            "Investigate this improvement idea: {}\n\n\
+             Explore feasibility, identify affected files, and report findings.",
+            improvement
+        ),
+        context: format!(
+            "Discovered via {}. Investigation only — do not make code changes.",
+            source_label
+        ),
+        ghost: Some("scout".to_string()),
+        target: crate::pulse::PulseTarget::Broadcast,
+        lane: "self_improvement".to_string(),
+        risk_tier: "medium".to_string(),
+        repo: crate::kpi::default_repo_name(),
+        task_id: None,
+    }
+}
+
+/// Shared helper: classify whether content implies a code improvement, gate on
+/// spontaneity and past-failure similarity, and optionally dispatch a scout task.
+async fn classify_and_dispatch_improvement(
+    source_label: &str,
+    content: &str,
+    threshold: f32,
+    spontaneity: f32,
+    observer: &ObserverHandle,
+    suppress_category: ObserverCategory,
+    llm: &dyn LlmProvider,
+    memory: &MemoryStore,
+    auto_tx: &tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+    lf_trace: &Option<ActiveTrace>,
+    model_name: &str,
+) {
+    let classify_prompt = format!(
+        "Does this {src} suggest a concrete code improvement? \
+         {src}: \"{content}\"\n\n\
+         If yes, describe the improvement in 1-2 sentences. \
+         If no, respond NO_ACTION.",
+        src = source_label,
+        content = content,
+    );
+    let classify_gen = lf_trace
+        .as_ref()
+        .map(|t| t.generation("classify_improvement", model_name, None));
+    let classify_msgs = vec![Message::user(&classify_prompt)];
+    let Ok(classify_resp) = llm.chat(&classify_msgs).await else {
+        return;
+    };
+    if let Some(g) = classify_gen {
+        g.end(Some(&truncate(classify_resp.trim(), 500)), 0, 0);
+    }
+    let cr = classify_resp.trim();
+    if cr.to_uppercase().contains("NO_ACTION") || is_refusal(cr) {
+        return;
+    }
+    if !randomness::should_speak(threshold, spontaneity) {
+        observer.log(
+            ObserverCategory::StochasticRoll,
+            format!(
+                "{} improvement suppressed by gate (spontaneity={:.2})",
+                source_label, spontaneity
+            ),
+        );
+        return;
+    }
+    let past_failures = memory
+        .search_hybrid("improvement_idea failed", None, 5)
+        .unwrap_or_default();
+    if has_similar_failure(cr, &past_failures) {
+        observer.log(
+            suppress_category,
+            format!(
+                "{} improvement suppressed: similar past failure found",
+                source_label
+            ),
+        );
+        return;
+    }
+    let _ = memory.store("improvement_idea", cr, None);
+    let task = build_improvement_task(source_label, cr);
+    if let Err(e) = auto_tx.send(task).await {
+        tracing::warn!(
+            "{}: failed to dispatch improvement task: {}",
+            source_label,
+            e
+        );
+    }
+}
+
+/// Check for past failures, apply spontaneity gate, and dispatch a refactoring task.
+async fn check_and_dispatch_refactoring(
+    opportunity: &str,
+    spontaneity: f32,
+    observer: &ObserverHandle,
+    memory: &MemoryStore,
+    auto_tx: &tokio::sync::mpsc::Sender<crate::core::AutonomousTask>,
+    lf_trace: Option<ActiveTrace>,
+) {
+    let past_failures = recent_refactoring_failures(memory);
+    let similar_failure = has_similar_failure(opportunity, &past_failures);
+
+    let suppress_span = lf_trace.as_ref().map(|t| t.span("failure_check", None));
+
+    if similar_failure {
+        observer.log(
+            ObserverCategory::AutonomousTask,
+            "Refactoring scanner suppressed: previous attempt failed (within 48h)",
+        );
+        if let Some(s) = suppress_span {
+            s.end(Some("suppressed"));
+        }
+        if let Some(t) = lf_trace {
+            t.end(Some("suppressed: previous attempt failed"));
+        }
+    } else if randomness::should_speak(0.3, spontaneity) {
+        if let Some(s) = suppress_span {
+            s.end(Some("passed"));
+        }
+        let dispatch_span = lf_trace
+            .as_ref()
+            .map(|t| t.span("dispatch_coder", Some(opportunity)));
+        let task = crate::core::AutonomousTask {
+            goal: format!(
+                "Implement this refactoring: {}\n\n\
+                 Be careful, run tests after changes, and keep the refactoring minimal.",
+                opportunity
+            ),
+            context: "This is a suggested refactoring from automated analysis. \
+                      Proceed carefully and verify with tests."
+                .to_string(),
+            ghost: Some("coder".to_string()),
+            target: crate::pulse::PulseTarget::Broadcast,
+            lane: "self_improvement".to_string(),
+            risk_tier: "high".to_string(),
+            repo: crate::kpi::default_repo_name(),
+            task_id: None,
+        };
+        let _ = memory.store("refactor_suggestion", opportunity, None);
+        if let Err(e) = auto_tx.send(task).await {
+            tracing::warn!("Refactoring scanner: failed to dispatch: {}", e);
+        }
+        if let Some(s) = dispatch_span {
+            s.end(Some("task dispatched"));
+        }
+        if let Some(t) = lf_trace {
+            t.end(Some("dispatched"));
+        }
+    } else {
+        if let Some(s) = suppress_span {
+            s.end(Some("gate_suppressed"));
+        }
+        if let Some(t) = lf_trace {
+            t.end(Some("gate_suppressed"));
+        }
+    }
+}
+
 /// Spawn the memory pattern scanner loop.
 pub fn spawn_memory_scanner(
     knobs: SharedKnobs,
@@ -51,7 +250,7 @@ pub fn spawn_memory_scanner(
     tokio::spawn(async move {
         loop {
             let (interval, spontaneity, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.memory_scan_interval_secs,
                     k.spontaneity,
@@ -70,7 +269,7 @@ pub fn spawn_memory_scanner(
 
             // Re-check knobs
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.memory_scan_enabled {
                     continue;
                 }
@@ -108,21 +307,8 @@ pub fn spawn_memory_scanner(
                 continue;
             }
 
-            // Take last 50
-            let recent: Vec<String> = memories
-                .iter()
-                .take(50)
-                .map(|m| format!("- [{}] {}", m.category, m.content))
-                .collect();
-
-            let prompt = format!(
-                r#"Review these recent memories and identify any interesting patterns, connections, or insights:
-
-{}
-
-If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. If nothing stands out, respond with exactly: NO_PATTERN"#,
-                recent.join("\n")
-            );
+            let recent = build_recent_memory_lines(&memories, 50);
+            let prompt = build_memory_scan_prompt(&recent);
 
             let model_name = llm.provider_name().to_string();
             let gen = lf_trace
@@ -148,75 +334,20 @@ If you notice a meaningful pattern worth sharing, describe it in 1-2 sentences. 
                     // Always store pattern as memory (enriches future scans)
                     let _ = memory.store("pattern", trimmed, None);
 
-                    // Check if this pattern implies an actionable code improvement
-                    let classify_prompt = format!(
-                        "Does this pattern suggest a concrete code improvement? \
-                         Pattern: \"{}\"\n\n\
-                         If yes, describe the improvement in 1-2 sentences. \
-                         If no, respond NO_ACTION.",
-                        trimmed
-                    );
-
-                    let classify_gen = lf_trace
-                        .as_ref()
-                        .map(|t| t.generation("classify_improvement", &model_name, None));
-                    let classify_msgs = vec![Message::user(&classify_prompt)];
-                    if let Ok(classify_resp) = llm.chat(&classify_msgs).await {
-                        if let Some(g) = classify_gen {
-                            g.end(Some(&truncate(classify_resp.trim(), 500)), 0, 0);
-                        }
-                        let cr = classify_resp.trim();
-                        if !cr.to_uppercase().contains("NO_ACTION") && !is_refusal(cr) {
-                            // Spontaneity gate — lower threshold since patterns are speculative
-                            if randomness::should_speak(0.2, spontaneity) {
-                                // Check for past failures on similar improvements
-                                let past_failures = memory
-                                    .search_hybrid("improvement_idea failed", None, 5)
-                                    .unwrap_or_default();
-                                let lower_idea = cr.to_lowercase();
-                                let similar_failure = past_failures.iter().any(|m| {
-                                    let failure_lower = m.content.to_lowercase();
-                                    lower_idea
-                                        .split_whitespace()
-                                        .filter(|w| w.len() > 5)
-                                        .any(|word| failure_lower.contains(word))
-                                });
-
-                                if similar_failure {
-                                    observer.log(
-                                        ObserverCategory::MemoryScan,
-                                        "Pattern improvement suppressed: similar past failure found",
-                                    );
-                                } else {
-                                    let _ = memory.store("improvement_idea", cr, None);
-                                    let task = crate::core::AutonomousTask {
-                                        goal: format!(
-                                            "Investigate this improvement idea: {}\n\n\
-                                             Explore feasibility, identify affected files, and report findings.",
-                                            cr
-                                        ),
-                                        context: "Discovered via memory pattern scan. \
-                                                  Investigation only — do not make code changes."
-                                            .to_string(),
-                                        ghost: Some("scout".to_string()),
-                                        target: crate::pulse::PulseTarget::Broadcast,
-                                        lane: "self_improvement".to_string(),
-                                        risk_tier: "medium".to_string(),
-                                        repo: crate::kpi::default_repo_name(),
-                                        task_id: None,
-                                    };
-                                    if let Err(e) = auto_tx.send(task).await {
-                                        tracing::warn!("Memory scanner: failed to dispatch improvement task: {}", e);
-                                    }
-                                }
-                            } else {
-                                observer.log(
-                                    ObserverCategory::StochasticRoll,
-                                    format!("Pattern improvement suppressed by gate (spontaneity={:.2})", spontaneity),
-                                );
-                            }
-                        }
-                    }
+                    classify_and_dispatch_improvement(
+                        "pattern",
+                        trimmed,
+                        0.2,
+                        spontaneity,
+                        &observer,
+                        ObserverCategory::MemoryScan,
+                        &*llm,
+                        &memory,
+                        &auto_tx,
+                        &lf_trace,
+                        &model_name,
+                    )
+                    .await;
 
                     // Stochastic gate for pulse delivery
                     if randomness::should_speak(0.6, spontaneity) {
@@ -268,7 +399,7 @@ pub fn spawn_idle_musings(
             tokio::time::sleep(randomness::jitter_interval(300, 0.3)).await;
 
             let (threshold, spontaneity, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.idle_threshold_secs,
                     k.spontaneity,
@@ -324,7 +455,11 @@ pub fn spawn_idle_musings(
             let indices = randomness::sample_indices(count, memories.len());
             let sampled: Vec<String> = indices
                 .into_iter()
-                .map(|i| format!("- [{}] {}", memories[i].category, memories[i].content))
+                .filter_map(|i| {
+                    memories
+                        .get(i)
+                        .map(|m| format!("- [{}] {}", m.category, m.content))
+                })
                 .collect();
 
             let prompt = format!(
@@ -356,80 +491,20 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
                     // Always store as memory
                     let _ = memory.store("musing", &trimmed, None);
 
-                    // Check if this musing implies an actionable code improvement
-                    let classify_prompt = format!(
-                        "Does this reflection suggest a concrete code improvement? \
-                         Musing: \"{}\"\n\n\
-                         If yes, describe the improvement in 1-2 sentences. \
-                         If no, respond NO_ACTION.",
-                        trimmed
-                    );
-                    let classify_gen = lf_trace
-                        .as_ref()
-                        .map(|t| t.generation("classify_improvement", &model_name, None));
-                    let classify_msgs = vec![Message::user(&classify_prompt)];
-                    if let Ok(classify_resp) = llm.chat(&classify_msgs).await {
-                        if let Some(g) = classify_gen {
-                            g.end(Some(&truncate(classify_resp.trim(), 500)), 0, 0);
-                        }
-                        let cr = classify_resp.trim();
-                        if !cr.to_uppercase().contains("NO_ACTION") && !is_refusal(cr) {
-                            // Even lower spontaneity gate — musings are most speculative
-                            if randomness::should_speak(0.15, spontaneity) {
-                                // Check for past failures on similar improvements
-                                let past_failures = memory
-                                    .search_hybrid("improvement_idea failed", None, 5)
-                                    .unwrap_or_default();
-                                let lower_idea = cr.to_lowercase();
-                                let similar_failure = past_failures.iter().any(|m| {
-                                    let failure_lower = m.content.to_lowercase();
-                                    lower_idea
-                                        .split_whitespace()
-                                        .filter(|w| w.len() > 5)
-                                        .any(|word| failure_lower.contains(word))
-                                });
-
-                                if similar_failure {
-                                    observer.log(
-                                        ObserverCategory::IdleMusing,
-                                        "Musing improvement suppressed: similar past failure found",
-                                    );
-                                } else {
-                                    let _ = memory.store("improvement_idea", cr, None);
-                                    let task = crate::core::AutonomousTask {
-                                        goal: format!(
-                                            "Investigate this improvement idea: {}\n\n\
-                                             Explore feasibility, identify affected files, and report findings.",
-                                            cr
-                                        ),
-                                        context: "Discovered via idle musing. \
-                                                  Investigation only — do not make code changes."
-                                            .to_string(),
-                                        ghost: Some("scout".to_string()),
-                                        target: crate::pulse::PulseTarget::Broadcast,
-                                        lane: "self_improvement".to_string(),
-                                        risk_tier: "medium".to_string(),
-                                        repo: crate::kpi::default_repo_name(),
-                                        task_id: None,
-                                    };
-                                    if let Err(e) = auto_tx.send(task).await {
-                                        tracing::warn!(
-                                            "Idle musing: failed to dispatch improvement task: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                observer.log(
-                                    ObserverCategory::StochasticRoll,
-                                    format!(
-                                        "Musing improvement suppressed by gate (spontaneity={:.2})",
-                                        spontaneity
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    classify_and_dispatch_improvement(
+                        "musing",
+                        &trimmed,
+                        0.15,
+                        spontaneity,
+                        &observer,
+                        ObserverCategory::IdleMusing,
+                        &*llm,
+                        &memory,
+                        &auto_tx,
+                        &lf_trace,
+                        &model_name,
+                    )
+                    .await;
 
                     // Stochastic gate for pulse delivery
                     if randomness::should_speak(0.5, spontaneity) {
@@ -474,16 +549,13 @@ Synthesize a brief reflection or musing (1-2 sentences). Be thoughtful and natur
 pub fn maybe_schedule_reentry(
     knobs: SharedKnobs,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
-    llm: Arc<dyn LlmProvider>,
     memory: Arc<MemoryStore>,
     session_key: String,
     persona_soul: Option<String>,
-    langfuse: SharedLangfuse,
 ) {
     // Read knobs for probability gate
     let (spontaneity, enabled, all, delay_secs, jitter) = {
-        let k = knobs.read().unwrap();
+        let k = knobs.read().unwrap_or_else(|e| e.into_inner());
         (
             k.spontaneity,
             k.conversation_reentry_enabled,
@@ -505,6 +577,9 @@ pub fn maybe_schedule_reentry(
     tokio::spawn(async move {
         let delay = randomness::jitter_interval(delay_secs, jitter);
         let delay_min = delay.as_secs() / 60;
+        let fire_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .unwrap_or_else(|_| chrono::Duration::seconds(delay_secs as i64));
         observer.log(
             ObserverCategory::Heartbeat,
             format!(
@@ -513,91 +588,110 @@ pub fn maybe_schedule_reentry(
             ),
         );
 
-        tokio::time::sleep(delay).await;
-
-        // Re-check knobs after delay
-        {
-            let k = knobs.read().unwrap();
-            if !k.all_proactive || !k.conversation_reentry_enabled {
-                return;
-            }
-        }
-
         // Load conversation context (15 turns)
         let recent = memory.recent_turns(&session_key, 15).unwrap_or_default();
         if recent.len() < 2 {
             return; // need at least one exchange
         }
 
-        // Summarize older turns, keep last 6 in full
-        let (summary_section, recent_section) = if recent.len() > 8 {
-            let split = recent.len() - 6;
-            let old_lines: Vec<String> = recent[..split]
-                .iter()
-                .map(|(role, content)| format!("[{}] {}", role, truncate(content, 120)))
-                .collect();
-            let recent_lines: Vec<String> = recent[split..]
-                .iter()
-                .map(|(role, content)| format!("{}: {}", role, content))
-                .collect();
-            (
-                format!(
-                    "Earlier in the conversation (summarized):\n{}\n\n",
-                    old_lines.join("\n")
-                ),
-                recent_lines.join("\n"),
-            )
-        } else {
-            let lines: Vec<String> = recent
-                .iter()
-                .map(|(role, content)| format!("{}: {}", role, content))
-                .collect();
-            (String::new(), lines.join("\n"))
-        };
+        let prompt = build_reentry_prompt(&recent, &memory, &session_key, persona_soul.as_deref());
 
-        // Extract topics from recent user messages for memory search
-        let user_topics: String = recent
+        let schedule = Schedule::OneShot { at: fire_at };
+        let (stype, sdata) = schedule.to_db();
+        let next_run = schedule.next_run().map(|t| t.to_rfc3339());
+        let job_name = format!("reentry:{}", session_key);
+        let target = format!("session:{}", session_key);
+
+        if let Err(e) = memory.delete_scheduled_jobs_by_name(&job_name) {
+            tracing::warn!("Failed to dedup re-entry job {}: {}", job_name, e);
+        }
+
+        let job_id = Uuid::new_v4().to_string();
+        if let Err(e) = memory.create_scheduled_job(
+            &job_id,
+            &job_name,
+            &stype,
+            &sdata,
+            None,
+            &prompt,
+            &target,
+            next_run.as_deref(),
+        ) {
+            tracing::warn!("Failed to persist re-entry job {}: {}", job_name, e);
+        }
+    });
+}
+
+/// Build the reentry prompt from conversation history, memories, and user profile.
+fn build_reentry_prompt(
+    recent: &[(String, String)],
+    memory: &MemoryStore,
+    session_key: &str,
+    persona_soul: Option<&str>,
+) -> String {
+    let (summary_section, recent_section) = if recent.len() > 8 {
+        let split = recent.len() - 6;
+        let old_lines: Vec<String> = recent[..split]
             .iter()
-            .filter(|(role, _)| role == "user")
-            .map(|(_, content)| content.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .map(|(role, content)| format!("[{}] {}", role, truncate(content, 120)))
+            .collect();
+        let recent_lines: Vec<String> = recent[split..]
+            .iter()
+            .map(|(role, content)| format!("{}: {}", role, content))
+            .collect();
+        (
+            format!(
+                "Earlier in the conversation (summarized):\n{}\n\n",
+                old_lines.join("\n")
+            ),
+            recent_lines.join("\n"),
+        )
+    } else {
+        let lines: Vec<String> = recent
+            .iter()
+            .map(|(role, content)| format!("{}: {}", role, content))
+            .collect();
+        (String::new(), lines.join("\n"))
+    };
 
-        // Search related memories
-        let memories = memory
-            .search_hybrid(&user_topics, None, 5)
-            .unwrap_or_default();
-        let memory_section = if memories.is_empty() {
-            String::new()
-        } else {
-            let items: Vec<String> = memories
-                .iter()
-                .map(|m| format!("- [{}] {}", m.category, m.content))
-                .collect();
-            format!("\n\nRelated things you know:\n{}", items.join("\n"))
-        };
+    let user_topics: String = recent
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
 
-        // Extract user_id from session_key for profile lookup
-        let user_id = session_key.splitn(3, ':').nth(1).unwrap_or("unknown");
-        let user_profile = memory.get_user_profile(user_id).unwrap_or_default();
-        let profile_section = if user_profile.is_empty() {
-            String::new()
-        } else {
-            let items: Vec<String> = user_profile
-                .iter()
-                .map(|(k, v)| format!("- {}: {}", k, v))
-                .collect();
-            format!("\n\nAbout this person:\n{}", items.join("\n"))
-        };
+    let memories = memory
+        .search_hybrid(&user_topics, None, 5)
+        .unwrap_or_default();
+    let memory_section = if memories.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = memories
+            .iter()
+            .map(|m| format!("- [{}] {}", m.category, m.content))
+            .collect();
+        format!("\n\nRelated things you know:\n{}", items.join("\n"))
+    };
 
-        // Build the persona preamble
-        let persona = persona_soul
-            .as_deref()
-            .map(|s| format!("{}\n\n", s))
-            .unwrap_or_default();
+    let user_id = session_key.splitn(3, ':').nth(1).unwrap_or("unknown");
+    let user_profile = memory.get_user_profile(user_id).unwrap_or_default();
+    let profile_section = if user_profile.is_empty() {
+        String::new()
+    } else {
+        let items: Vec<String> = user_profile
+            .iter()
+            .map(|(k, v)| format!("- {}: {}", k, v))
+            .collect();
+        format!("\n\nAbout this person:\n{}", items.join("\n"))
+    };
 
-        let prompt = format!(
-            r#"{persona}You had this conversation with the user a while ago:
+    let persona = persona_soul
+        .map(|s| format!("{}\n\n", s))
+        .unwrap_or_default();
+
+    format!(
+        r#"{persona}You had this conversation with the user a while ago:
 
 {summary_section}Recent messages:
 {recent_section}{memory_section}{profile_section}
@@ -611,83 +705,7 @@ Time has passed since this conversation ended. Think about whether there's somet
 Write a natural, brief follow-up message (1-3 sentences) as if you're casually reaching out. Be specific — reference the actual topic. Don't be generic or vague.
 
 If there's genuinely nothing worth following up on, respond with exactly: NO_FOLLOWUP"#,
-        );
-
-        let lf_trace = langfuse.as_ref().map(|lf| {
-            ActiveTrace::start(
-                lf.clone(),
-                "funnel3:reentry",
-                None,
-                None,
-                None,
-                vec!["funnel3", "reentry"],
-            )
-        });
-        let model_name = llm.provider_name().to_string();
-        let gen = lf_trace
-            .as_ref()
-            .map(|t| t.generation("compose_reentry", &model_name, None));
-
-        let messages = vec![Message::user(&prompt)];
-        match llm.chat(&messages).await {
-            Ok(response) => {
-                let trimmed = response.trim();
-                if let Some(g) = gen {
-                    g.end(Some(&truncate(trimmed, 500)), 0, 0);
-                }
-
-                // Quality gate: reject refusals, too-short, or generic responses
-                if is_refusal(trimmed) {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: nothing to follow up on",
-                    );
-                    if let Some(t) = lf_trace {
-                        t.end(Some("suppressed"));
-                    }
-                    return;
-                }
-                if trimmed.len() < 30 {
-                    observer.log(
-                        ObserverCategory::Heartbeat,
-                        "Re-entry: response too short, skipping",
-                    );
-                    if let Some(t) = lf_trace {
-                        t.end(Some("suppressed"));
-                    }
-                    return;
-                }
-
-                observer.log(
-                    ObserverCategory::Heartbeat,
-                    format!("Re-entry generated: \"{}\"", truncate(trimmed, 80)),
-                );
-
-                let _ = memory.store("reentry", trimmed, None);
-
-                let target = parse_session_target(&session_key);
-                let pulse = Pulse::new(
-                    PulseSource::ConversationReentry,
-                    Urgency::Medium, // Medium = always delivers unless quiet hours
-                    trimmed.to_string(),
-                )
-                .with_target(target);
-                pulse_bus.send(pulse);
-                if let Some(t) = lf_trace {
-                    t.end(Some("pulse_sent"));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Conversation re-entry LLM call failed: {}", e);
-                if let Some(g) = gen {
-                    g.end(Some(&format!("error: {}", e)), 0, 0);
-                }
-                if let Some(t) = lf_trace {
-                    t.end(Some(&format!("error: {}", e)));
-                }
-            }
-        }
-    });
+    )
 }
 
 /// Check if an LLM response is a refusal / "nothing to say" variant.
@@ -734,20 +752,6 @@ pub fn is_refusal(text: &str) -> bool {
     false
 }
 
-/// Parse a session key "platform:user_id:chat_id" into a targeted PulseTarget.
-fn parse_session_target(session_key: &str) -> PulseTarget {
-    let parts: Vec<&str> = session_key.splitn(3, ':').collect();
-    if parts.len() == 3 {
-        PulseTarget::Session(SessionContext {
-            platform: parts[0].to_string(),
-            user_id: parts[1].to_string(),
-            chat_id: parts[2].to_string(),
-        })
-    } else {
-        PulseTarget::Broadcast
-    }
-}
-
 /// Spawn the code structure indexer loop.
 /// Periodically scans source files and stores structural information
 /// (public symbols, `use`/`mod` statements, dependency graph) as memories.
@@ -763,7 +767,7 @@ pub fn spawn_code_indexer(
 
         loop {
             let (interval, enabled, all) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.code_indexer_interval_secs,
                     k.code_indexer_enabled,
@@ -781,7 +785,7 @@ pub fn spawn_code_indexer(
 
             // Re-check knobs after sleep
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.code_indexer_enabled {
                     continue;
                 }
@@ -856,7 +860,7 @@ pub fn spawn_refactoring_scanner(
 
         loop {
             let (interval, enabled, all, spontaneity) = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 (
                     k.refactoring_scan_interval_secs,
                     k.refactoring_scan_enabled,
@@ -875,7 +879,7 @@ pub fn spawn_refactoring_scanner(
 
             // Re-check
             {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 if !k.all_proactive || !k.refactoring_scan_enabled {
                     continue;
                 }
@@ -964,75 +968,15 @@ If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING
                         format!("Refactoring opportunity: \"{}\"", truncate(trimmed, 80)),
                     );
 
-                    // Check for past failures on similar refactorings before auto-dispatching
-                    let past_failures = memory
-                        .search_hybrid("refactoring_failed", None, 5)
-                        .unwrap_or_default();
-                    let lower_opportunity = trimmed.to_lowercase();
-                    let similar_failure = past_failures.iter().any(|m| {
-                        // Simple overlap check: if any significant word from the opportunity
-                        // appears in a past failure, consider it similar
-                        let failure_lower = m.content.to_lowercase();
-                        lower_opportunity
-                            .split_whitespace()
-                            .filter(|w| w.len() > 5) // only check significant words
-                            .any(|word| failure_lower.contains(word))
-                    });
-
-                    let suppress_span = lf_trace.as_ref().map(|t| t.span("failure_check", None));
-
-                    if similar_failure {
-                        observer.log(
-                            ObserverCategory::AutonomousTask,
-                            "Refactoring suppressed: similar past failure found",
-                        );
-                        if let Some(s) = suppress_span {
-                            s.end(Some("suppressed"));
-                        }
-                        if let Some(t) = lf_trace {
-                            t.end(Some("suppressed: similar past failure"));
-                        }
-                    } else if randomness::should_speak(0.3, spontaneity) {
-                        if let Some(s) = suppress_span {
-                            s.end(Some("passed"));
-                        }
-                        let dispatch_span = lf_trace
-                            .as_ref()
-                            .map(|t| t.span("dispatch_coder", Some(trimmed)));
-                        // Optionally dispatch as autonomous task if spontaneity is high enough
-                        let task = crate::core::AutonomousTask {
-                            goal: format!(
-                                "Implement this refactoring: {}\n\n\
-                                 Be careful, run tests after changes, and keep the refactoring minimal.",
-                                trimmed
-                            ),
-                            context: "This is a suggested refactoring from automated analysis. \
-                                      Proceed carefully and verify with tests."
-                                .to_string(),
-                            ghost: Some("coder".to_string()),
-                            target: crate::pulse::PulseTarget::Broadcast,
-                            lane: "self_improvement".to_string(),
-                            risk_tier: "high".to_string(),
-                            repo: crate::kpi::default_repo_name(),
-                            task_id: None,
-                        };
-                        if let Err(e) = auto_tx.send(task).await {
-                            tracing::warn!("Refactoring scanner: failed to dispatch: {}", e);
-                        }
-                        if let Some(s) = dispatch_span {
-                            s.end(Some("task dispatched"));
-                        }
-                        if let Some(t) = lf_trace {
-                            t.end(Some("dispatched"));
-                        }
-                    } else {
-                        if let Some(s) = suppress_span {
-                            s.end(Some("gate_suppressed"));
-                        }
-                        if let Some(t) = lf_trace {
-                            t.end(Some("gate_suppressed"));
-                        }
-                    }
+                    check_and_dispatch_refactoring(
+                        trimmed,
+                        spontaneity,
+                        &observer,
+                        &memory,
+                        &auto_tx,
+                        lf_trace,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::warn!("Refactoring scanner LLM call failed: {}", e);
@@ -1046,6 +990,219 @@ If nothing stands out or confidence is low, respond with exactly: NO_REFACTORING
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_recent_memory_lines, check_and_dispatch_refactoring, has_similar_failure,
+        recent_refactoring_failures,
+    };
+    use crate::memory::{Memory, MemoryStore};
+    use crate::observer::ObserverHandle;
+    use tokio::sync::mpsc;
+
+    fn memory(category: &str, content: &str) -> Memory {
+        Memory {
+            id: "m1".to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+            active: true,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn build_recent_memory_lines_limits_and_formats() {
+        let memories = vec![memory("one", "alpha"), memory("two", "beta")];
+        let lines = build_recent_memory_lines(&memories, 1);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "- [one] alpha");
+    }
+
+    #[test]
+    fn has_similar_failure_matches_shared_terms() {
+        let idea = "Improve caching of memory scanner";
+        let failures = vec![memory(
+            "improvement_idea",
+            "previous improvement: caching memory scanner was rejected",
+        )];
+        assert!(has_similar_failure(idea, &failures));
+    }
+
+    #[test]
+    fn has_similar_failure_ignores_unrelated_failures() {
+        let idea = "Improve caching of memory scanner";
+        let failures = vec![memory("improvement_idea", "tweak prompt wording")];
+        assert!(!has_similar_failure(idea, &failures));
+    }
+
+    fn setup_test_db() -> MemoryStore {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                embedding BLOB
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content);
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, key)
+            );",
+        )
+        .unwrap();
+        MemoryStore::new(conn, 30.0, 1.0, 256)
+    }
+
+    fn setup_test_db_with_failure(category: &str, content: &str, age_hours: i64) -> MemoryStore {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                embedding BLOB
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content);
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, key)
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories(id, category, content, active, created_at, updated_at, embedding)
+             VALUES (?1, ?2, ?3, 1, datetime('now', ?4), datetime('now', ?4), NULL)",
+            rusqlite::params![
+                "seed-failure",
+                category,
+                content,
+                format!("-{} hours", age_hours.max(0)),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content) VALUES (?1, ?2)",
+            rusqlite::params![1i64, content],
+        )
+        .unwrap();
+        MemoryStore::new(conn, 30.0, 1.0, 256)
+    }
+
+    #[tokio::test]
+    async fn refactoring_dispatch_suppressed_after_recent_code_change_failure() {
+        let store = setup_test_db();
+        let failure = "Autonomous task FAILED [coder]: Implement this refactoring: split src/proactive.rs scanner loop";
+        store.store("code_change_failed", failure, None).unwrap();
+
+        let observer = ObserverHandle::new(8);
+        let (tx, mut rx) = mpsc::channel(1);
+        let opportunity =
+            "split src/proactive.rs scanner loop to isolate refactoring gate and dispatch logic";
+        check_and_dispatch_refactoring(opportunity, 10.0, &observer, &store, &tx, None).await;
+
+        assert!(rx.try_recv().is_err(), "task should be suppressed");
+    }
+
+    #[tokio::test]
+    async fn refactoring_dispatch_stores_refactor_suggestion_memory() {
+        let store = setup_test_db();
+        let observer = ObserverHandle::new(8);
+        let (tx, mut rx) = mpsc::channel(1);
+        let opportunity = "extract shared parser into a dedicated module to reduce duplication";
+
+        check_and_dispatch_refactoring(opportunity, 10.0, &observer, &store, &tx, None).await;
+
+        let task = rx
+            .recv()
+            .await
+            .expect("task should be dispatched when no similar failure exists");
+        assert!(task.goal.contains("Implement this refactoring"));
+
+        let suggestions = store
+            .list_by_category_recent("refactor_suggestion", 5, 2)
+            .unwrap();
+        assert!(
+            suggestions.iter().any(|m| m.content.contains(opportunity)),
+            "refactor suggestion memory should be stored on dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_refactoring_failure_does_not_suppress_dispatch() {
+        let store = setup_test_db_with_failure(
+            "code_change_failed",
+            "Autonomous task FAILED [coder]: Implement this refactoring: split src/proactive.rs scanner loop",
+            72,
+        );
+        let observer = ObserverHandle::new(8);
+        let (tx, mut rx) = mpsc::channel(1);
+        let opportunity =
+            "split src/proactive.rs scanner loop to isolate refactoring gate and dispatch logic";
+
+        check_and_dispatch_refactoring(opportunity, 10.0, &observer, &store, &tx, None).await;
+
+        let dispatched = rx.recv().await;
+        assert!(
+            dispatched.is_some(),
+            "old failures (>48h) should not suppress dispatch"
+        );
+        let failures = recent_refactoring_failures(&store);
+        assert!(
+            failures.is_empty(),
+            "48h failure scan should exclude entries older than 48 hours"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_refactoring_failed_category_suppresses_dispatch() {
+        let store = setup_test_db_with_failure(
+            "refactoring_failed",
+            "Autonomous task FAILED [coder]: Implement this refactoring: split src/proactive.rs scanner loop",
+            6,
+        );
+        let observer = ObserverHandle::new(8);
+        let (tx, mut rx) = mpsc::channel(1);
+        let opportunity =
+            "split src/proactive.rs scanner loop to isolate refactoring gate and dispatch logic";
+
+        check_and_dispatch_refactoring(opportunity, 10.0, &observer, &store, &tx, None).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "recent refactoring_failed entries should suppress dispatch"
+        );
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

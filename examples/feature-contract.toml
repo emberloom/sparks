@@ -1,0 +1,64 @@
+# examples/feature-contract.toml
+#
+# Fan-out / fan-in feature contract template (TOML).
+# This file is directly consumable by:
+#   athena feature validate --file examples/feature-contract.toml
+#   athena feature plan --file examples/feature-contract.toml
+
+feature_id = "athena-contract-report-hardening"
+lane = "delivery"
+risk = "medium"
+repo = "athena"
+
+[[acceptance_criteria]]
+id = "AC-1"
+description = "Contract diagnostics are actionable and deterministic."
+
+[[acceptance_criteria]]
+id = "AC-2"
+description = "Execution report captures per-task status and blockers."
+
+[[acceptance_criteria]]
+id = "AC-3"
+description = "CLI authoring UX reduces manual edits."
+
+[[acceptance_criteria]]
+id = "AC-4"
+description = "Docs and examples are updated for migration."
+
+[[verification_checks]]
+id = "VC-fast"
+profile = "fast"
+command = "cargo check --quiet"
+mapped_acceptance = ["AC-1", "AC-3"]
+required = true
+
+[[verification_checks]]
+id = "VC-strict"
+profile = "strict"
+command = "cargo test --quiet feature_contract -- --nocapture"
+mapped_acceptance = ["AC-1", "AC-2", "AC-4"]
+required = true
+
+[[tasks]]
+id = "T1"
+goal = "Define diagnostics and report schema updates"
+mapped_acceptance = ["AC-1"]
+
+[[tasks]]
+id = "T2"
+depends_on = ["T1"]
+goal = "Implement CLI UX hardening and init template flow"
+mapped_acceptance = ["AC-3"]
+
+[[tasks]]
+id = "T3"
+depends_on = ["T1"]
+goal = "Implement report artifact generation for dispatch and gate flows"
+mapped_acceptance = ["AC-2"]
+
+[[tasks]]
+id = "T4"
+depends_on = ["T2", "T3"]
+goal = "Update docs, examples, and migration notes"
+mapped_acceptance = ["AC-4"]

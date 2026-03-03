@@ -17,6 +17,7 @@ pub struct RuntimeKnobs {
     pub memory_scan_enabled: bool,
     pub idle_musings_enabled: bool,
     pub conversation_reentry_enabled: bool,
+    pub ticket_intake_enabled: bool,
 
     pub reentry_delay_secs: u64,
     pub reentry_jitter: f64,
@@ -29,6 +30,7 @@ pub struct RuntimeKnobs {
     pub heartbeat_jitter: f64,
     pub memory_scan_interval_secs: u64,
     pub idle_threshold_secs: u64,
+    pub ticket_intake_interval_secs: u64,
     pub mood_drift_interval_secs: u64,
     pub pulse_tolerance: f32,
     pub quiet_hours: Option<(u32, u32)>,
@@ -69,6 +71,7 @@ impl RuntimeKnobs {
             memory_scan_enabled: config.proactive.enabled,
             idle_musings_enabled: config.proactive.enabled,
             conversation_reentry_enabled: config.proactive.enabled,
+            ticket_intake_enabled: config.ticket_intake.enabled,
             reentry_delay_secs: config.proactive.reentry_delay_secs,
             reentry_jitter: config.proactive.reentry_jitter,
             relationship_tracking_enabled: config.proactive.enabled,
@@ -78,6 +81,7 @@ impl RuntimeKnobs {
             heartbeat_jitter: config.heartbeat.jitter,
             memory_scan_interval_secs: config.proactive.memory_scan_interval_secs,
             idle_threshold_secs: config.proactive.idle_threshold_secs,
+            ticket_intake_interval_secs: config.ticket_intake.poll_interval_secs,
             mood_drift_interval_secs: config.mood.drift_interval_secs,
             pulse_tolerance: config.initiative.tolerance,
             quiet_hours,
@@ -110,6 +114,7 @@ impl RuntimeKnobs {
             memory_scan_enabled: false,
             idle_musings_enabled: false,
             conversation_reentry_enabled: false,
+            ticket_intake_enabled: false,
             reentry_delay_secs: 300,
             reentry_jitter: 0.2,
             relationship_tracking_enabled: false,
@@ -119,6 +124,7 @@ impl RuntimeKnobs {
             heartbeat_jitter: 0.2,
             memory_scan_interval_secs: 300,
             idle_threshold_secs: 300,
+            ticket_intake_interval_secs: 300,
             mood_drift_interval_secs: 600,
             pulse_tolerance: 0.5,
             quiet_hours: None,
@@ -184,6 +190,13 @@ impl RuntimeKnobs {
                 Ok(format!(
                     "Conversation re-entry: {}",
                     on_off(self.conversation_reentry_enabled)
+                ))
+            }
+            "ticket_intake" => {
+                self.ticket_intake_enabled = parse_bool(value)?;
+                Ok(format!(
+                    "Ticket intake: {}",
+                    on_off(self.ticket_intake_enabled)
                 ))
             }
             "reentry.delay" => {
@@ -254,6 +267,16 @@ impl RuntimeKnobs {
                     .map_err(|_| "Expected integer seconds".to_string())?;
                 self.idle_threshold_secs = v.max(60);
                 Ok(format!("Idle threshold: {}s", self.idle_threshold_secs))
+            }
+            "ticket_intake.interval" => {
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| "Expected integer seconds".to_string())?;
+                self.ticket_intake_interval_secs = v.max(30);
+                Ok(format!(
+                    "Ticket intake interval: {}s",
+                    self.ticket_intake_interval_secs
+                ))
             }
             "mood.drift_interval" => {
                 let v: u64 = value
@@ -404,6 +427,11 @@ impl RuntimeKnobs {
             "  conversation_reentry   {}",
             on_off(self.conversation_reentry_enabled)
         );
+        let _ = writeln!(
+            s,
+            "  ticket_intake          {}",
+            on_off(self.ticket_intake_enabled)
+        );
         let _ = writeln!(s, "  reentry.delay          {}s", self.reentry_delay_secs);
         let _ = writeln!(s, "  reentry.jitter         {:.2}", self.reentry_jitter);
         let _ = writeln!(
@@ -429,6 +457,11 @@ impl RuntimeKnobs {
             self.memory_scan_interval_secs
         );
         let _ = writeln!(s, "  idle_threshold         {}s", self.idle_threshold_secs);
+        let _ = writeln!(
+            s,
+            "  ticket_intake.interval {}s",
+            self.ticket_intake_interval_secs
+        );
         let _ = writeln!(
             s,
             "  mood.drift_interval    {}s",

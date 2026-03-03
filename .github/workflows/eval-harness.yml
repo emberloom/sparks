@@ -32,11 +32,13 @@ jobs:
             scripts/eval_dashboard.py \
             scripts/mock_athena_dispatch.py \
             scripts/optimizer_tournament.py \
+            scripts/test_eval_dashboard.py \
             scripts/test_eval_harness.py \
             scripts/test_optimizer_tournament.py
 
       - name: Run eval script regression tests
         run: |
+          python3 scripts/test_eval_dashboard.py
           python3 scripts/test_eval_harness.py
           python3 scripts/test_optimizer_tournament.py
 
@@ -49,9 +51,67 @@ jobs:
             --no-use-worktree \
             --history-file /tmp/athena-history.jsonl
 
+      - name: Render observability dashboard artifacts
+        run: |
+          python3 scripts/eval_dashboard.py \
+            --config /tmp/athena-ci.toml \
+            --repo athena \
+            --history-file /tmp/athena-history.jsonl \
+            --out-file eval/results/dashboard.md \
+            --json-out-file eval/results/dashboard_data.json
+          python3 scripts/eval_dashboard.py \
+            --config /tmp/athena-ci.toml \
+            --repo athena \
+            --history-file /tmp/athena-history.jsonl \
+            --output-format html \
+            --out-file eval/results/dashboard.html \
+            --json-out-file eval/results/dashboard_data.json
+
       - name: Show latest eval report
         run: |
           ls -lt eval/results | head -n 5
           latest="$(ls -t eval/results/eval-*.md | head -n 1)"
           echo "Latest report: $latest"
           cat "$latest"
+          tail -n 120 eval/results/dashboard.md
+
+      - name: Upload eval dashboard artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-dashboard-smoke
+          path: |
+            eval/results/dashboard.md
+            eval/results/dashboard.html
+            eval/results/dashboard_data.json
+            eval/results/eval-*.md
+            eval/results/eval-*.json
+
+  user-flow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build athena (webhook feature)
+        run: cargo build --quiet --features webhook
+
+      - name: Validate user flow harness
+        run: python3 -m py_compile scripts/mock_linear_server.py scripts/user_flow_harness.py
+
+      - name: Run user flow harness
+        env:
+          ATHENA_DISABLE_HOME_PROFILES: "1"
+        run: |
+          python3 scripts/user_flow_harness.py --athena-bin target/debug/athena

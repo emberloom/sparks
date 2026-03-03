@@ -1,6 +1,53 @@
-# LLM provider: "ollama" (default), "openrouter", or "zen"
+# LLM provider: "openai" (default), "ollama", "openrouter", or "zen"
+# Inline secrets in config.toml are blocked by default. Use env vars, a .env file (gitignored),
+# or `athena secrets set <key>` to store credentials in the OS keyring.
+# Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
+[runtime]
+# Runtime security/deployment profile:
+# - "container_strict" (default, Docker-isolated execution)
+# - "self_dev_trusted" (trusted host execution only for allowlisted repos)
+# - "local_only" (fully local provider/integration constraints)
+profile = "container_strict"
+
 [llm]
-provider = "ollama"
+provider = "openai"
+
+# Fully local profile (copy into your active config):
+# [runtime]
+# profile = "local_only"
+# [llm]
+# provider = "ollama"
+# [ollama]
+# url = "http://127.0.0.1:11434"
+# model = "qwen2.5:7b"
+# classifier_model = "qwen2.5:3b"
+# [db]
+# path = "~/.athena/athena.db"
+# [embedding]
+# enabled = true
+# model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+# [ticket_intake]
+# enabled = false
+# sources = []
+# [ticket_intake.webhook]
+# enabled = false
+# [langfuse]
+# enabled = false
+
+# OpenAI subscription via OAuth (used by Telegram by default).
+# Run `athena openai login` to store tokens in auth_file (default: ~/.athena/openai.json).
+# [openai]
+# url = "https://chatgpt.com/backend-api/codex"
+# api_style = "responses"             # or "chat_completions"
+# model = "gpt-5.3-codex"
+# classifier_model = "gpt-5.3-codex"  # optional, defaults to model
+# auth_file = "~/.athena/openai.json"
+# redirect_uri = "http://localhost:1455/auth/callback"
+# reasoning_effort = "medium"
+# reasoning_summary = "auto"
+# include = ["reasoning.encrypted_content"]
+# temperature = 0.3
+# max_tokens = 4096
 
 [ollama]
 url = "http://localhost:11434"
@@ -9,21 +56,21 @@ classifier_model = "qwen2.5:3b"    # lighter model for routing decisions
 temperature = 0.3
 max_tokens = 4096
 
-# Uncomment to use OpenRouter (set OPENROUTER_API_KEY env or api_key below)
+# Uncomment to use OpenRouter (set OPENROUTER_API_KEY env; inline api_key is blocked by default)
 # [openrouter]
 # model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
 # url = "https://openrouter.ai/api/v1"
-# api_key = ""
+# api_key = ""  # discouraged; use OPENROUTER_API_KEY env var, .env, or `athena secrets set openrouter.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
-# Uncomment to use Opencode Zen (set OPENCODE_API_KEY env or api_key below)
+# Uncomment to use Opencode Zen (set OPENCODE_API_KEY env; inline api_key is blocked by default)
 # [zen]
 # model = "zen-v1"
 # classifier_model = "zen-v1-mini"  # optional, defaults to model
 # url = "https://opencode.ai/zen/v1"
-# api_key = ""
+# api_key = ""  # discouraged; use OPENCODE_API_KEY env var, .env, or `athena secrets set zen.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
@@ -31,20 +78,38 @@ max_tokens = 4096
 # For Rust repos, use a Rust image so cargo/rustc exist inside ghost execution env.
 # Pin images by digest for reproducibility, e.g.:
 # image = "rust@sha256:<digest>"
-image = "rust:1.84-slim"
+image = "rust:1.93"
 socket_path = "/var/run/docker.sock"
 runtime = "runc"
 memory_limit = 268435456
 cpu_quota = 50000
-timeout_secs = 120
+timeout_secs = 600
 
 [db]
 path = "~/.athena/athena.db"
 
 [manager]
 max_steps = 15
+# For runtime.profile = "self_dev_trusted", recommended:
+# max_steps = 30
 # Sensitive patterns have comprehensive defaults — uncomment to override:
 # sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+
+[manager.loop_guard]
+# Detect repeated identical tool calls and break loops early.
+enabled = true
+# Keep only this many most-recent tool call fingerprints per execution session.
+window_size = 12
+# Trigger breaker when the same fingerprint appears this many times within the window.
+repeat_threshold = 2
+
+[self_dev]
+enabled = false
+# Only used when runtime.profile = "self_dev_trusted"
+# trusted_repos = ["athena"]
+# For trusted self-dev workloads, also ensure:
+# [docker]
+# timeout_secs = 600
 
 # Athena's persona — soul file is a freeform markdown identity document
 # loaded at startup and injected as the first section of the manager's system prompt.
@@ -87,20 +152,104 @@ enabled = true
 # recency_half_life_days = 30.0
 # Cosine similarity threshold for deduplication. Memories above this are merged.
 # dedup_threshold = 0.95
+# In-process LRU capacity for hybrid retrieval results (0 disables cache).
+# retrieval_cache_capacity = 256
 
 [telegram]
-# token = "your-bot-token"   # or set ATHENA_TELEGRAM_TOKEN env var
+# token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`
+# provider = "openai"         # optional, defaults to "openai" ("ouath" alias still works)
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
 confirm_timeout_secs = 300
+# Planning interview flow
+planning_enabled = true
+planning_auto = true
+planning_timeout_secs = 900
 
 [github]
-# token = "ghp_..."  # prefer GH_TOKEN env var or a local secret manager
+# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `athena secrets set github.token`
+
+[ticket_intake]
+enabled = false
+poll_interval_secs = 300
+# When true, ticket intake tasks are auto-completed without executing a ghost (useful for CI).
+mock_dispatch = false
+
+[ticket_intake.ci_autopilot]
+# End-to-end bridge used by ticket intake and feature-contract dispatch:
+# dispatch -> PR -> CI poll -> self-heal -> auto-merge -> post-merge checks -> revert PR on failure
+enabled = true
+auto_merge = true
+heal = true
+max_heal_attempts = 2
+poll_interval_secs = 45
+timeout_secs = 1200
+
+# [[ticket_intake.sources]]
+# provider = "github"
+# repo = "myorg/myrepo"
+# filter_label = "athena"
+# token_env = "GH_TOKEN"  # or use `athena secrets set github.token`
+
+# [[ticket_intake.sources]]
+# provider = "gitlab"
+# repo = "mygroup/myproject"
+# filter_label = "athena"
+# api_base = "https://gitlab.example.com/api/v4"
+# token_env = "GITLAB_TOKEN"  # or use `athena secrets set gitlab.token`
+
+# [[ticket_intake.sources]]
+# provider = "linear"
+# repo = "ENG"
+# filter_label = "athena"
+# api_base = "https://api.linear.app/graphql"
+# token_env = "LINEAR_API_KEY"  # or use `athena secrets set linear.api_key`
+
+# [[ticket_intake.sources]]
+# provider = "jira"
+# repo = "PROJ"
+# api_base = "https://mycompany.atlassian.net"
+# filter_label = "athena"
+# token_env = "JIRA_API_TOKEN"  # or use `athena secrets set jira.api_token`
+# email_env = "JIRA_EMAIL"
+
+# [ticket_intake.webhook]
+# enabled = false
+# bind = "127.0.0.1:8765"
+# github_secret_env = "GITHUB_WEBHOOK_SECRET"
+# gitlab_secret_env = "GITLAB_WEBHOOK_TOKEN"
+# linear_secret_env = "LINEAR_WEBHOOK_SECRET"
+# jira_secret_env = "JIRA_WEBHOOK_SECRET"
+
+[prompt_scanner]
+# Input-layer scanner runs before classifier/LLM execution for chat + autonomous tasks.
+enabled = true
+# `flag_only` logs findings and continues, `block` rejects risky inputs before model execution.
+mode = "flag_only"
+flag_threshold = 4
+block_threshold = 8
+max_findings = 8
+max_log_chars = 180
+
+[prompt_scanner.allowlist]
+# Optional safety valve for known false positives.
+ticket_ids = []
+repos = []
+providers = []
+authors = []
+text_patterns = []
+# If true, allowlisted inputs are downgraded from block -> flag.
+downgrade_block_to_flag = true
+
+# [[prompt_scanner.mode_overrides]]
+# provider = "linear"
+# repo = "LNY"
+# mode = "block"
 
 # Langfuse observability - traces all LLM calls and agent activities
 # Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
 [langfuse]
 enabled = true  # set to false to disable
-# public_key = "pk-..."    # prefer LANGFUSE_PUBLIC_KEY env var or a secret manager
-# secret_key = "sk-..."    # prefer LANGFUSE_SECRET_KEY env var or a secret manager
+# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `athena secrets set langfuse.public_key`
+# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `athena secrets set langfuse.secret_key`
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud

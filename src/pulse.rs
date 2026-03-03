@@ -1,6 +1,5 @@
 use chrono::Utc;
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 use crate::core::SessionContext;
 use crate::observer::{ObserverCategory, ObserverHandle};
@@ -9,10 +8,11 @@ use crate::observer::{ObserverCategory, ObserverHandle};
 #[derive(Debug, Clone)]
 pub enum PulseSource {
     Heartbeat,
+    // Used in tests only
+    #[cfg(test)]
     CronJob(String),
     MemoryScan,
     IdleMusing,
-    MoodShift,
     ConversationReentry,
     AutonomousTask,
 }
@@ -21,10 +21,10 @@ impl PulseSource {
     pub fn label(&self) -> &str {
         match self {
             Self::Heartbeat => "heartbeat",
+            #[cfg(test)]
             Self::CronJob(id) => id.as_str(),
             Self::MemoryScan => "memory_scan",
             Self::IdleMusing => "idle_musing",
-            Self::MoodShift => "mood_shift",
             Self::ConversationReentry => "conversation_reentry",
             Self::AutonomousTask => "autonomous_task",
         }
@@ -47,6 +47,8 @@ pub enum Urgency {
 /// Where to deliver.
 #[derive(Debug, Clone)]
 pub enum PulseTarget {
+    // SessionContext is read by the telegram feature (telegram.rs)
+    #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
     Session(SessionContext),
     Broadcast,
 }
@@ -54,27 +56,23 @@ pub enum PulseTarget {
 /// A proactive message emitted by any background task.
 #[derive(Debug, Clone)]
 pub struct Pulse {
-    pub id: String,
     pub task_id: Option<String>,
     pub source: PulseSource,
     pub urgency: Urgency,
     pub content: String,
     pub ghost: Option<String>,
     pub target: PulseTarget,
-    pub timestamp: String,
 }
 
 impl Pulse {
     pub fn new(source: PulseSource, urgency: Urgency, content: String) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
             task_id: None,
             source,
             urgency,
             content,
             ghost: None,
             target: PulseTarget::Broadcast,
-            timestamp: Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
 
@@ -194,7 +192,7 @@ pub fn spawn_pulse_consumer(
             );
 
             let gate = {
-                let k = knobs.read().unwrap();
+                let k = knobs.read().unwrap_or_else(|e| e.into_inner());
                 PulseGate {
                     tolerance: k.pulse_tolerance,
                     quiet_hours: k.quiet_hours,

@@ -1,15 +1,17 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::core::{AutonomousTask, SessionContext};
 use crate::knobs::SharedKnobs;
-use crate::langfuse::{ActiveTrace, SharedLangfuse};
-use crate::llm::{LlmProvider, Message};
+use crate::kpi;
 use crate::memory::MemoryStore;
 use crate::observer::{ObserverCategory, ObserverHandle};
-use crate::pulse::{Pulse, PulseBus, PulseSource, Urgency};
+use crate::pulse::PulseTarget;
 use crate::randomness;
 
 /// How a job is scheduled.
@@ -94,6 +96,8 @@ pub struct Job {
     pub target: String,
     pub enabled: bool,
     pub next_run: Option<DateTime<Utc>>,
+    // last_run is persisted to/from DB but not used in Rust scheduling logic
+    #[allow(dead_code, reason = "retained for serde/db compatibility")]
     pub last_run: Option<DateTime<Utc>>,
 }
 
@@ -101,28 +105,22 @@ pub struct Job {
 pub struct CronEngine {
     memory: Arc<MemoryStore>,
     observer: ObserverHandle,
-    pulse_bus: PulseBus,
-    llm: Arc<dyn LlmProvider>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
     knobs: SharedKnobs,
-    langfuse: SharedLangfuse,
 }
 
 impl CronEngine {
     pub fn new(
         memory: Arc<MemoryStore>,
         observer: ObserverHandle,
-        pulse_bus: PulseBus,
-        llm: Arc<dyn LlmProvider>,
+        auto_tx: mpsc::Sender<AutonomousTask>,
         knobs: SharedKnobs,
-        langfuse: SharedLangfuse,
     ) -> Self {
         Self {
             memory,
             observer,
-            pulse_bus,
-            llm,
+            auto_tx,
             knobs,
-            langfuse,
         }
     }
 
@@ -133,6 +131,7 @@ impl CronEngine {
         schedule: Schedule,
         prompt: &str,
         ghost: Option<&str>,
+        target: &str,
     ) -> crate::error::Result<String> {
         let id = Uuid::new_v4().to_string();
         let (stype, sdata) = schedule.to_db();
@@ -144,6 +143,7 @@ impl CronEngine {
             &sdata,
             ghost,
             prompt,
+            target,
             next.as_deref(),
         )?;
         Ok(id)
@@ -168,9 +168,29 @@ impl CronEngine {
     pub fn spawn_tick_loop(self: Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {
+            let mut last_cleanup = Instant::now();
             loop {
+                if this.auto_tx.is_closed() {
+                    this.observer.log(
+                        ObserverCategory::CronTick,
+                        "Cron engine stopping: autonomous task channel closed",
+                    );
+                    break;
+                }
+
+                if last_cleanup.elapsed() >= std::time::Duration::from_secs(3600) {
+                    match this.memory.cleanup_stale_disabled_oneshots() {
+                        Ok(n) if n > 0 => this.observer.log(
+                            ObserverCategory::CronTick,
+                            format!("Cleaned up {} stale disabled oneshot job(s)", n),
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("Oneshot cleanup failed: {}", e),
+                    }
+                    last_cleanup = Instant::now();
+                }
                 let active = {
-                    let k = this.knobs.read().unwrap();
+                    let k = this.knobs.read().unwrap_or_else(|e| e.into_inner());
                     k.all_proactive && k.cron_enabled
                 };
                 if !active {
@@ -214,63 +234,72 @@ impl CronEngine {
             Schedule::Cron { .. } => "cron",
         };
 
-        let lf_trace = self.langfuse.as_ref().map(|lf| {
-            ActiveTrace::start(
-                lf.clone(),
-                &format!("cron:{}", job.name),
-                None,
-                None,
-                Some(&job.prompt),
-                vec!["scheduling", "cron", schedule_type],
-            )
-        });
-
-        let model_name = self.llm.provider_name();
-        let gen = lf_trace
-            .as_ref()
-            .map(|t| t.generation("cron_llm", model_name, Some(&job.prompt)));
-
-        let messages = vec![Message::user(&job.prompt)];
-        match self.llm.chat(&messages).await {
-            Ok(response) => {
-                let response_trimmed = response.trim().to_string();
-                if let Some(g) = gen {
-                    let preview = if response_trimmed.len() > 500 {
-                        &response_trimmed[..response_trimmed.floor_char_boundary(500)]
-                    } else {
-                        &response_trimmed
-                    };
-                    g.end(Some(preview), 0, 0);
+        let is_reentry = job.name.starts_with("reentry:");
+        if is_reentry {
+            let (all, enabled) = {
+                let k = self.knobs.read().unwrap_or_else(|e| e.into_inner());
+                (k.all_proactive, k.conversation_reentry_enabled)
+            };
+            if !all || !enabled {
+                if matches!(job.schedule, Schedule::OneShot { .. }) {
+                    let now = Utc::now().to_rfc3339();
+                    let _ = self.memory.update_job_run(&job.id, None, &now, true);
                 }
-
-                let _ = self.memory.store("cron", &response_trimmed, None);
-                let pulse = Pulse::new(
-                    PulseSource::CronJob(job.name.clone()),
-                    Urgency::Medium,
-                    response_trimmed,
+                self.observer.log(
+                    ObserverCategory::CronTick,
+                    format!("Skipped reentry job '{}' (disabled by knobs)", job.name),
                 );
-                self.pulse_bus.send(pulse);
+                return;
+            }
+        }
 
+        let lane = if is_reentry { "reentry" } else { "scheduling" };
+        let task = AutonomousTask {
+            goal: job.prompt.clone(),
+            context: format!("Scheduled job '{}' ({})", job.name, schedule_type),
+            ghost: job.ghost.clone(),
+            target: parse_pulse_target(&job.target),
+            lane: lane.to_string(),
+            risk_tier: "low".to_string(),
+            repo: kpi::default_repo_name(),
+            task_id: None,
+        };
+
+        match self.auto_tx.send(task).await {
+            Ok(_) => {
                 let next = job.schedule.next_run().map(|t| t.to_rfc3339());
                 let now = Utc::now().to_rfc3339();
                 let disable = matches!(job.schedule, Schedule::OneShot { .. });
                 let _ = self
                     .memory
                     .update_job_run(&job.id, next.as_deref(), &now, disable);
-
-                if let Some(t) = lf_trace {
-                    t.end(Some("completed"));
-                }
             }
             Err(e) => {
-                tracing::warn!("Cron job '{}' LLM call failed: {}", job.name, e);
-                if let Some(g) = gen {
-                    g.end(Some(&format!("error: {}", e)), 0, 0);
-                }
-                if let Some(t) = lf_trace {
-                    t.end(Some(&format!("error: {}", e)));
-                }
+                tracing::warn!(
+                    "Cron job '{}' enqueue failed (auto task channel closed): {}",
+                    job.name,
+                    e
+                );
             }
         }
     }
+}
+
+fn parse_pulse_target(target: &str) -> PulseTarget {
+    let trimmed = target.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("broadcast") {
+        return PulseTarget::Broadcast;
+    }
+    if let Some(rest) = trimmed.strip_prefix("session:") {
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            return PulseTarget::Session(SessionContext {
+                platform: parts[0].to_string(),
+                user_id: parts[1].to_string(),
+                chat_id: parts[2].to_string(),
+            });
+        }
+    }
+    tracing::warn!("Invalid pulse target '{}', defaulting to broadcast", target);
+    PulseTarget::Broadcast
 }

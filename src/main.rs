@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-
+mod ci_monitor;
 mod config;
 mod confirm;
 mod core;
@@ -21,15 +20,20 @@ mod manager;
 mod memory;
 mod mood;
 mod observer;
+mod openai_auth;
 mod proactive;
 mod profiles;
+mod prompt_scanner;
 mod pulse;
 mod randomness;
+mod reason_codes;
 mod scheduler;
+mod secrets;
 mod self_heal;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+mod ticket_intake;
 mod tool_usage;
 mod tools;
 
@@ -77,11 +81,46 @@ enum Commands {
     },
     /// List configured ghosts
     Ghosts,
+    /// Manage secrets stored in OS keyring
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
+    /// Authenticate with OpenAI subscription (OAuth flow)
+    #[command(alias = "ouath")]
+    Openai {
+        #[command(subcommand)]
+        action: OpenaiAction,
+    },
     /// Watch internal observer events in real time
     Observe,
+    /// Monitor CI status for a PR and optionally heal/merge
+    CiMonitor {
+        /// PR URL to monitor
+        #[arg(long)]
+        pr: String,
+        /// Optional PR branch name (auto-detected when omitted)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Auto-merge after CI passes
+        #[arg(long)]
+        auto_merge: bool,
+        /// Attempt self-heal on CI failures
+        #[arg(long)]
+        heal: bool,
+        /// Max self-heal attempts
+        #[arg(long, default_value_t = ci_monitor::CI_HEAL_MAX_ATTEMPTS)]
+        max_heal: u8,
+        /// Seconds between CI polls
+        #[arg(long, default_value_t = ci_monitor::CI_POLL_INTERVAL_SECS)]
+        poll_interval: u64,
+        /// Max total wait time in seconds
+        #[arg(long, default_value_t = ci_monitor::CI_POLL_TIMEOUT_SECS)]
+        timeout: u64,
+    },
     /// Manage scheduled jobs
     Jobs {
         #[command(subcommand)]
@@ -131,11 +170,53 @@ enum Commands {
         /// Exit non-zero on WARN as well (implies stricter CI gate)
         #[arg(long)]
         fail_on_warn: bool,
+        /// Run security attestation checks (container hardening + guard posture)
+        #[arg(long)]
+        security: bool,
+        /// Emit machine-readable JSON output (requires --security)
+        #[arg(long, requires = "security")]
+        json: bool,
     },
     /// Mission KPI tracking (status, snapshot, history)
     Kpi {
         #[command(subcommand)]
         action: KpiAction,
+    },
+    /// Render KPI + eval dashboard (markdown/html)
+    Dashboard {
+        /// Product/repo label
+        #[arg(long, default_value = "athena")]
+        repo: String,
+        /// Optional lane filter (delivery | self_improvement)
+        #[arg(long)]
+        lane: Option<String>,
+        /// Optional risk tier filter (low | medium | high)
+        #[arg(long)]
+        risk: Option<String>,
+        /// Eval history JSONL input
+        #[arg(long, default_value = "eval/results/history.jsonl")]
+        history_file: PathBuf,
+        /// Max eval history rows to render
+        #[arg(long, default_value_t = 20)]
+        history_limit: usize,
+        /// Max KPI snapshot rows to render
+        #[arg(long, default_value_t = 20)]
+        kpi_trend_limit: usize,
+        /// Token pricing mapping version
+        #[arg(long, default_value = "v1")]
+        pricing_version: String,
+        /// Max per-task token cost rows to render
+        #[arg(long, default_value_t = 20)]
+        task_cost_limit: usize,
+        /// Minimum samples for stable ghost-comparison label
+        #[arg(long, default_value_t = 3)]
+        ghost_min_samples: usize,
+        /// Dashboard output format
+        #[arg(long, value_enum, default_value_t = DashboardOutputFormat::Auto)]
+        output_format: DashboardOutputFormat,
+        /// Output file path (default depends on --output-format)
+        #[arg(long)]
+        out_file: Option<PathBuf>,
     },
     /// Execute multi-task feature contracts with DAG dependency ordering
     Feature {
@@ -147,6 +228,16 @@ enum Commands {
         #[command(subcommand)]
         action: SelfBuildAction,
     },
+}
+
+#[derive(Subcommand)]
+enum OpenaiAction {
+    /// Start OAuth login flow
+    Login,
+    /// Show current authentication status
+    Status,
+    /// Remove cached tokens
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -168,6 +259,22 @@ enum MemoryAction {
 }
 
 #[derive(Subcommand)]
+enum SecretsAction {
+    /// List known secret slots and their status
+    List,
+    /// Store a secret in the OS keyring
+    Set {
+        /// Secret key (e.g. github.token)
+        key: String,
+    },
+    /// Delete a secret from the OS keyring
+    Delete {
+        /// Secret key (e.g. github.token)
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum JobsAction {
     /// List all scheduled jobs
     List,
@@ -182,12 +289,31 @@ enum JobsAction {
         /// Cron expression (e.g., "0 0 9 * * MON-FRI *")
         #[arg(long)]
         cron: Option<String>,
+        /// Fire once at an absolute time (RFC3339) or relative duration (e.g., 2h30m)
+        #[arg(long)]
+        at: Option<String>,
         /// Prompt to send to LLM when the job fires
         #[arg(long)]
         prompt: String,
+        /// Route through a specific ghost
+        #[arg(long)]
+        ghost: Option<String>,
+        /// Delivery target (broadcast | session:<platform>:<user_id>:<chat_id>)
+        #[arg(long, default_value = "broadcast")]
+        target: String,
     },
     /// Delete a job by ID
     Delete {
+        /// Job ID (prefix match)
+        id: String,
+    },
+    /// Enable a job by ID
+    Enable {
+        /// Job ID (prefix match)
+        id: String,
+    },
+    /// Disable a job by ID
+    Disable {
         /// Job ID (prefix match)
         id: String,
     },
@@ -238,22 +364,38 @@ enum KpiAction {
 
 #[derive(Subcommand)]
 enum FeatureAction {
-    /// Validate a feature contract file (YAML or JSON)
+    /// Initialize a TOML feature contract template with sane defaults
+    Init {
+        /// Output path for generated feature contract
+        #[arg(long, default_value = "feature-contract.toml")]
+        file: PathBuf,
+        /// Feature ID to embed into the generated template
+        #[arg(long)]
+        feature_id: Option<String>,
+        /// Template shape
+        #[arg(long, default_value = "fanout-fanin", value_parser = ["linear", "fanout-fanin"])]
+        pattern: String,
+        /// Overwrite file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Validate a feature contract file (YAML, JSON, or TOML)
+    #[command(visible_alias = "lint")]
     Validate {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
     },
     /// Print execution batches and topological order from a feature contract
     Plan {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
     },
     /// Run feature-level verification checks mapped to acceptance criteria
     Verify {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Verification profile to run
         #[arg(long, default_value = "strict", value_parser = ["fast", "strict"])]
@@ -262,7 +404,7 @@ enum FeatureAction {
     /// Produce supervised promotion decision from latest dispatch/verify ledgers
     Promote {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Optional dispatch ledger JSON path (auto-detected when omitted)
         #[arg(long)]
@@ -274,7 +416,7 @@ enum FeatureAction {
     /// Dispatch feature tasks using DAG order and wait for terminal outcomes
     Dispatch {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
@@ -286,6 +428,9 @@ enum FeatureAction {
         /// Continue dispatching independent tasks after failures
         #[arg(long)]
         continue_on_failure: bool,
+        /// Revert commits from succeeded tasks when any task fails
+        #[arg(long)]
+        rollback_on_failure: bool,
         /// Resolve DAG and print execution plan without dispatching tasks
         #[arg(long)]
         dry_run: bool,
@@ -308,7 +453,7 @@ enum FeatureAction {
     /// Run dispatch + verify + promote in one command and emit consolidated gate artifact
     Gate {
         /// Path to feature contract file
-        #[arg(long)]
+        #[arg(long, alias = "contract")]
         file: PathBuf,
         /// Global wait timeout per task (seconds) when task-level wait_secs is unset
         #[arg(long, default_value_t = 180)]
@@ -377,6 +522,12 @@ enum SelfBuildAction {
         /// Base branch for PR creation/merge flow
         #[arg(long, default_value = "main")]
         base_branch: String,
+        /// Monitor CI after opening a PR
+        #[arg(long)]
+        monitor_ci: bool,
+        /// Explicitly disable CI monitoring after opening a PR
+        #[arg(long, conflicts_with = "monitor_ci")]
+        no_monitor_ci: bool,
     },
 }
 
@@ -388,13 +539,29 @@ enum SelfBuildPromoteMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum DashboardOutputFormat {
+    Auto,
+    Markdown,
+    Html,
+}
+
+fn format_epoch(epoch_secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(epoch_secs, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "athena=info"
+            .parse()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    });
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "athena=info".parse().unwrap()),
-        )
+        .with_env_filter(env_filter)
         .with_target(false)
         .with_ansi(std::io::stderr().is_terminal())
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
@@ -408,6 +575,54 @@ async fn main() -> anyhow::Result<()> {
     if matches!(cli.command, Some(Commands::Observe)) {
         return run_observe().await;
     }
+    // Handle dashboard subcommand early — it shells out to the dashboard script
+    // and does not require initializing core, DB, or LLM providers.
+    if let Some(Commands::Dashboard {
+        repo,
+        lane,
+        risk,
+        history_file,
+        history_limit,
+        kpi_trend_limit,
+        pricing_version,
+        task_cost_limit,
+        ghost_min_samples,
+        output_format,
+        out_file,
+    }) = &cli.command
+    {
+        let config_path = cli
+            .config
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("config.toml"));
+        return run_dashboard_command(
+            config_path,
+            repo.clone(),
+            lane.clone(),
+            risk.clone(),
+            history_file.clone(),
+            *history_limit,
+            *kpi_trend_limit,
+            pricing_version.clone(),
+            *task_cost_limit,
+            *ghost_min_samples,
+            *output_format,
+            out_file.clone(),
+        )
+        .await;
+    }
+
+    match dotenvy::dotenv_override() {
+        Ok(path) => eprintln!("Loaded .env from {}", path.display()),
+        Err(e) if e.not_found() => {
+            // No .env file — fine, rely on process environment
+        }
+        Err(e) => eprintln!("Warning: failed to load .env: {}", e),
+    }
+
+    if let Err(e) = secrets::load_keyring_into_env() {
+        eprintln!("Warning: failed to load keyring secrets: {}", e);
+    }
 
     let auto_approve = cli.auto_approve;
     let config = Config::load(cli.config.as_deref())?;
@@ -419,6 +634,7 @@ async fn main() -> anyhow::Result<()> {
         conn,
         config.memory.recency_half_life_days,
         config.memory.dedup_threshold,
+        config.memory.retrieval_cache_capacity,
     ));
 
     let needs_cli_embedder = matches!(cli.command, Some(Commands::Memory { .. }));
@@ -455,24 +671,22 @@ async fn main() -> anyhow::Result<()> {
                 println!("  {} — {} [{}]", g.name, g.description, g.tools.join(", "));
             }
         }
+        Some(Commands::Secrets { action }) => handle_secrets(action)?,
         #[cfg(feature = "telegram")]
         Some(Commands::Telegram) => {
+            let mut telegram_config = config.clone();
+            let telegram_provider = telegram_config
+                .telegram
+                .provider
+                .clone()
+                .unwrap_or_else(|| "openai".into());
+            telegram_config.llm.provider = telegram_provider.clone();
+            let openai_cfg = telegram_config.openai.clone().unwrap_or_default();
+
             let system_info = telegram::SystemInfo {
-                provider: config.llm.provider.clone(),
-                model: match config.llm.provider.as_str() {
-                    "openrouter" => config
-                        .openrouter
-                        .as_ref()
-                        .map(|c| c.model.clone())
-                        .unwrap_or_default(),
-                    "zen" => config
-                        .zen
-                        .as_ref()
-                        .map(|c| c.model.clone())
-                        .unwrap_or_default(),
-                    _ => config.ollama.model.clone(),
-                },
-                temperature: match config.llm.provider.as_str() {
+                provider: telegram_provider.clone(),
+                temperature: match telegram_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.temperature,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -481,7 +695,8 @@ async fn main() -> anyhow::Result<()> {
                     "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
                     _ => config.ollama.temperature,
                 },
-                max_tokens: match config.llm.provider.as_str() {
+                max_tokens: match telegram_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.max_tokens,
                     "openrouter" => config
                         .openrouter
                         .as_ref()
@@ -492,10 +707,66 @@ async fn main() -> anyhow::Result<()> {
                 },
                 started_at: tokio::time::Instant::now(),
             };
-            let handle = AthenaCore::start(config.clone(), memory).await?;
-            telegram::run_telegram(handle, config.telegram, system_info).await?;
+            let handle = AthenaCore::start(telegram_config.clone(), memory).await?;
+            telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
+        }
+        Some(Commands::Openai { action }) => {
+            let openai_config = config.openai.clone().unwrap_or_default();
+            let auth = openai_auth::OpenAiAuth::new(openai_config);
+            match action {
+                OpenaiAction::Login => {
+                    let tokens = auth.login_interactive().await?;
+                    let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
+                    let expires = format_epoch(tokens.expires_at);
+                    println!("OpenAI login complete.");
+                    println!("  Account: {}", account);
+                    println!("  Expires: {}", expires);
+                }
+                OpenaiAction::Status => match auth.load_tokens().await? {
+                    Some(tokens) => {
+                        let account = tokens.chatgpt_account_id.as_deref().unwrap_or("unknown");
+                        let expires = format_epoch(tokens.expires_at);
+                        println!("OpenAI tokens found.");
+                        println!("  Account: {}", account);
+                        println!("  Expires: {}", expires);
+                        if tokens.expired(60) {
+                            println!("  Status: expired (refresh on next use)");
+                        } else {
+                            println!("  Status: valid");
+                        }
+                    }
+                    None => {
+                        println!("No OpenAI tokens found. Run `athena openai login`.");
+                    }
+                },
+                OpenaiAction::Logout => {
+                    auth.logout().await?;
+                    println!("OpenAI tokens removed.");
+                }
+            }
         }
         Some(Commands::Observe) => unreachable!(), // handled above
+        Some(Commands::CiMonitor {
+            pr,
+            branch,
+            auto_merge,
+            heal,
+            max_heal,
+            poll_interval,
+            timeout,
+        }) => {
+            run_ci_monitor(
+                config,
+                pr,
+                branch,
+                auto_merge,
+                heal,
+                max_heal,
+                poll_interval,
+                timeout,
+            )
+            .await?
+        }
         Some(Commands::Jobs { action }) => {
             let handle = AthenaCore::start(config, memory).await?;
             handle_jobs(action, &handle)?;
@@ -522,8 +793,14 @@ async fn main() -> anyhow::Result<()> {
             skip_llm,
             ci,
             fail_on_warn,
+            security,
+            json,
         }) => {
-            let overall = doctor::run_funnel_health(&config, skip_llm).await?;
+            let overall = if security {
+                doctor::run_security_attestation(&config, json).await?
+            } else {
+                doctor::run_funnel_health(&config, skip_llm).await?
+            };
             if ci {
                 if overall == doctor::CheckStatus::Fail
                     || (fail_on_warn && overall == doctor::CheckStatus::Warn)
@@ -533,6 +810,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
+        Some(Commands::Dashboard { .. }) => unreachable!(), // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
@@ -553,6 +831,170 @@ fn validate_risk(risk: &str) -> anyhow::Result<()> {
         "low" | "medium" | "high" => Ok(()),
         _ => anyhow::bail!("Invalid risk '{}'. Use: low | medium | high", risk),
     }
+}
+
+fn dashboard_output_format_label(value: DashboardOutputFormat) -> &'static str {
+    match value {
+        DashboardOutputFormat::Auto => "auto",
+        DashboardOutputFormat::Markdown => "markdown",
+        DashboardOutputFormat::Html => "html",
+    }
+}
+
+fn default_dashboard_out_file(output_format: DashboardOutputFormat) -> PathBuf {
+    match output_format {
+        DashboardOutputFormat::Html => PathBuf::from("eval/results/dashboard.html"),
+        _ => PathBuf::from("eval/results/dashboard.md"),
+    }
+}
+
+fn build_dashboard_script_args(
+    script_path: &Path,
+    config_path: &Path,
+    repo: String,
+    lane: Option<String>,
+    risk: Option<String>,
+    history_file: &Path,
+    history_limit: usize,
+    kpi_trend_limit: usize,
+    pricing_version: String,
+    task_cost_limit: usize,
+    ghost_min_samples: usize,
+    output_format: DashboardOutputFormat,
+    out_file: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        script_path.to_string_lossy().to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().to_string(),
+        "--repo".to_string(),
+        repo,
+        "--history-file".to_string(),
+        history_file.to_string_lossy().to_string(),
+        "--history-limit".to_string(),
+        history_limit.to_string(),
+        "--kpi-trend-limit".to_string(),
+        kpi_trend_limit.to_string(),
+        "--pricing-version".to_string(),
+        pricing_version,
+        "--task-cost-limit".to_string(),
+        task_cost_limit.to_string(),
+        "--ghost-min-samples".to_string(),
+        ghost_min_samples.to_string(),
+        "--output-format".to_string(),
+        dashboard_output_format_label(output_format).to_string(),
+        "--out-file".to_string(),
+        out_file.to_string_lossy().to_string(),
+    ];
+    if let Some(lane_value) = lane {
+        args.push("--lane".to_string());
+        args.push(lane_value);
+    }
+    if let Some(risk_value) = risk {
+        args.push("--risk".to_string());
+        args.push(risk_value);
+    }
+    args
+}
+
+async fn run_dashboard_script(cwd: &Path, dashboard_args: &[String]) -> CommandRunResult {
+    let mut run = run_command_capture(cwd, "python3", dashboard_args, 300).await;
+    if run.exit_code.is_none() && !run.timed_out {
+        let stderr = command_combined_output(&run).to_lowercase();
+        if stderr.contains("no such file") || stderr.contains("not found") {
+            run = run_command_capture(cwd, "python", dashboard_args, 300).await;
+        }
+    }
+    run
+}
+
+async fn run_dashboard_command(
+    config_path: PathBuf,
+    repo: String,
+    lane: Option<String>,
+    risk: Option<String>,
+    history_file: PathBuf,
+    history_limit: usize,
+    kpi_trend_limit: usize,
+    pricing_version: String,
+    task_cost_limit: usize,
+    ghost_min_samples: usize,
+    output_format: DashboardOutputFormat,
+    out_file: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    if let Some(ref lane_value) = lane {
+        validate_lane(lane_value)?;
+    }
+    if let Some(ref risk_value) = risk {
+        validate_risk(risk_value)?;
+    }
+
+    let repo_root = resolve_repo_root().await?;
+    let script_path = repo_root.join("scripts").join("eval_dashboard.py");
+    if !script_path.exists() {
+        anyhow::bail!("dashboard script missing at {}", script_path.display());
+    }
+
+    let cwd = std::env::current_dir()?;
+    let out_file = out_file.unwrap_or_else(|| default_dashboard_out_file(output_format));
+    let dashboard_args = build_dashboard_script_args(
+        &script_path,
+        &config_path,
+        repo,
+        lane,
+        risk,
+        &history_file,
+        history_limit,
+        kpi_trend_limit,
+        pricing_version,
+        task_cost_limit,
+        ghost_min_samples,
+        output_format,
+        &out_file,
+    );
+    let run = run_dashboard_script(&cwd, &dashboard_args).await;
+    if !command_succeeded(&run) {
+        anyhow::bail!(
+            "dashboard generation failed: {}",
+            tail_text(&command_combined_output(&run), 600)
+        );
+    }
+
+    let stdout = run.stdout.trim_end();
+    if !stdout.is_empty() {
+        println!("{}", stdout);
+    }
+    let stderr = run.stderr.trim_end();
+    if !stderr.is_empty() {
+        eprintln!("{}", stderr);
+    }
+    Ok(())
+}
+
+fn handle_secrets(action: SecretsAction) -> anyhow::Result<()> {
+    match action {
+        SecretsAction::List => {
+            let mut report = secrets::keyring_report();
+            report.statuses.sort_by(|a, b| a.key.cmp(b.key));
+            for status in report.statuses {
+                let env = if status.in_env { "set" } else { "unset" };
+                let keyring = if status.in_keyring { "set" } else { "unset" };
+                println!("{:<24} env={} keyring={}", status.key, env, keyring);
+            }
+            if let Some(err) = report.error {
+                println!("keyring_error={}", err);
+            }
+        }
+        SecretsAction::Set { key } => {
+            secrets::set_secret(&key)?;
+            println!("secret_saved={}", key);
+        }
+        SecretsAction::Delete { key } => {
+            secrets::delete_secret(&key)?;
+            println!("secret_deleted={}", key);
+        }
+    }
+    Ok(())
 }
 
 async fn handle_kpi(action: KpiAction, config: &Config) -> anyhow::Result<()> {
@@ -735,6 +1177,7 @@ struct SelfBuildLedger {
     review_checklist: SelfBuildReviewChecklist,
     promotion: SelfBuildPromotionDecision,
     promotion_execution: SelfBuildPromotionExecution,
+    ci_monitor: Option<ci_monitor::CiMonitorReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -763,6 +1206,23 @@ fn self_build_promote_mode_label(mode: SelfBuildPromoteMode) -> &'static str {
         SelfBuildPromoteMode::Pr => "pr",
         SelfBuildPromoteMode::Auto => "auto",
     }
+}
+
+fn resolve_self_build_ci_monitor(
+    promote_mode: SelfBuildPromoteMode,
+    monitor_ci: bool,
+    no_monitor_ci: bool,
+) -> (bool, &'static str) {
+    if monitor_ci {
+        return (true, "explicit_on");
+    }
+    if no_monitor_ci {
+        return (false, "explicit_off");
+    }
+    if promote_mode == SelfBuildPromoteMode::Auto {
+        return (true, "auto_default");
+    }
+    (false, "default_off")
 }
 
 fn self_build_promotion_branch(run_id: &str) -> String {
@@ -820,6 +1280,92 @@ fn self_build_pr_body(run_id: &str, risk: &str, ticket: &str) -> String {
 fn parse_pr_url(text: &str) -> Option<String> {
     let re = regex::Regex::new(r"https://github\.com/[^\s]+/pull/\d+").ok()?;
     re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn select_self_build_dispatch_ghost(config: &Config) -> anyhow::Result<String> {
+    if config.ghosts.is_empty() {
+        anyhow::bail!(
+            "No ghosts configured. Add at least one [[ghosts]] entry or use defaults that include 'coder'."
+        );
+    }
+    if let Some(coder) = config.ghosts.iter().find(|g| g.name == "coder") {
+        return Ok(coder.name.clone());
+    }
+    if let Some(code_ghost) = config.ghosts.iter().find(|g| g.strategy == "code") {
+        return Ok(code_ghost.name.clone());
+    }
+    if let Some(writer) = config.ghosts.iter().find(|g| ghost_has_write_tool(g)) {
+        return Ok(writer.name.clone());
+    }
+    Ok(config.ghosts[0].name.clone())
+}
+
+fn ghost_has_write_tool(ghost: &config::GhostConfig) -> bool {
+    ghost
+        .tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), "file_write" | "file_edit"))
+}
+
+fn pr_view_reports_merged(raw_json: &str) -> bool {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_json);
+    let Ok(value) = parsed else {
+        return false;
+    };
+    value
+        .get("mergedAt")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn format_ci_monitor_status(report: &ci_monitor::CiMonitorReport) -> String {
+    let mut ci_status = report.final_status.clone();
+    if report.post_merge_status != "not_merged" && report.post_merge_status != "not_checked" {
+        ci_status = format!("{} / {}", report.final_status, report.post_merge_status);
+    }
+    if let Some(url) = report.revert_pr_url.as_deref() {
+        ci_status.push_str(&format!(" (revert_pr={})", url));
+    }
+    ci_status
+}
+
+fn ci_monitor_report_green(report: &ci_monitor::CiMonitorReport) -> bool {
+    let final_ok = matches!(report.final_status.as_str(), "ci_passed" | "heal_succeeded");
+    let post_merge_ok = matches!(
+        report.post_merge_status.as_str(),
+        "not_merged" | "not_checked" | "post_merge_passed"
+    );
+    final_ok && post_merge_ok
+}
+
+async fn run_feature_dispatch_ci_monitor(
+    config: &Config,
+    repo_root: &Path,
+    pr_url: &str,
+) -> anyhow::Result<(String, bool, PathBuf)> {
+    let autopilot = &config.ticket_intake.ci_autopilot;
+    let max_heal_attempts = if autopilot.heal {
+        autopilot.max_heal_attempts
+    } else {
+        0
+    };
+    let report = ci_monitor::monitor_pr_ci(
+        pr_url,
+        None,
+        repo_root,
+        config,
+        autopilot.auto_merge,
+        autopilot.heal,
+        autopilot.poll_interval_secs.max(5),
+        autopilot.timeout_secs.max(30),
+        max_heal_attempts,
+    )
+    .await;
+    let status = format_ci_monitor_status(&report);
+    let green = ci_monitor_report_green(&report);
+    let artifact = write_ci_monitor_artifact(repo_root, &report)?;
+    Ok((status, green, artifact))
 }
 
 fn build_promotion_command(name: &str, run: CommandRunResult) -> SelfBuildPromotionCommand {
@@ -1207,9 +1753,15 @@ async fn resolve_repo_root() -> anyhow::Result<PathBuf> {
 }
 
 fn parse_dispatch_task_id(text: &str) -> Option<String> {
-    let re = regex::Regex::new(r"task_id=([0-9a-fA-F-]{36})").ok()?;
-    re.captures(text)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+    let re = regex::Regex::new(
+        r"task_id=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    )
+    .ok()?;
+    let match_id = re
+        .captures_iter(text)
+        .next()
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
+    match_id
 }
 
 fn parse_git_status_paths(status_out: &str) -> Vec<String> {
@@ -1415,11 +1967,23 @@ fn evaluate_self_build_guardrails(
         .join("\n");
     let secret_assignment = regex::Regex::new(
         r#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"'\n]{8,}["']"#,
-    )
-    .unwrap();
-    let token_like =
-        regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#).unwrap();
-    if secret_assignment.is_match(&added_lines) || token_like.is_match(&added_lines) {
+    );
+    let token_like = regex::Regex::new(r#"(?i)\b(?:ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"#);
+    let secret_assignment_match = match secret_assignment {
+        Ok(re) => re.is_match(&added_lines),
+        Err(e) => {
+            tracing::error!("Self-build guardrail regex compile failed: {}", e);
+            true
+        }
+    };
+    let token_like_match = match token_like {
+        Ok(re) => re.is_match(&added_lines),
+        Err(e) => {
+            tracing::error!("Self-build token regex compile failed: {}", e);
+            true
+        }
+    };
+    if secret_assignment_match || token_like_match {
         details.push(guardrail_violation(
             "secret_like_diff",
             "detected secret-like material in added diff lines",
@@ -1701,7 +2265,7 @@ async fn execute_self_build_promotion(
         &[
             "pr".to_string(),
             "merge".to_string(),
-            pr_target,
+            pr_target.clone(),
             "--squash".to_string(),
             "--delete-branch".to_string(),
         ],
@@ -1715,10 +2279,42 @@ async fn execute_self_build_promotion(
         execution.status = "merged".to_string();
         execution.merged = true;
     } else {
-        execution.reasons.push(format!(
-            "auto-merge failed; leaving PR open: {}",
-            tail_text(&command_combined_output(&merge_run), 260)
+        let merge_output = command_combined_output(&merge_run);
+        let merge_info_run = run_command_capture(
+            worktree,
+            "gh",
+            &[
+                "pr".to_string(),
+                "view".to_string(),
+                pr_target,
+                "--json".to_string(),
+                "number,mergedAt,baseRefName,mergeCommit".to_string(),
+            ],
+            120,
+        )
+        .await;
+        execution.commands.push(build_promotion_command(
+            "gh_pr_view_merge_info",
+            merge_info_run.clone(),
         ));
+        let merge_info_raw = if !merge_info_run.stdout.trim().is_empty() {
+            merge_info_run.stdout.clone()
+        } else {
+            command_combined_output(&merge_info_run)
+        };
+        if command_succeeded(&merge_info_run) && pr_view_reports_merged(&merge_info_raw) {
+            execution.status = "merged".to_string();
+            execution.merged = true;
+            execution.reasons.push(format!(
+                "auto-merge completed but gh returned non-zero (likely local cleanup): {}",
+                tail_text(&merge_output, 260)
+            ));
+        } else {
+            execution.reasons.push(format!(
+                "auto-merge failed; leaving PR open: {}",
+                tail_text(&merge_output, 260)
+            ));
+        }
     }
 
     execution
@@ -1747,8 +2343,7 @@ fn write_self_build_artifacts(
     Ok((json_path, md_path))
 }
 
-fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
-    let mut out = String::new();
+fn render_self_build_md_header(out: &mut String, ledger: &SelfBuildLedger) {
     out.push_str("# Self-Build Run Ledger\n\n");
     out.push_str(&format!("- run_id: `{}`\n", ledger.run_id));
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
@@ -1783,29 +2378,30 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         out.push_str(&format!("- cleanup_error: {}\n", err));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_dispatch(out: &mut String, dispatch: &SelfBuildDispatchSummary) {
     out.push_str("## Dispatch\n\n");
-    out.push_str(&format!("- status: `{}`\n", ledger.dispatch.status));
-    out.push_str(&format!("- command: `{}`\n", ledger.dispatch.command));
+    out.push_str(&format!("- status: `{}`\n", dispatch.status));
+    out.push_str(&format!("- command: `{}`\n", dispatch.command));
     out.push_str(&format!(
         "- exit_code: `{}` timed_out: `{}` duration_ms: `{}`\n",
-        ledger
-            .dispatch
+        dispatch
             .exit_code
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        ledger.dispatch.timed_out,
-        ledger.dispatch.duration_ms
+        dispatch.timed_out,
+        dispatch.duration_ms
     ));
     out.push_str(&format!(
         "- attempts: `{}` noop_retry_used: `{}`\n",
-        ledger.dispatch.attempts, ledger.dispatch.noop_retry_used
+        dispatch.attempts, dispatch.noop_retry_used
     ));
     out.push_str(&format!(
         "- task_id: `{}`\n",
-        ledger.dispatch.task_id.as_deref().unwrap_or("-")
+        dispatch.task_id.as_deref().unwrap_or("-")
     ));
-    if let Some(outcome) = &ledger.dispatch.outcome {
+    if let Some(outcome) = &dispatch.outcome {
         out.push_str(&format!(
             "- outcome_status: `{}` error: `{}` verify: `{}/{}` rolled_back: `{}`\n",
             outcome.status.as_deref().unwrap_or("-"),
@@ -1816,11 +2412,13 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         ));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_maintenance(out: &mut String, maintenance: &[SelfBuildMaintenanceStep]) {
     out.push_str("## Maintenance\n\n");
     out.push_str("| step | status | exit_code | timed_out | duration_ms |\n");
     out.push_str("|---|---|---|---|---|\n");
-    for m in &ledger.maintenance {
+    for m in maintenance {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             m.name,
@@ -1833,35 +2431,39 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         ));
     }
     out.push('\n');
+}
 
+fn render_self_build_md_guardrails(out: &mut String, guardrails: &SelfBuildGuardrailReport) {
     out.push_str("## Guardrails\n\n");
-    out.push_str(&format!("- passed: `{}`\n", ledger.guardrails.passed));
+    out.push_str(&format!("- passed: `{}`\n", guardrails.passed));
     out.push_str(&format!(
         "- hard_blocked: `{}` codes: `{}`\n",
-        ledger.guardrails.hard_blocked,
-        if ledger.guardrails.hard_block_codes.is_empty() {
+        guardrails.hard_blocked,
+        if guardrails.hard_block_codes.is_empty() {
             "-".to_string()
         } else {
-            ledger.guardrails.hard_block_codes.join(",")
+            guardrails.hard_block_codes.join(",")
         }
     ));
-    if !ledger.guardrails.details.is_empty() {
+    if !guardrails.details.is_empty() {
         out.push_str("- details:\n");
-        for d in &ledger.guardrails.details {
+        for d in &guardrails.details {
             out.push_str(&format!(
                 "  - code={} hard_block={} message={}\n",
                 d.code, d.hard_block, d.message
             ));
         }
     }
-    if !ledger.guardrails.violations.is_empty() {
+    if !guardrails.violations.is_empty() {
         out.push_str("- violations:\n");
-        for v in &ledger.guardrails.violations {
+        for v in &guardrails.violations {
             out.push_str(&format!("  - {}\n", v));
         }
     }
     out.push('\n');
+}
 
+fn render_self_build_md_review(out: &mut String, ledger: &SelfBuildLedger) {
     out.push_str("## Critic\n\n");
     out.push_str(&format!("- score: `{:.2}`\n", ledger.critic.score));
     out.push_str(&format!("- passed: `{}`\n", ledger.critic.passed));
@@ -1910,32 +2512,32 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         }
     }
     out.push('\n');
+}
 
+fn render_self_build_md_promotion_exec(out: &mut String, exec: &SelfBuildPromotionExecution) {
     out.push_str("## Promotion Execution\n\n");
     out.push_str(&format!(
         "- mode: `{}` status: `{}` merged: `{}`\n",
-        ledger.promotion_execution.mode,
-        ledger.promotion_execution.status,
-        ledger.promotion_execution.merged
+        exec.mode, exec.status, exec.merged
     ));
-    if let Some(branch) = &ledger.promotion_execution.branch {
+    if let Some(branch) = &exec.branch {
         out.push_str(&format!("- branch: `{}`\n", branch));
     }
-    if let Some(commit) = &ledger.promotion_execution.commit {
+    if let Some(commit) = &exec.commit {
         out.push_str(&format!("- commit: `{}`\n", commit));
     }
-    if let Some(pr) = &ledger.promotion_execution.pr_url {
+    if let Some(pr) = &exec.pr_url {
         out.push_str(&format!("- pr_url: `{}`\n", pr));
     }
-    if !ledger.promotion_execution.reasons.is_empty() {
+    if !exec.reasons.is_empty() {
         out.push_str("- reasons:\n");
-        for r in &ledger.promotion_execution.reasons {
+        for r in &exec.reasons {
             out.push_str(&format!("  - {}\n", r));
         }
     }
-    if !ledger.promotion_execution.commands.is_empty() {
+    if !exec.commands.is_empty() {
         out.push_str("- commands:\n");
-        for c in &ledger.promotion_execution.commands {
+        for c in &exec.commands {
             out.push_str(&format!(
                 "  - {} status={} exit={} timed_out={} duration_ms={}\n",
                 c.name,
@@ -1949,23 +2551,91 @@ fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
         }
     }
     out.push('\n');
+}
 
-    out.push_str("## Diff Summary\n\n");
+fn render_self_build_md_ci_monitor(out: &mut String, monitor: &ci_monitor::CiMonitorReport) {
+    out.push_str("## CI Monitor\n\n");
+    out.push_str(&format!("- pr_url: `{}`\n", monitor.pr_url));
+    if let Some(branch) = &monitor.branch {
+        out.push_str(&format!("- branch: `{}`\n", branch));
+    }
     out.push_str(&format!(
-        "- changed_files: `{}`\n",
-        ledger.changed_files.len()
+        "- final_status: `{}` merged_after_ci: `{}`\n",
+        monitor.final_status, monitor.merged_after_ci
     ));
-    if !ledger.changed_files.is_empty() {
-        for p in &ledger.changed_files {
+    out.push_str(&format!(
+        "- post_merge_status: `{}`\n",
+        monitor.post_merge_status
+    ));
+    if let Some(url) = &monitor.revert_pr_url {
+        out.push_str(&format!("- revert_pr_url: `{}`\n", url));
+    }
+    out.push_str(&format!(
+        "- started_utc: `{}` finished_utc: `{}`\n",
+        monitor.started_utc, monitor.finished_utc
+    ));
+    out.push_str(&format!(
+        "- polls: `{}` heal_attempts: `{}`\n",
+        monitor.polls.len(),
+        monitor.heal_attempts.len()
+    ));
+    if let Some(last) = monitor.polls.last() {
+        out.push_str(&format!(
+            "- last_overall: `{}` at `{}`\n",
+            last.overall, last.timestamp_utc
+        ));
+        if !last.checks.is_empty() {
+            out.push_str("- last_checks:\n");
+            for c in &last.checks {
+                out.push_str(&format!(
+                    "  - {} status={} conclusion={}\n",
+                    c.name, c.status, c.conclusion
+                ));
+            }
+        }
+    }
+    if !monitor.heal_attempts.is_empty() {
+        out.push_str("- heal_attempts:\n");
+        for h in &monitor.heal_attempts {
+            out.push_str(&format!(
+                "  - attempt={} status={} commit={}\n",
+                h.attempt,
+                h.dispatch_status,
+                h.commit_sha.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    out.push('\n');
+}
+
+fn render_self_build_md_diff(out: &mut String, changed_files: &[String], diff_numstat: &[String]) {
+    out.push_str("## Diff Summary\n\n");
+    out.push_str(&format!("- changed_files: `{}`\n", changed_files.len()));
+    if !changed_files.is_empty() {
+        for p in changed_files {
             out.push_str(&format!("  - `{}`\n", p));
         }
     }
-    if !ledger.diff_numstat.is_empty() {
+    if !diff_numstat.is_empty() {
         out.push_str("- numstat:\n");
-        for line in &ledger.diff_numstat {
+        for line in diff_numstat {
             out.push_str(&format!("  - `{}`\n", line));
         }
     }
+}
+
+fn render_self_build_markdown(ledger: &SelfBuildLedger) -> String {
+    let mut out = String::new();
+    render_self_build_md_header(&mut out, ledger);
+    render_self_build_md_dispatch(&mut out, &ledger.dispatch);
+    render_self_build_md_maintenance(&mut out, &ledger.maintenance);
+    render_self_build_md_guardrails(&mut out, &ledger.guardrails);
+    render_self_build_md_review(&mut out, ledger);
+    render_self_build_md_promotion_exec(&mut out, &ledger.promotion_execution);
+    if let Some(ci) = &ledger.ci_monitor {
+        render_self_build_md_ci_monitor(&mut out, ci);
+    }
+    render_self_build_md_diff(&mut out, &ledger.changed_files, &ledger.diff_numstat);
     out
 }
 
@@ -1987,6 +2657,8 @@ async fn handle_self_build(
             allow_auto_promote,
             promote_mode,
             base_branch,
+            monitor_ci,
+            no_monitor_ci,
         } => {
             run_self_build(
                 config,
@@ -2002,13 +2674,198 @@ async fn handle_self_build(
                 allow_auto_promote,
                 promote_mode,
                 base_branch,
+                monitor_ci,
+                no_monitor_ci,
             )
             .await
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+async fn run_ci_monitor(
+    config: Config,
+    pr: String,
+    branch: Option<String>,
+    auto_merge: bool,
+    heal: bool,
+    max_heal: u8,
+    poll_interval: u64,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let base_repo = resolve_repo_root().await?;
+    let report = ci_monitor::monitor_pr_ci(
+        &pr,
+        branch.as_deref(),
+        &base_repo,
+        &config,
+        auto_merge,
+        heal,
+        poll_interval,
+        timeout,
+        max_heal,
+    )
+    .await;
+    let json_path = write_ci_monitor_artifact(&base_repo, &report)?;
+    println!("ci_monitor_report={}", json_path.display());
+    println!("ci_monitor_status={}", report.final_status);
+    println!("ci_monitor_merged={}", report.merged_after_ci);
+    println!("ci_monitor_post_merge_status={}", report.post_merge_status);
+    if let Some(url) = &report.revert_pr_url {
+        println!("ci_monitor_revert_pr_url={}", url);
+    }
+    println!("ci_monitor_polls={}", report.polls.len());
+    println!("ci_monitor_heal_attempts={}", report.heal_attempts.len());
+    Ok(())
+}
+
+fn write_ci_monitor_artifact(
+    base_repo: &Path,
+    report: &ci_monitor::CiMonitorReport,
+) -> anyhow::Result<PathBuf> {
+    let out_dir = base_repo.join("eval").join("results");
+    std::fs::create_dir_all(&out_dir)?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let safe_label = sanitize_ci_monitor_label(&report.pr_url, 40);
+    let base = format!("ci-monitor-{}-{}", stamp, safe_label);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let latest_json = out_dir.join("ci-monitor-latest.json");
+    std::fs::write(&json_path, serde_json::to_string_pretty(report)?)?;
+    let _ = std::fs::copy(&json_path, &latest_json);
+    Ok(json_path)
+}
+
+fn sanitize_ci_monitor_label(input: &str, max_len: usize) -> String {
+    let mut out = input
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        out = "pr".to_string();
+    }
+    if out.chars().count() > max_len {
+        out = out.chars().take(max_len).collect();
+    }
+    out
+}
+
+fn resolve_dispatch_status(
+    run: &CommandRunResult,
+    outcome: Option<&SelfBuildOutcomeRecord>,
+) -> String {
+    if run.timed_out {
+        "timeout".to_string()
+    } else if let Some(status) = outcome.and_then(|o| o.status.clone()) {
+        status
+    } else if run.exit_code == Some(0) {
+        "contract_error".to_string()
+    } else {
+        "failed".to_string()
+    }
+}
+
+async fn collect_worktree_changed_files(worktree: &Path) -> Vec<String> {
+    let status_run =
+        run_command_capture(worktree, "git", &args(&["status", "--porcelain"]), 60).await;
+    if command_succeeded(&status_run) {
+        parse_git_status_paths(&status_run.stdout)
+    } else {
+        Vec::new()
+    }
+}
+
+async fn collect_self_build_git_artifacts(worktree: &Path) -> (String, Vec<String>, String) {
+    let diff_run = run_command_capture(worktree, "git", &args(&["diff", "--no-color"]), 120).await;
+    let diff_text = command_combined_output(&diff_run);
+    let numstat_run = run_command_capture(worktree, "git", &args(&["diff", "--numstat"]), 60).await;
+    let diff_numstat = if command_succeeded(&numstat_run) {
+        numstat_run
+            .stdout
+            .lines()
+            .take(100)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let branch_run =
+        run_command_capture(worktree, "git", &args(&["branch", "--show-current"]), 30).await;
+    let branch_name = if command_succeeded(&branch_run) {
+        branch_run.stdout.trim().to_string()
+    } else {
+        String::new()
+    };
+    (diff_text, diff_numstat, branch_name)
+}
+
+async fn run_self_build_maintenance(
+    worktree: &Path,
+    profile: &str,
+) -> Vec<SelfBuildMaintenanceStep> {
+    let specs = maintenance_command_specs(profile);
+    let mut rows = Vec::new();
+    for spec in specs {
+        let run = run_command_capture(worktree, spec.program, &spec.args, spec.timeout_secs).await;
+        let status = if run.timed_out {
+            "timeout"
+        } else if run.exit_code == Some(0) {
+            "passed"
+        } else {
+            "failed"
+        };
+        rows.push(SelfBuildMaintenanceStep {
+            name: spec.name.to_string(),
+            command: run.command,
+            exit_code: run.exit_code,
+            timed_out: run.timed_out,
+            duration_ms: run.duration_ms,
+            status: status.to_string(),
+            stdout_tail: tail_text(&run.stdout, 900),
+            stderr_tail: tail_text(&run.stderr, 900),
+        });
+    }
+    rows
+}
+
+fn print_self_build_summary(
+    ledger: &SelfBuildLedger,
+    json_path: &Path,
+    md_path: &Path,
+    review_json_path: &Path,
+    review_md_path: &Path,
+) {
+    println!("self_build_json={}", json_path.display());
+    println!("self_build_md={}", md_path.display());
+    println!("self_build_review_json={}", review_json_path.display());
+    println!("self_build_review_md={}", review_md_path.display());
+    println!("self_build_run_id={}", ledger.run_id);
+    println!(
+        "self_build_auto_promote_recommended={}",
+        ledger.promotion.auto_promote_recommended
+    );
+    println!("self_build_guardrails_passed={}", ledger.guardrails.passed);
+    println!("self_build_critic_score={:.2}", ledger.critic.score);
+    println!(
+        "self_build_promotion_status={}",
+        ledger.promotion_execution.status
+    );
+    if let Some(url) = &ledger.promotion_execution.pr_url {
+        println!("self_build_pr_url={}", url);
+    }
+    if let Some(ci) = &ledger.ci_monitor {
+        println!("self_build_ci_monitor_status={}", ci.final_status);
+        println!("self_build_ci_monitor_merged={}", ci.merged_after_ci);
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "signature kept explicit for orchestration wiring"
+)]
 async fn run_self_build(
     config: Config,
     memory: Arc<MemoryStore>,
@@ -2023,6 +2880,8 @@ async fn run_self_build(
     allow_auto_promote: bool,
     promote_mode: SelfBuildPromoteMode,
     base_branch: String,
+    monitor_ci: bool,
+    no_monitor_ci: bool,
 ) -> anyhow::Result<()> {
     validate_risk(&risk)?;
     let timestamp_utc = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
@@ -2039,6 +2898,7 @@ async fn run_self_build(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let self_build_ghost = select_self_build_dispatch_ghost(&config)?;
     let exe = std::env::current_exe()?;
     let exe_s = exe.to_string_lossy().to_string();
     let mut dispatch_context = format!(
@@ -2059,7 +2919,7 @@ async fn run_self_build(
             "--context".to_string(),
             ctx,
             "--ghost".to_string(),
-            "coder".to_string(),
+            self_build_ghost.clone(),
             "--auto-store".to_string(),
             "self_build_run".to_string(),
             "--wait-secs".to_string(),
@@ -2099,24 +2959,10 @@ async fn run_self_build(
     } else {
         None
     };
-    let mut dispatch_status = if dispatch_run.timed_out {
-        "timeout".to_string()
-    } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
-        status
-    } else if dispatch_run.exit_code == Some(0) {
-        "contract_error".to_string()
-    } else {
-        "failed".to_string()
-    };
+    let mut dispatch_status = resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
     let mut dispatch_attempts = 1u8;
     let mut noop_retry_used = false;
-    let mut status_run =
-        run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
-    let mut changed_files = if command_succeeded(&status_run) {
-        parse_git_status_paths(&status_run.stdout)
-    } else {
-        Vec::new()
-    };
+    let mut changed_files = collect_worktree_changed_files(&worktree).await;
     if dispatch_status == "succeeded"
         && dispatch_run.exit_code == Some(0)
         && changed_files.is_empty()
@@ -2139,22 +2985,8 @@ async fn run_self_build(
         } else {
             None
         };
-        dispatch_status = if dispatch_run.timed_out {
-            "timeout".to_string()
-        } else if let Some(status) = dispatch_outcome.as_ref().and_then(|o| o.status.clone()) {
-            status
-        } else if dispatch_run.exit_code == Some(0) {
-            "contract_error".to_string()
-        } else {
-            "failed".to_string()
-        };
-        status_run =
-            run_command_capture(&worktree, "git", &args(&["status", "--porcelain"]), 60).await;
-        changed_files = if command_succeeded(&status_run) {
-            parse_git_status_paths(&status_run.stdout)
-        } else {
-            Vec::new()
-        };
+        dispatch_status = resolve_dispatch_status(&dispatch_run, dispatch_outcome.as_ref());
+        changed_files = collect_worktree_changed_files(&worktree).await;
     }
     let dispatch_summary = SelfBuildDispatchSummary {
         command: dispatch_run.command.clone(),
@@ -2170,52 +3002,8 @@ async fn run_self_build(
         stderr_tail: tail_text(&dispatch_run.stderr, 1200),
     };
 
-    let diff_run = run_command_capture(&worktree, "git", &args(&["diff", "--no-color"]), 120).await;
-    let diff_text = command_combined_output(&diff_run);
-    let numstat_run =
-        run_command_capture(&worktree, "git", &args(&["diff", "--numstat"]), 60).await;
-    let diff_numstat = if command_succeeded(&numstat_run) {
-        numstat_run
-            .stdout
-            .lines()
-            .take(100)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let branch_run =
-        run_command_capture(&worktree, "git", &args(&["branch", "--show-current"]), 30).await;
-    let branch_name = if command_succeeded(&branch_run) {
-        branch_run.stdout.trim().to_string()
-    } else {
-        String::new()
-    };
-
-    let specs = maintenance_command_specs(&maintenance_profile);
-    let mut maintenance_rows = Vec::new();
-    for spec in specs {
-        let run = run_command_capture(&worktree, spec.program, &spec.args, spec.timeout_secs).await;
-        let status = if run.timed_out {
-            "timeout"
-        } else if run.exit_code == Some(0) {
-            "passed"
-        } else {
-            "failed"
-        };
-        maintenance_rows.push(SelfBuildMaintenanceStep {
-            name: spec.name.to_string(),
-            command: run.command,
-            exit_code: run.exit_code,
-            timed_out: run.timed_out,
-            duration_ms: run.duration_ms,
-            status: status.to_string(),
-            stdout_tail: tail_text(&run.stdout, 900),
-            stderr_tail: tail_text(&run.stderr, 900),
-        });
-    }
+    let (diff_text, diff_numstat, branch_name) = collect_self_build_git_artifacts(&worktree).await;
+    let maintenance_rows = run_self_build_maintenance(&worktree, &maintenance_profile).await;
 
     let guardrails =
         evaluate_self_build_guardrails(&changed_files, &diff_text, &dispatch_output, &branch_name);
@@ -2266,6 +3054,37 @@ async fn run_self_build(
     )
     .await;
 
+    let (monitor_ci_enabled, monitor_ci_source) =
+        resolve_self_build_ci_monitor(promote_mode, monitor_ci, no_monitor_ci);
+    if monitor_ci_source == "auto_default" {
+        println!("auto-enabling CI monitor for promote_mode=auto");
+    }
+
+    let ci_monitor = if monitor_ci_enabled
+        && (promotion_execution.status == "pr_opened" || promotion_execution.status == "merged")
+    {
+        if let Some(pr_url) = promotion_execution.pr_url.as_deref() {
+            Some(
+                ci_monitor::monitor_pr_ci(
+                    pr_url,
+                    promotion_execution.branch.as_deref(),
+                    &base_repo,
+                    &config,
+                    promote_mode == SelfBuildPromoteMode::Auto,
+                    true,
+                    ci_monitor::CI_POLL_INTERVAL_SECS,
+                    ci_monitor::CI_POLL_TIMEOUT_SECS,
+                    ci_monitor::CI_HEAL_MAX_ATTEMPTS,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mut cleanup_error = None;
     if !keep_worktree {
         cleanup_error = remove_self_build_worktree(&base_repo, &worktree).await;
@@ -2298,27 +3117,17 @@ async fn run_self_build(
         review_checklist,
         promotion,
         promotion_execution,
+        ci_monitor,
     };
 
     let (json_path, md_path) = write_self_build_artifacts(&base_repo, &ledger)?;
-    println!("self_build_json={}", json_path.display());
-    println!("self_build_md={}", md_path.display());
-    println!("self_build_review_json={}", review_json_path.display());
-    println!("self_build_review_md={}", review_md_path.display());
-    println!("self_build_run_id={}", ledger.run_id);
-    println!(
-        "self_build_auto_promote_recommended={}",
-        ledger.promotion.auto_promote_recommended
+    print_self_build_summary(
+        &ledger,
+        &json_path,
+        &md_path,
+        &review_json_path,
+        &review_md_path,
     );
-    println!("self_build_guardrails_passed={}", ledger.guardrails.passed);
-    println!("self_build_critic_score={:.2}", ledger.critic.score);
-    println!(
-        "self_build_promotion_status={}",
-        ledger.promotion_execution.status
-    );
-    if let Some(url) = &ledger.promotion_execution.pr_url {
-        println!("self_build_pr_url={}", url);
-    }
 
     let memory_category = if ledger.critic.passed {
         "self_build_run"
@@ -2365,6 +3174,7 @@ enum FeatureRunStatus {
     Succeeded,
     Failed(String),
     Skipped(String),
+    Blocked(String),
 }
 
 impl FeatureRunStatus {
@@ -2373,12 +3183,13 @@ impl FeatureRunStatus {
             Self::Succeeded => "succeeded",
             Self::Failed(_) => "failed",
             Self::Skipped(_) => "skipped",
+            Self::Blocked(_) => "blocked",
         }
     }
 
     fn reason(&self) -> Option<&str> {
         match self {
-            Self::Failed(r) | Self::Skipped(r) => Some(r),
+            Self::Failed(r) | Self::Skipped(r) | Self::Blocked(r) => Some(r),
             Self::Succeeded => None,
         }
     }
@@ -2387,9 +3198,19 @@ impl FeatureRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeatureTaskLedgerRow {
     task_id: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
     dispatch_task_id: Option<String>,
+    #[serde(default)]
+    ci_monitor_status: Option<String>,
     status: String,
     reason: Option<String>,
+    #[serde(default)]
+    dependency_blockers: Vec<String>,
+    #[serde(default)]
+    attempts: usize,
+    #[serde(default)]
+    retries: usize,
     mapped_acceptance: Vec<String>,
 }
 
@@ -2409,7 +3230,16 @@ struct FeatureRunLedger {
     contract_path: String,
     tasks: Vec<FeatureTaskLedgerRow>,
     acceptance: Vec<FeatureAcceptanceLedgerRow>,
+    #[serde(default)]
+    rollback_commits: Vec<FeatureRollbackLedgerRow>,
     summary: FeatureRunSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureRollbackLedgerRow {
+    commit_sha: String,
+    reverted: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2417,6 +3247,8 @@ struct FeatureRunSummary {
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    #[serde(default)]
+    blocked: usize,
     acceptance_covered: bool,
     acceptance_satisfied: bool,
     promotable: bool,
@@ -2479,6 +3311,7 @@ struct FeatureDispatchOptions {
     wait_secs: u64,
     outcome_grace_secs: Option<u64>,
     continue_on_failure: bool,
+    rollback_on_failure: bool,
     cli_tool: Option<String>,
     cli_model: Option<String>,
     lane: Option<String>,
@@ -2502,6 +3335,8 @@ struct FeatureTaskDispatchOutcome {
     task_id: String,
     dispatch_task_id: String,
     status: FeatureRunStatus,
+    result_summary: Option<String>,
+    pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2541,12 +3376,115 @@ struct FeatureGateLedger {
     reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportTaskRow {
+    task_id: String,
+    status: String,
+    reason: Option<String>,
+    #[serde(default)]
+    ci_monitor_status: Option<String>,
+    depends_on: Vec<String>,
+    dependency_blockers: Vec<String>,
+    attempts: usize,
+    retries: usize,
+    mapped_acceptance: Vec<String>,
+    mapped_checks: Vec<String>,
+    passed_checks: Vec<String>,
+    failed_checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportAcceptanceRow {
+    acceptance_id: String,
+    task_ids: Vec<String>,
+    succeeded_tasks: Vec<String>,
+    verification_checks: Vec<String>,
+    passed_checks: Vec<String>,
+    satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractReportSummary {
+    total_tasks: usize,
+    succeeded: usize,
+    failed: usize,
+    blocked: usize,
+    skipped: usize,
+    verification_checks_total: usize,
+    verification_checks_failed: usize,
+    verification_required_failed: usize,
+    acceptance_satisfied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FeatureContractRunReport {
+    timestamp_utc: String,
+    feature_id: String,
+    contract_path: String,
+    overall_status: String,
+    verify_profile: Option<String>,
+    summary: FeatureContractReportSummary,
+    tasks: Vec<FeatureContractReportTaskRow>,
+    acceptance: Vec<FeatureContractReportAcceptanceRow>,
+}
+
 async fn handle_feature(
     action: FeatureAction,
     config: Config,
     memory: Arc<MemoryStore>,
 ) -> anyhow::Result<()> {
     match action {
+        FeatureAction::Init {
+            file,
+            feature_id,
+            pattern,
+            force,
+        } => {
+            let existed_before = file.exists();
+            let inferred_feature_id = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("my-feature-id")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>();
+            let feature_id = feature_id
+                .as_deref()
+                .unwrap_or(&inferred_feature_id)
+                .trim()
+                .to_string();
+            if existed_before && !force {
+                anyhow::bail!(
+                    "Refusing to overwrite existing file '{}'. Re-run with --force to overwrite.",
+                    file.display()
+                );
+            }
+            if let Some(parent) = file.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let template =
+                feature_contract::render_feature_contract_template_toml(&feature_id, &pattern)?;
+            std::fs::write(&file, template)?;
+            println!("feature_contract_template={}", file.display());
+            println!(
+                "feature_id={} format=toml pattern={} overwritten={}",
+                feature_id,
+                pattern,
+                existed_before && force
+            );
+            println!(
+                "next_steps=\"athena feature validate --file {}\"",
+                file.display()
+            );
+        }
         FeatureAction::Validate { file } => {
             let contract = feature_contract::load_feature_contract(&file)?;
             let batches = contract.execution_batches()?;
@@ -2653,6 +3591,7 @@ async fn handle_feature(
             wait_secs,
             outcome_grace_secs,
             continue_on_failure,
+            rollback_on_failure,
             dry_run,
             cli_tool,
             cli_model,
@@ -2680,6 +3619,7 @@ async fn handle_feature(
                     wait_secs,
                     outcome_grace_secs,
                     continue_on_failure,
+                    rollback_on_failure,
                     cli_tool,
                     cli_model,
                     lane,
@@ -2691,11 +3631,16 @@ async fn handle_feature(
             let ledger = &dispatch.ledger;
             println!("feature_ledger_json={}", dispatch.ledger_json.display());
             println!("feature_ledger_md={}", dispatch.ledger_md.display());
+            let report = build_feature_contract_run_report(&contract, &file, ledger, None);
+            let (report_json, report_md) = write_feature_contract_report_artifacts(&report)?;
+            println!("feature_contract_report_json={}", report_json.display());
+            println!("feature_contract_report_md={}", report_md.display());
             println!(
-                "feature_id={} summary succeeded={} failed={} skipped={} promotable={}",
+                "feature_id={} summary succeeded={} failed={} blocked={} skipped={} promotable={}",
                 contract.feature_id,
                 ledger.summary.succeeded,
                 ledger.summary.failed,
+                ledger.summary.blocked,
                 ledger.summary.skipped,
                 ledger.summary.promotable
             );
@@ -2703,6 +3648,18 @@ async fn handle_feature(
                 println!(
                     "feature_promotion_reasons={}",
                     ledger.summary.promotion_reasons.join(" | ")
+                );
+            }
+            if !ledger.rollback_commits.is_empty() {
+                let rollback_failed = ledger
+                    .rollback_commits
+                    .iter()
+                    .filter(|row| !row.reverted)
+                    .count();
+                println!(
+                    "feature_rollback_commits={} feature_rollback_failed={}",
+                    ledger.rollback_commits.len(),
+                    rollback_failed
                 );
             }
             if dispatch.aborted_on_failure {
@@ -2751,6 +3708,7 @@ async fn handle_feature(
                     wait_secs,
                     outcome_grace_secs,
                     continue_on_failure,
+                    rollback_on_failure: false,
                     cli_tool,
                     cli_model,
                     lane,
@@ -2797,6 +3755,15 @@ async fn handle_feature(
             let (gate_json, gate_md) = write_feature_gate_artifacts(&gate)?;
             println!("feature_gate_json={}", gate_json.display());
             println!("feature_gate_md={}", gate_md.display());
+            let report = build_feature_contract_run_report(
+                &contract,
+                &file,
+                &dispatch.ledger,
+                Some(&verify),
+            );
+            let (report_json, report_md) = write_feature_contract_report_artifacts(&report)?;
+            println!("feature_contract_report_json={}", report_json.display());
+            println!("feature_contract_report_md={}", report_md.display());
             println!(
                 "feature_id={} gate_ok={} auto_promotable={} approval_required={} verify_profile={}",
                 contract.feature_id,
@@ -2832,12 +3799,51 @@ fn verify_check_in_profile(check: &feature_contract::VerificationCheck, profile:
     }
 }
 
-fn feature_batch_max_parallelism() -> usize {
-    std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
+fn feature_batch_configured_parallelism_from_raw(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 4))
         .unwrap_or(2)
+}
+
+fn feature_batch_configured_parallelism() -> usize {
+    feature_batch_configured_parallelism_from_raw(
+        std::env::var("ATHENA_FEATURE_BATCH_CONCURRENCY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn feature_batch_dynamic_parallelism(
+    configured: usize,
+    metrics: Option<&crate::introspect::SystemMetrics>,
+) -> (usize, String) {
+    let configured = configured.clamp(1, 4);
+    let Some(metrics) = metrics else {
+        return (configured, "metrics_unavailable".to_string());
+    };
+
+    if metrics.active_containers > 4 {
+        return (
+            1,
+            format!("active_containers={} > 4", metrics.active_containers),
+        );
+    }
+
+    if metrics.total_memory_bytes == 0 || metrics.rss_bytes == 0 {
+        return (configured, "rss_unavailable".to_string());
+    }
+
+    let rss_pct = (metrics.rss_bytes as f64 / metrics.total_memory_bytes as f64) * 100.0;
+    if rss_pct > 80.0 {
+        return (1, format!("rss_pct={:.1} > 80", rss_pct));
+    }
+    if rss_pct > 60.0 {
+        return (
+            configured.min(2),
+            format!("rss_pct={:.1} > 60 -> min(2, configured)", rss_pct),
+        );
+    }
+    (configured, format!("rss_pct={:.1} <= 60", rss_pct))
 }
 
 fn latest_eval_gate_status(
@@ -2937,6 +3943,14 @@ async fn run_feature_task_dispatch(
     );
     let wait =
         wait_for_autonomous_pulse(&mut pulse_rx, &task_dispatch_id, runnable.wait_secs).await;
+    let (result_summary, pr_url) = match &wait {
+        WaitForAutonomousOutcome::Received(content) => {
+            (clip_feature_result_summary(content), parse_pr_url(content))
+        }
+        WaitForAutonomousOutcome::TimedOut | WaitForAutonomousOutcome::ChannelClosed => {
+            (None, None)
+        }
+    };
     let status = resolve_feature_run_status_after_wait(
         &config,
         &task_dispatch_id,
@@ -2949,6 +3963,8 @@ async fn run_feature_task_dispatch(
         task_id: runnable.task.id,
         dispatch_task_id: task_dispatch_id,
         status,
+        result_summary,
+        pr_url,
     })
 }
 
@@ -2984,16 +4000,66 @@ async fn run_feature_dispatch_flow(
 
     let batches = contract.execution_batches()?;
     println!(
-        "feature_id={} mode=dispatch batches={} continue_on_failure={}",
+        "feature_id={} mode=dispatch batches={} continue_on_failure={} rollback_on_failure={}",
         contract.feature_id,
         batches.len(),
-        opts.continue_on_failure
+        opts.continue_on_failure,
+        opts.rollback_on_failure
+    );
+    let configured_parallelism = feature_batch_configured_parallelism();
+    let metrics_snapshot = handle.metrics.read().ok().map(|m| m.clone());
+    let (dispatch_parallelism, parallelism_reason) =
+        feature_batch_dynamic_parallelism(configured_parallelism, metrics_snapshot.as_ref());
+    let metrics_for_log = metrics_snapshot.unwrap_or_default();
+    let rss_pct = if metrics_for_log.total_memory_bytes > 0 && metrics_for_log.rss_bytes > 0 {
+        Some((metrics_for_log.rss_bytes as f64 / metrics_for_log.total_memory_bytes as f64) * 100.0)
+    } else {
+        None
+    };
+    println!(
+        "feature_id={} batch concurrency={} (dynamic) configured={} reason={} rss_bytes={} total_memory_bytes={} rss_pct={} active_containers={}",
+        contract.feature_id,
+        dispatch_parallelism,
+        configured_parallelism,
+        parallelism_reason,
+        metrics_for_log.rss_bytes,
+        metrics_for_log.total_memory_bytes,
+        rss_pct
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_else(|| "-".to_string()),
+        metrics_for_log.active_containers
     );
 
     let mut statuses: std::collections::HashMap<String, FeatureRunStatus> =
         std::collections::HashMap::new();
+    let rollback_commit_tag = opts
+        .rollback_on_failure
+        .then(|| format!("athena-feature-run:{}", uuid::Uuid::new_v4()));
+    let rollback_repo_root = if opts.rollback_on_failure {
+        let repo_root = resolve_repo_root().await?;
+        ensure_clean_working_tree(&repo_root).await?;
+        Some(repo_root)
+    } else {
+        None
+    };
+    let mut rollback_last_head = if let Some(repo_root) = rollback_repo_root.as_ref() {
+        current_git_head(repo_root).await?
+    } else {
+        None
+    };
+    let mut rollback_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rollback_tracked_commits: Vec<String> = Vec::new();
+    let mut predecessor_summaries: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut dispatch_ids: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut ci_monitor_statuses: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut ci_monitor_by_pr: std::collections::HashMap<String, (String, bool)> =
+        std::collections::HashMap::new();
+    let mut dependency_blockers: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut attempts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let default_lane = opts
         .lane
         .clone()
@@ -3020,13 +4086,15 @@ async fn run_feature_dispatch_flow(
             let task = contract
                 .task_by_id(task_id)
                 .ok_or_else(|| anyhow::anyhow!("Task '{}' missing from contract", task_id))?;
-            if let Some(reason) = blocked_dependency_reason(task, &statuses) {
+            if let Some(blockers) = blocked_dependency_blockers(task, &statuses) {
+                let reason = blockers.join("; ");
                 println!(
-                    "task={} result=skipped reason={}",
+                    "task={} result=blocked reason={}",
                     task.id,
                     reason.replace('\n', " ")
                 );
-                statuses.insert(task.id.clone(), FeatureRunStatus::Skipped(reason));
+                dependency_blockers.insert(task.id.clone(), blockers);
+                statuses.insert(task.id.clone(), FeatureRunStatus::Blocked(reason));
                 continue;
             }
 
@@ -3043,6 +4111,10 @@ async fn run_feature_dispatch_flow(
                 task_wait,
                 opts.outcome_grace_secs,
             );
+            let mut context = build_feature_task_context(contract, task, &predecessor_summaries);
+            if let Some(tag) = rollback_commit_tag.as_deref() {
+                context = append_feature_rollback_commit_policy_context(context, tag);
+            }
             runnable.push(FeatureRunnableTask {
                 task: task.clone(),
                 lane,
@@ -3050,14 +4122,14 @@ async fn run_feature_dispatch_flow(
                 repo,
                 wait_secs: task_wait,
                 outcome_grace_secs: task_grace,
-                context: build_feature_task_context(contract, task),
+                context,
             });
         }
         if runnable.is_empty() {
             continue;
         }
 
-        let max_parallel = std::cmp::min(feature_batch_max_parallelism(), runnable.len()).max(1);
+        let max_parallel = std::cmp::min(dispatch_parallelism, runnable.len()).max(1);
         println!(
             "batch={} runnable={} max_parallel={}",
             idx + 1,
@@ -3079,8 +4151,73 @@ async fn run_feature_dispatch_flow(
 
         let mut stop_spawning = false;
         while let Some(joined) = set.join_next().await {
-            let outcome =
+            let mut outcome =
                 joined.map_err(|e| anyhow::anyhow!("feature task worker join failed: {}", e))??;
+            if matches!(outcome.status, FeatureRunStatus::Succeeded) {
+                if let Some(pr_url) = outcome.pr_url.clone() {
+                    let ci_enabled = config.ticket_intake.ci_autopilot.enabled;
+                    let (ci_status, ci_green) = if ci_enabled {
+                        if let Some(existing) = ci_monitor_by_pr.get(&pr_url).cloned() {
+                            existing
+                        } else {
+                            let monitor_outcome = match resolve_repo_root().await {
+                                Ok(repo_root) => {
+                                    match run_feature_dispatch_ci_monitor(
+                                        &config, &repo_root, &pr_url,
+                                    )
+                                    .await
+                                    {
+                                        Ok((status, green, artifact)) => {
+                                            println!(
+                                                "task={} ci_monitor_status={} ci_monitor_artifact={}",
+                                                outcome.task_id,
+                                                status,
+                                                artifact.display()
+                                            );
+                                            (status, green)
+                                        }
+                                        Err(e) => (
+                                            format!(
+                                                "ci_monitor_error:{}",
+                                                trim_for_single_line(&e.to_string(), 180)
+                                            ),
+                                            false,
+                                        ),
+                                    }
+                                }
+                                Err(e) => (
+                                    format!(
+                                        "ci_monitor_error:{}",
+                                        trim_for_single_line(&e.to_string(), 180)
+                                    ),
+                                    false,
+                                ),
+                            };
+                            ci_monitor_by_pr.insert(pr_url.clone(), monitor_outcome.clone());
+                            monitor_outcome
+                        }
+                    } else {
+                        ("ci_monitor_disabled".to_string(), true)
+                    };
+                    ci_monitor_statuses.insert(outcome.task_id.clone(), ci_status.clone());
+                    if !ci_green {
+                        println!(
+                            "task={} ci_monitor_status={} (non_green)",
+                            outcome.task_id, ci_status
+                        );
+                    }
+                    if let Some(summary) = outcome.result_summary.as_mut() {
+                        summary.push_str(&format!(" [ci_monitor_status:{}]", ci_status));
+                    }
+                    if !ci_green {
+                        outcome.status = FeatureRunStatus::Failed(format!(
+                            "ci autopilot non-green status ({})",
+                            ci_status
+                        ));
+                    }
+                }
+            }
+            *attempts.entry(outcome.task_id.clone()).or_insert(0) += 1;
             match &outcome.status {
                 FeatureRunStatus::Succeeded => {
                     println!("task={} result=succeeded", outcome.task_id)
@@ -3095,8 +4232,35 @@ async fn run_feature_dispatch_flow(
                     outcome.task_id,
                     reason.replace('\n', " ")
                 ),
+                FeatureRunStatus::Blocked(reason) => println!(
+                    "task={} result=blocked reason={}",
+                    outcome.task_id,
+                    reason.replace('\n', " ")
+                ),
             }
             let failed = matches!(outcome.status, FeatureRunStatus::Failed(_));
+            if matches!(outcome.status, FeatureRunStatus::Succeeded) {
+                if let Some(summary) = outcome.result_summary.clone() {
+                    predecessor_summaries.insert(outcome.task_id.clone(), summary);
+                }
+                if let Some(repo_root) = rollback_repo_root.as_ref() {
+                    let new_commits = track_feature_commits_since(
+                        repo_root,
+                        &mut rollback_last_head,
+                        &mut rollback_seen,
+                        rollback_commit_tag.as_deref(),
+                    )
+                    .await?;
+                    if !new_commits.is_empty() {
+                        println!(
+                            "task={} tracked_new_commits={}",
+                            outcome.task_id,
+                            new_commits.join(",")
+                        );
+                        rollback_tracked_commits.extend(new_commits);
+                    }
+                }
+            }
             dispatch_ids.insert(outcome.task_id.clone(), outcome.dispatch_task_id);
             statuses.insert(outcome.task_id.clone(), outcome.status);
             if failed && !opts.continue_on_failure {
@@ -3121,23 +4285,47 @@ async fn run_feature_dispatch_flow(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
-    for status in statuses.values() {
-        match status {
-            FeatureRunStatus::Succeeded => succeeded += 1,
-            FeatureRunStatus::Failed(_) => failed += 1,
-            FeatureRunStatus::Skipped(_) => skipped += 1,
+    let mut blocked = 0usize;
+    for task in contract.tasks.iter().filter(|t| t.enabled) {
+        match statuses.get(&task.id) {
+            Some(FeatureRunStatus::Succeeded) => succeeded += 1,
+            Some(FeatureRunStatus::Failed(_)) => failed += 1,
+            Some(FeatureRunStatus::Skipped(_)) => skipped += 1,
+            Some(FeatureRunStatus::Blocked(_)) => blocked += 1,
+            None => skipped += 1,
         }
     }
 
-    let ledger = build_feature_run_ledger(
+    let rollback_commits = if failed > 0 && opts.rollback_on_failure {
+        if let Some(repo_root) = rollback_repo_root.as_ref() {
+            println!(
+                "feature_id={} rollback_on_failure=true failed_tasks={} tracked_commits={}",
+                contract.feature_id,
+                failed,
+                rollback_tracked_commits.len()
+            );
+            rollback_feature_commits(repo_root, &rollback_tracked_commits).await
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut ledger = build_feature_run_ledger(
         contract,
         contract_path,
         &statuses,
         &dispatch_ids,
+        &ci_monitor_statuses,
+        &dependency_blockers,
+        &attempts,
         succeeded,
         failed,
         skipped,
+        blocked,
     );
+    ledger.rollback_commits = rollback_commits;
     let (ledger_json, ledger_md) = write_feature_ledger_artifacts(&ledger)?;
     Ok(FeatureDispatchRunArtifacts {
         ledger,
@@ -3147,10 +4335,10 @@ async fn run_feature_dispatch_flow(
     })
 }
 
-fn blocked_dependency_reason(
+fn blocked_dependency_blockers(
     task: &feature_contract::FeatureTask,
     statuses: &std::collections::HashMap<String, FeatureRunStatus>,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let mut blockers = Vec::new();
     for dep in &task.depends_on {
         match statuses.get(dep) {
@@ -3161,13 +4349,16 @@ fn blocked_dependency_reason(
             Some(FeatureRunStatus::Skipped(reason)) => {
                 blockers.push(format!("dependency '{}' skipped ({})", dep, reason));
             }
+            Some(FeatureRunStatus::Blocked(reason)) => {
+                blockers.push(format!("dependency '{}' blocked ({})", dep, reason));
+            }
             None => blockers.push(format!("dependency '{}' has no result", dep)),
         }
     }
     if blockers.is_empty() {
         None
     } else {
-        Some(blockers.join("; "))
+        Some(blockers)
     }
 }
 
@@ -3216,9 +4407,24 @@ fn compute_feature_outcome_grace_secs(
     base.max(wait_scaled).clamp(60, 1800)
 }
 
+fn clip_feature_result_summary(summary: &str) -> Option<String> {
+    let mut normalized = String::with_capacity(summary.len());
+    for token in summary.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(token);
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(500).collect())
+}
+
 fn build_feature_task_context(
     contract: &feature_contract::FeatureContract,
     task: &feature_contract::FeatureTask,
+    predecessor_summaries: &std::collections::HashMap<String, String>,
 ) -> String {
     let mut context = task.context.clone().unwrap_or_default();
     if !context.is_empty() {
@@ -3249,7 +4455,184 @@ fn build_feature_task_context(
     if let Some(model) = task.cli_model.as_deref() {
         context.push_str(&format!("\n[cli_model:{}]", model));
     }
+    let mut predecessor_lines = Vec::new();
+    for dep in &task.depends_on {
+        if let Some(summary) = predecessor_summaries
+            .get(dep)
+            .and_then(|summary| clip_feature_result_summary(summary))
+        {
+            predecessor_lines.push(format!("- {}: {}", dep, summary));
+        }
+    }
+    if !predecessor_lines.is_empty() {
+        context.push_str("\nPrevious task results:");
+        for line in predecessor_lines {
+            context.push('\n');
+            context.push_str(&line);
+        }
+    }
     context
+}
+
+fn append_feature_rollback_commit_policy_context(mut context: String, commit_tag: &str) -> String {
+    context.push_str(&format!("\n[feature_rollback_commit_tag:{}]", commit_tag));
+    context.push_str(
+        "\nIf you create git commits for this feature task, include the rollback tag in the commit message.",
+    );
+    context
+}
+
+async fn ensure_clean_working_tree(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let status = run_command_capture(repo_root, "git", &args(&["status", "--porcelain"]), 30).await;
+    if !command_succeeded(&status) {
+        anyhow::bail!(
+            "rollback-on-failure precheck failed: could not read git status ({})",
+            tail_text(&command_combined_output(&status), 300)
+        );
+    }
+    let dirty = status
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string());
+    if let Some(first) = dirty {
+        anyhow::bail!(
+            "rollback-on-failure requires a clean working tree; found local changes (first entry: '{}')",
+            first
+        );
+    }
+    Ok(())
+}
+
+async fn current_git_head(repo_root: &std::path::Path) -> anyhow::Result<Option<String>> {
+    let rev = run_command_capture(repo_root, "git", &args(&["rev-parse", "HEAD"]), 30).await;
+    if !command_succeeded(&rev) {
+        return Ok(None);
+    }
+    let sha = rev.stdout.trim();
+    if sha.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(sha.to_string()))
+    }
+}
+
+async fn track_feature_commits_since(
+    repo_root: &std::path::Path,
+    last_head: &mut Option<String>,
+    seen: &mut std::collections::HashSet<String>,
+    commit_tag: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(current_head) = current_git_head(repo_root).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(previous_head) = last_head.clone() else {
+        *last_head = Some(current_head);
+        return Ok(Vec::new());
+    };
+    if previous_head == current_head {
+        return Ok(Vec::new());
+    }
+    let list = run_command_capture(
+        repo_root,
+        "git",
+        &args(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..{}", previous_head, current_head),
+        ]),
+        30,
+    )
+    .await;
+    *last_head = Some(current_head);
+    if !command_succeeded(&list) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for line in list.stdout.lines() {
+        let sha = line.trim();
+        if sha.is_empty() {
+            continue;
+        }
+        if let Some(tag) = commit_tag {
+            if !commit_message_contains_tag(repo_root, sha, tag).await? {
+                continue;
+            }
+        }
+        if seen.insert(sha.to_string()) {
+            out.push(sha.to_string());
+        }
+    }
+    Ok(out)
+}
+
+async fn commit_message_contains_tag(
+    repo_root: &std::path::Path,
+    sha: &str,
+    tag: &str,
+) -> anyhow::Result<bool> {
+    let show = run_command_capture(
+        repo_root,
+        "git",
+        &args(&["show", "-s", "--format=%B", sha]),
+        30,
+    )
+    .await;
+    if !command_succeeded(&show) {
+        return Ok(false);
+    }
+    Ok(show.stdout.contains(tag))
+}
+
+async fn abort_git_revert_if_needed(repo_root: &std::path::Path) -> Option<String> {
+    let abort = run_command_capture(repo_root, "git", &args(&["revert", "--abort"]), 30).await;
+    if command_succeeded(&abort) {
+        return None;
+    }
+    let output = command_combined_output(&abort);
+    let lowered = output.to_ascii_lowercase();
+    if lowered.contains("no cherry-pick or revert in progress")
+        || lowered.contains("there is no merge to abort")
+    {
+        return None;
+    }
+    Some(tail_text(&output, 300))
+}
+
+async fn rollback_feature_commits(
+    repo_root: &std::path::Path,
+    commit_shas: &[String],
+) -> Vec<FeatureRollbackLedgerRow> {
+    let mut rows = Vec::new();
+    for sha in commit_shas.iter().rev() {
+        let revert =
+            run_command_capture(repo_root, "git", &args(&["revert", "--no-edit", sha]), 180).await;
+        if command_succeeded(&revert) {
+            println!("feature_rollback commit={} status=reverted", sha);
+            rows.push(FeatureRollbackLedgerRow {
+                commit_sha: sha.clone(),
+                reverted: true,
+                error: None,
+            });
+        } else {
+            let mut error = tail_text(&command_combined_output(&revert), 400);
+            if let Some(abort_error) = abort_git_revert_if_needed(repo_root).await {
+                error.push_str(&format!(" | revert_abort_failed: {}", abort_error));
+            }
+            println!(
+                "feature_rollback commit={} status=failed reason={}",
+                sha,
+                error.replace('\n', " ")
+            );
+            rows.push(FeatureRollbackLedgerRow {
+                commit_sha: sha.clone(),
+                reverted: false,
+                error: Some(error),
+            });
+        }
+    }
+    rows
 }
 
 fn print_feature_plan(contract: &feature_contract::FeatureContract) -> anyhow::Result<()> {
@@ -3334,9 +4717,13 @@ fn build_feature_run_ledger(
     contract_path: &std::path::Path,
     statuses: &std::collections::HashMap<String, FeatureRunStatus>,
     dispatch_ids: &std::collections::HashMap<String, String>,
+    ci_monitor_statuses: &std::collections::HashMap<String, String>,
+    dependency_blockers: &std::collections::HashMap<String, Vec<String>>,
+    attempts: &std::collections::HashMap<String, usize>,
     succeeded: usize,
     failed: usize,
     skipped: usize,
+    blocked: usize,
 ) -> FeatureRunLedger {
     let coverage = contract.acceptance_coverage();
     let mut acceptance_rows = Vec::new();
@@ -3363,38 +4750,16 @@ fn build_feature_run_ledger(
             satisfied,
         });
     }
-    let mut promotion_reasons = Vec::new();
-    if failed > 0 {
-        promotion_reasons.push(format!("{} task(s) failed", failed));
-    }
-    if skipped > 0 {
-        promotion_reasons.push(format!("{} task(s) skipped", skipped));
-    }
-    if !all_covered {
-        promotion_reasons.push("some acceptance criteria have no task coverage".to_string());
-    }
-    if !all_satisfied {
-        promotion_reasons
-            .push("some acceptance criteria have no succeeded mapped task".to_string());
-    }
-
-    let tasks = contract
-        .tasks
-        .iter()
-        .filter(|t| t.enabled)
-        .map(|t| {
-            let status = statuses.get(&t.id).cloned().unwrap_or_else(|| {
-                FeatureRunStatus::Skipped("not_run_due_to_early_stop".to_string())
-            });
-            FeatureTaskLedgerRow {
-                task_id: t.id.clone(),
-                dispatch_task_id: dispatch_ids.get(&t.id).cloned(),
-                status: status.label().to_string(),
-                reason: status.reason().map(|s| s.to_string()),
-                mapped_acceptance: t.mapped_acceptance.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
+    let promotion_reasons =
+        feature_dispatch_promotion_reasons(failed, skipped, blocked, all_covered, all_satisfied);
+    let tasks = build_feature_task_rows(
+        contract,
+        statuses,
+        dispatch_ids,
+        ci_monitor_statuses,
+        dependency_blockers,
+        attempts,
+    );
 
     FeatureRunLedger {
         timestamp_utc: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
@@ -3402,16 +4767,77 @@ fn build_feature_run_ledger(
         contract_path: contract_path.display().to_string(),
         tasks,
         acceptance: acceptance_rows,
+        rollback_commits: Vec::new(),
         summary: FeatureRunSummary {
             succeeded,
             failed,
             skipped,
+            blocked,
             acceptance_covered: all_covered,
             acceptance_satisfied: all_satisfied,
-            promotable: failed == 0 && skipped == 0 && all_satisfied,
+            promotable: failed == 0 && skipped == 0 && blocked == 0 && all_satisfied,
             promotion_reasons,
         },
     }
+}
+
+fn build_feature_task_rows(
+    contract: &feature_contract::FeatureContract,
+    statuses: &std::collections::HashMap<String, FeatureRunStatus>,
+    dispatch_ids: &std::collections::HashMap<String, String>,
+    ci_monitor_statuses: &std::collections::HashMap<String, String>,
+    dependency_blockers: &std::collections::HashMap<String, Vec<String>>,
+    attempts: &std::collections::HashMap<String, usize>,
+) -> Vec<FeatureTaskLedgerRow> {
+    contract
+        .tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| {
+            let status = statuses.get(&t.id).cloned().unwrap_or_else(|| {
+                FeatureRunStatus::Skipped("not_run_due_to_early_stop".to_string())
+            });
+            let attempt_count = attempts.get(&t.id).copied().unwrap_or_default();
+            FeatureTaskLedgerRow {
+                task_id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                dispatch_task_id: dispatch_ids.get(&t.id).cloned(),
+                ci_monitor_status: ci_monitor_statuses.get(&t.id).cloned(),
+                status: status.label().to_string(),
+                reason: status.reason().map(|s| s.to_string()),
+                dependency_blockers: dependency_blockers.get(&t.id).cloned().unwrap_or_default(),
+                attempts: attempt_count,
+                retries: attempt_count.saturating_sub(1),
+                mapped_acceptance: t.mapped_acceptance.clone(),
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn feature_dispatch_promotion_reasons(
+    failed: usize,
+    skipped: usize,
+    blocked: usize,
+    all_covered: bool,
+    all_satisfied: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if failed > 0 {
+        reasons.push(format!("{} task(s) failed", failed));
+    }
+    if blocked > 0 {
+        reasons.push(format!("{} task(s) blocked by dependencies", blocked));
+    }
+    if skipped > 0 {
+        reasons.push(format!("{} task(s) skipped", skipped));
+    }
+    if !all_covered {
+        reasons.push("some acceptance criteria have no task coverage".to_string());
+    }
+    if !all_satisfied {
+        reasons.push("some acceptance criteria have no succeeded mapped task".to_string());
+    }
+    reasons
 }
 
 fn write_feature_ledger_artifacts(
@@ -3439,9 +4865,10 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
     out.push_str(&format!("- timestamp_utc: `{}`\n", ledger.timestamp_utc));
     out.push_str(&format!("- contract: `{}`\n", ledger.contract_path));
     out.push_str(&format!(
-        "- summary: succeeded={} failed={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n",
+        "- summary: succeeded={} failed={} blocked={} skipped={} acceptance_covered={} acceptance_satisfied={} promotable={}\n",
         ledger.summary.succeeded,
         ledger.summary.failed,
+        ledger.summary.blocked,
         ledger.summary.skipped,
         ledger.summary.acceptance_covered,
         ledger.summary.acceptance_satisfied,
@@ -3453,50 +4880,90 @@ fn render_feature_ledger_markdown(ledger: &FeatureRunLedger) -> String {
             ledger.summary.promotion_reasons.join(" | ")
         ));
     }
-    out.push('\n');
-
-    out.push_str("## Tasks\n\n");
-    out.push_str("| task_id | dispatch_task_id | status | reason | mapped_acceptance |\n");
-    out.push_str("|---|---|---|---|---|\n");
-    for row in &ledger.tasks {
+    if !ledger.rollback_commits.is_empty() {
+        let rollback_failed = ledger
+            .rollback_commits
+            .iter()
+            .filter(|row| !row.reverted)
+            .count();
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "- rollback_commits: total={} failed={}\n",
+            ledger.rollback_commits.len(),
+            rollback_failed
+        ));
+    }
+    out.push('\n');
+    append_feature_ledger_tasks(&mut out, &ledger.tasks);
+    append_feature_ledger_acceptance(&mut out, &ledger.acceptance);
+    append_feature_ledger_rollbacks(&mut out, &ledger.rollback_commits);
+    out
+}
+
+fn append_feature_ledger_tasks(out: &mut String, rows: &[FeatureTaskLedgerRow]) {
+    out.push_str("## Tasks\n\n");
+    out.push_str(
+        "| task_id | dispatch_task_id | ci_monitor_status | status | attempts | retries | blockers | reason | mapped_acceptance |\n",
+    );
+    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.task_id,
             row.dispatch_task_id
                 .clone()
                 .unwrap_or_else(|| "-".to_string()),
+            row.ci_monitor_status
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
             row.status,
+            row.attempts,
+            row.retries,
+            list_or_dash(&row.dependency_blockers, " ; "),
             row.reason.clone().unwrap_or_else(|| "-".to_string()),
-            if row.mapped_acceptance.is_empty() {
-                "-".to_string()
-            } else {
-                row.mapped_acceptance.join(",")
-            }
+            list_or_dash(&row.mapped_acceptance, ",")
         ));
     }
+}
 
+fn append_feature_ledger_acceptance(out: &mut String, rows: &[FeatureAcceptanceLedgerRow]) {
     out.push_str("\n## Acceptance\n\n");
     out.push_str("| acceptance_id | covered_by_tasks | succeeded_tasks | covered | satisfied |\n");
     out.push_str("|---|---|---|---|---|\n");
-    for row in &ledger.acceptance {
+    for row in rows {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             row.acceptance_id,
-            if row.covered_by_tasks.is_empty() {
-                "-".to_string()
-            } else {
-                row.covered_by_tasks.join(",")
-            },
-            if row.succeeded_tasks.is_empty() {
-                "-".to_string()
-            } else {
-                row.succeeded_tasks.join(",")
-            },
+            list_or_dash(&row.covered_by_tasks, ","),
+            list_or_dash(&row.succeeded_tasks, ","),
             row.covered,
             row.satisfied
         ));
     }
-    out
+}
+
+fn append_feature_ledger_rollbacks(out: &mut String, rows: &[FeatureRollbackLedgerRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    out.push_str("\n## Rollback Commits\n\n");
+    out.push_str("| commit_sha | reverted | error |\n");
+    out.push_str("|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            row.commit_sha,
+            row.reverted,
+            row.error.clone().unwrap_or_else(|| "-".to_string())
+        ));
+    }
+}
+
+fn list_or_dash(values: &[String], separator: &str) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(separator)
+    }
 }
 
 fn run_feature_verify(
@@ -3530,8 +4997,8 @@ fn run_feature_verify(
     }
 
     for check in selected_checks {
-        let output = std::process::Command::new("zsh")
-            .arg("-lc")
+        let output = std::process::Command::new("sh")
+            .arg("-c")
             .arg(&check.command)
             .output();
         let (status, exit_code, stdout_tail, stderr_tail) = match output {
@@ -3726,13 +5193,14 @@ fn render_feature_verify_markdown(ledger: &FeatureVerifyLedger) -> String {
 }
 
 fn tail_text(input: &str, max_chars: usize) -> String {
-    let mut chars = input.chars().collect::<Vec<_>>();
-    if chars.len() <= max_chars {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if let Some((start, _)) = input.char_indices().nth_back(max_chars - 1) {
+        input[start..].trim().to_string()
+    } else {
         return input.trim().to_string();
     }
-    let start = chars.len() - max_chars;
-    chars.drain(..start);
-    chars.into_iter().collect::<String>().trim().to_string()
 }
 
 fn build_feature_promotion_decision(
@@ -3962,6 +5430,315 @@ fn render_feature_gate_markdown(ledger: &FeatureGateLedger) -> String {
     out
 }
 
+fn build_feature_contract_run_report(
+    contract: &feature_contract::FeatureContract,
+    contract_path: &std::path::Path,
+    dispatch: &FeatureRunLedger,
+    verify: Option<&FeatureVerifyLedger>,
+) -> FeatureContractRunReport {
+    let dispatch_by_task = dispatch
+        .tasks
+        .iter()
+        .map(|row| (row.task_id.clone(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let coverage = contract.acceptance_coverage();
+    let verify_coverage = contract.acceptance_verification_coverage();
+    let check_status_by_id = build_check_status_map(verify);
+    let tasks = build_feature_contract_report_tasks(
+        contract,
+        &dispatch_by_task,
+        &verify_coverage,
+        &check_status_by_id,
+        verify.is_some(),
+    );
+    let acceptance = build_feature_contract_report_acceptance_rows(
+        contract,
+        &dispatch_by_task,
+        &coverage,
+        &verify_coverage,
+        &check_status_by_id,
+        verify.is_some(),
+    );
+    let summary = build_feature_contract_report_summary(dispatch, verify);
+    let overall_status = resolve_feature_contract_report_status(dispatch, &summary);
+
+    FeatureContractRunReport {
+        timestamp_utc: dispatch.timestamp_utc.clone(),
+        feature_id: contract.feature_id.clone(),
+        contract_path: contract_path.display().to_string(),
+        overall_status,
+        verify_profile: verify.map(|v| v.summary.profile.clone()),
+        summary,
+        tasks,
+        acceptance,
+    }
+}
+
+fn build_check_status_map(
+    verify: Option<&FeatureVerifyLedger>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut check_status_by_id = std::collections::BTreeMap::new();
+    if let Some(v) = verify {
+        for row in &v.checks {
+            check_status_by_id.insert(row.check_id.clone(), row.status.clone());
+        }
+    }
+    check_status_by_id
+}
+
+fn build_feature_contract_report_tasks(
+    contract: &feature_contract::FeatureContract,
+    dispatch_by_task: &std::collections::BTreeMap<String, &FeatureTaskLedgerRow>,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> Vec<FeatureContractReportTaskRow> {
+    let mut enabled_tasks = contract
+        .tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .collect::<Vec<_>>();
+    enabled_tasks.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut rows = Vec::with_capacity(enabled_tasks.len());
+    for task in enabled_tasks {
+        let ledger_row = dispatch_by_task.get(&task.id).copied();
+        let (mapped_checks, passed_checks, failed_checks) =
+            task_check_outcomes(task, verify_coverage, check_status_by_id, has_verify);
+        rows.push(FeatureContractReportTaskRow {
+            task_id: task.id.clone(),
+            status: ledger_row
+                .map(|row| row.status.clone())
+                .unwrap_or_else(|| "pending".to_string()),
+            reason: ledger_row.and_then(|row| row.reason.clone()),
+            ci_monitor_status: ledger_row.and_then(|row| row.ci_monitor_status.clone()),
+            depends_on: ledger_row
+                .map(|row| row.depends_on.clone())
+                .unwrap_or_else(|| task.depends_on.clone()),
+            dependency_blockers: ledger_row
+                .map(|row| row.dependency_blockers.clone())
+                .unwrap_or_default(),
+            attempts: ledger_row.map(|row| row.attempts).unwrap_or(0),
+            retries: ledger_row.map(|row| row.retries).unwrap_or(0),
+            mapped_acceptance: task.mapped_acceptance.clone(),
+            mapped_checks,
+            passed_checks,
+            failed_checks,
+        });
+    }
+    rows
+}
+
+fn task_check_outcomes(
+    task: &feature_contract::FeatureTask,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut mapped_checks = std::collections::BTreeSet::new();
+    for acceptance in &task.mapped_acceptance {
+        if let Some(check_ids) = verify_coverage.get(acceptance) {
+            mapped_checks.extend(check_ids.iter().cloned());
+        }
+    }
+    let mapped_checks = mapped_checks.into_iter().collect::<Vec<_>>();
+    let mut passed_checks = Vec::new();
+    let mut failed_checks = Vec::new();
+    for check_id in &mapped_checks {
+        if check_status_by_id
+            .get(check_id)
+            .map(|s| s == "passed")
+            .unwrap_or(false)
+        {
+            passed_checks.push(check_id.clone());
+        } else if has_verify {
+            failed_checks.push(check_id.clone());
+        }
+    }
+    (mapped_checks, passed_checks, failed_checks)
+}
+
+fn build_feature_contract_report_acceptance_rows(
+    contract: &feature_contract::FeatureContract,
+    dispatch_by_task: &std::collections::BTreeMap<String, &FeatureTaskLedgerRow>,
+    coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    verify_coverage: &std::collections::BTreeMap<String, Vec<String>>,
+    check_status_by_id: &std::collections::BTreeMap<String, String>,
+    has_verify: bool,
+) -> Vec<FeatureContractReportAcceptanceRow> {
+    let mut rows = Vec::new();
+    for ac in &contract.acceptance_criteria {
+        let task_ids = coverage.get(&ac.id).cloned().unwrap_or_default();
+        let succeeded_tasks = task_ids
+            .iter()
+            .filter(|task_id| {
+                dispatch_by_task
+                    .get(*task_id)
+                    .map(|row| row.status == "succeeded")
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let verification_checks = verify_coverage.get(&ac.id).cloned().unwrap_or_default();
+        let passed_checks = verification_checks
+            .iter()
+            .filter(|check_id| {
+                check_status_by_id
+                    .get(*check_id)
+                    .map(|status| status == "passed")
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let satisfied = if has_verify {
+            !succeeded_tasks.is_empty() && !passed_checks.is_empty()
+        } else {
+            !succeeded_tasks.is_empty()
+        };
+        rows.push(FeatureContractReportAcceptanceRow {
+            acceptance_id: ac.id.clone(),
+            task_ids,
+            succeeded_tasks,
+            verification_checks,
+            passed_checks,
+            satisfied,
+        });
+    }
+    rows.sort_by(|a, b| a.acceptance_id.cmp(&b.acceptance_id));
+    rows
+}
+
+fn build_feature_contract_report_summary(
+    dispatch: &FeatureRunLedger,
+    verify: Option<&FeatureVerifyLedger>,
+) -> FeatureContractReportSummary {
+    let verification_checks_total = verify.map(|v| v.summary.checks_total).unwrap_or(0);
+    let verification_checks_failed = verify.map(|v| v.summary.checks_failed).unwrap_or(0);
+    let verification_required_failed = verify
+        .map(|v| v.summary.required_checks_failed)
+        .unwrap_or(0);
+    let acceptance_satisfied = if let Some(v) = verify {
+        dispatch.summary.acceptance_satisfied && v.summary.acceptance_satisfied
+    } else {
+        dispatch.summary.acceptance_satisfied
+    };
+    FeatureContractReportSummary {
+        total_tasks: dispatch.tasks.len(),
+        succeeded: dispatch.summary.succeeded,
+        failed: dispatch.summary.failed,
+        blocked: dispatch.summary.blocked,
+        skipped: dispatch.summary.skipped,
+        verification_checks_total,
+        verification_checks_failed,
+        verification_required_failed,
+        acceptance_satisfied,
+    }
+}
+
+fn resolve_feature_contract_report_status(
+    dispatch: &FeatureRunLedger,
+    summary: &FeatureContractReportSummary,
+) -> String {
+    if dispatch.summary.failed > 0 {
+        "failed".to_string()
+    } else if dispatch.summary.blocked > 0 {
+        "blocked".to_string()
+    } else if dispatch.summary.skipped > 0 {
+        "partial".to_string()
+    } else if summary.verification_checks_failed > 0 || !summary.acceptance_satisfied {
+        "verify_failed".to_string()
+    } else {
+        "succeeded".to_string()
+    }
+}
+
+fn write_feature_contract_report_artifacts(
+    report: &FeatureContractRunReport,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let out_dir = std::path::PathBuf::from("artifacts");
+    std::fs::create_dir_all(&out_dir)?;
+    let safe_feature_id = sanitize_feature_id(&report.feature_id);
+    let base = format!("feature-contract-report-{}", safe_feature_id);
+    let json_path = out_dir.join(format!("{}.json", base));
+    let md_path = out_dir.join(format!("{}.md", base));
+    std::fs::write(&json_path, serde_json::to_string_pretty(report)?)?;
+    std::fs::write(&md_path, render_feature_contract_report_markdown(report))?;
+    Ok((json_path, md_path))
+}
+
+fn render_feature_contract_report_markdown(report: &FeatureContractRunReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Feature Contract Run Report\n\n");
+    out.push_str(&format!("- feature_id: `{}`\n", report.feature_id));
+    out.push_str(&format!("- timestamp_utc: `{}`\n", report.timestamp_utc));
+    out.push_str(&format!("- contract: `{}`\n", report.contract_path));
+    out.push_str(&format!("- overall_status: `{}`\n", report.overall_status));
+    out.push_str(&format!(
+        "- verify_profile: `{}`\n",
+        report.verify_profile.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "- summary: total_tasks={} succeeded={} failed={} blocked={} skipped={} checks_total={} checks_failed={} required_checks_failed={} acceptance_satisfied={}\n\n",
+        report.summary.total_tasks,
+        report.summary.succeeded,
+        report.summary.failed,
+        report.summary.blocked,
+        report.summary.skipped,
+        report.summary.verification_checks_total,
+        report.summary.verification_checks_failed,
+        report.summary.verification_required_failed,
+        report.summary.acceptance_satisfied
+    ));
+    append_feature_contract_report_tasks(&mut out, &report.tasks);
+    append_feature_contract_report_acceptance(&mut out, &report.acceptance);
+    out
+}
+
+fn append_feature_contract_report_tasks(out: &mut String, rows: &[FeatureContractReportTaskRow]) {
+    out.push_str("## Tasks\n\n");
+    out.push_str("| task_id | status | ci_monitor_status | attempts | retries | depends_on | blockers | mapped_acceptance | checks_passed/checks_total | reason |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {}/{} | {} |\n",
+            row.task_id,
+            row.status,
+            row.ci_monitor_status
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            row.attempts,
+            row.retries,
+            list_or_dash(&row.depends_on, ","),
+            list_or_dash(&row.dependency_blockers, " ; "),
+            list_or_dash(&row.mapped_acceptance, ","),
+            row.passed_checks.len(),
+            row.mapped_checks.len(),
+            row.reason.clone().unwrap_or_else(|| "-".to_string())
+        ));
+    }
+}
+
+fn append_feature_contract_report_acceptance(
+    out: &mut String,
+    rows: &[FeatureContractReportAcceptanceRow],
+) {
+    out.push_str("\n## Acceptance\n\n");
+    out.push_str(
+        "| acceptance_id | task_ids | succeeded_tasks | verification_checks | passed_checks | satisfied |\n",
+    );
+    out.push_str("|---|---|---|---|---|---|\n");
+    for row in rows {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            row.acceptance_id,
+            list_or_dash(&row.task_ids, ","),
+            list_or_dash(&row.succeeded_tasks, ","),
+            list_or_dash(&row.verification_checks, ","),
+            list_or_dash(&row.passed_checks, ","),
+            row.satisfied
+        ));
+    }
+}
+
 fn read_dispatch_ledger(path: &std::path::Path) -> anyhow::Result<FeatureRunLedger> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         anyhow::anyhow!("Failed to read dispatch ledger '{}': {}", path.display(), e)
@@ -4095,11 +5872,51 @@ fn handle_memory(
     Ok(())
 }
 
+fn parse_job_schedule(
+    every: Option<u64>,
+    cron: Option<String>,
+    at: Option<String>,
+) -> anyhow::Result<Schedule> {
+    if let Some(secs) = every {
+        return Ok(Schedule::Interval {
+            every_secs: secs,
+            jitter: 0.1,
+        });
+    }
+    if let Some(expr) = cron {
+        return Ok(Schedule::Cron { expression: expr });
+    }
+    if let Some(at_str) = at {
+        let at_time = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&at_str) {
+            ts.with_timezone(&chrono::Utc)
+        } else {
+            let dur = humantime::parse_duration(&at_str)
+                .map_err(|e| anyhow::anyhow!("Invalid --at '{}': {}", at_str, e))?;
+            chrono::Utc::now()
+                + chrono::Duration::from_std(dur)
+                    .map_err(|e| anyhow::anyhow!("Invalid --at duration '{}': {}", at_str, e))?
+        };
+        return Ok(Schedule::OneShot { at: at_time });
+    }
+    anyhow::bail!("Specify exactly one of --every, --cron, or --at")
+}
+
+fn resolve_job_by_prefix(
+    engine: &scheduler::CronEngine,
+    prefix: &str,
+) -> anyhow::Result<Option<String>> {
+    let jobs = engine.list_jobs()?;
+    Ok(jobs
+        .iter()
+        .find(|j| j.id.starts_with(prefix))
+        .map(|j| j.id.clone()))
+}
+
 fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<()> {
     let engine = handle
         .cron_engine
         .as_ref()
-        .expect("Cron engine not initialized");
+        .ok_or_else(|| anyhow::anyhow!("Cron engine not initialized"))?;
     match action {
         JobsAction::List => {
             let jobs = engine.list_jobs()?;
@@ -4112,13 +5929,25 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
                         .next_run
                         .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "-".to_string());
+                    let ghost_info = j
+                        .ghost
+                        .as_deref()
+                        .map(|g| format!(" — ghost: {}", g))
+                        .unwrap_or_default();
+                    let target_info = if j.target != "broadcast" {
+                        format!(" — target: {}", j.target)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  [{}] {} ({}) — next: {} — {}",
+                        "  [{}] {} ({}) — next: {} — {}{}{}",
                         &j.id[..8],
                         j.name,
                         status,
                         next,
-                        j.prompt
+                        j.prompt,
+                        ghost_info,
+                        target_info
                     );
                 }
             }
@@ -4127,31 +5956,41 @@ fn handle_jobs(action: JobsAction, handle: &core::CoreHandle) -> anyhow::Result<
             name,
             every,
             cron,
+            at,
             prompt,
+            ghost,
+            target,
         } => {
-            let schedule = if let Some(secs) = every {
-                Schedule::Interval {
-                    every_secs: secs,
-                    jitter: 0.1,
-                }
-            } else if let Some(expr) = cron {
-                Schedule::Cron { expression: expr }
-            } else {
-                eprintln!("Specify --every <secs> or --cron <expression>");
+            let schedule_count =
+                u8::from(every.is_some()) + u8::from(cron.is_some()) + u8::from(at.is_some());
+            if schedule_count != 1 {
+                eprintln!("Specify exactly one of --every, --cron, or --at");
                 return Ok(());
-            };
-            let id = engine.create_job(&name, schedule, &prompt, None)?;
+            }
+            let schedule = parse_job_schedule(every, cron, at)?;
+            let id = engine.create_job(&name, schedule, &prompt, ghost.as_deref(), &target)?;
             println!("Created job: {} ({})", name, &id[..8]);
         }
         JobsAction::Delete { id } => {
-            let jobs = engine.list_jobs()?;
-            let full_id = jobs
-                .iter()
-                .find(|j| j.id.starts_with(&id))
-                .map(|j| j.id.clone());
-            if let Some(full_id) = full_id {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
                 engine.delete_job(&full_id)?;
                 println!("Deleted job: {}", &full_id[..8]);
+            } else {
+                println!("Job not found: {}", id);
+            }
+        }
+        JobsAction::Enable { id } => {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
+                engine.toggle_job(&full_id, true)?;
+                println!("Enabled job: {}", &full_id[..8]);
+            } else {
+                println!("Job not found: {}", id);
+            }
+        }
+        JobsAction::Disable { id } => {
+            if let Some(full_id) = resolve_job_by_prefix(engine, &id)? {
+                engine.toggle_job(&full_id, false)?;
+                println!("Disabled job: {}", &full_id[..8]);
             } else {
                 println!("Job not found: {}", id);
             }
@@ -4219,7 +6058,7 @@ async fn run_dispatch(
         ghost_label, task_id, wait_secs
     );
     match wait_for_autonomous_pulse(&mut pulse_rx, &task_id, wait_secs).await {
-        WaitForAutonomousOutcome::Received => Ok(()),
+        WaitForAutonomousOutcome::Received(_) => Ok(()),
         WaitForAutonomousOutcome::TimedOut => {
             mark_dispatch_task_failed_if_started(
                 &config_for_finalize,
@@ -4289,14 +6128,14 @@ async fn wait_for_autonomous_pulse(
         };
         if pulse_matches_task_id(&pulse, task_id) {
             println!("[{}] {}", pulse.source.label(), pulse.content);
-            return WaitForAutonomousOutcome::Received;
+            return WaitForAutonomousOutcome::Received(pulse.content);
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WaitForAutonomousOutcome {
-    Received,
+    Received(String),
     TimedOut,
     ChannelClosed,
 }
@@ -4341,7 +6180,7 @@ async fn resolve_feature_run_status_after_wait(
     outcome_grace_secs: u64,
 ) -> anyhow::Result<FeatureRunStatus> {
     match wait_outcome {
-        WaitForAutonomousOutcome::Received => {
+        WaitForAutonomousOutcome::Received(_) => {
             match wait_for_terminal_outcome_status(config, task_id, 10).await? {
                 Some(status) => Ok(feature_status_from_terminal(&status)),
                 None => {
@@ -4524,11 +6363,11 @@ fn handle_set_command(input: &str, handle: &core::CoreHandle) {
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts.len() {
         1 => {
-            let k = handle.knobs.read().unwrap();
+            let k = handle.knobs.read().unwrap_or_else(|e| e.into_inner());
             println!("{}", k.display());
         }
         3 => {
-            let mut k = handle.knobs.write().unwrap();
+            let mut k = handle.knobs.write().unwrap_or_else(|e| e.into_inner());
             match k.set(parts[1], parts[2]) {
                 Ok(msg) => {
                     println!("{}", msg);
@@ -4620,7 +6459,12 @@ fn handle_model_command(input: &str, handle: &core::CoreHandle) -> bool {
 
 fn handle_cli_model_command(input: &str, handle: &core::CoreHandle) -> bool {
     if input == "/cli_model" {
-        let model = handle.knobs.read().unwrap().cli_model.clone();
+        let model = handle
+            .knobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .cli_model
+            .clone();
         if model.is_empty() {
             println!("CLI tool model: default (tool decides)");
         } else {
@@ -4630,7 +6474,7 @@ fn handle_cli_model_command(input: &str, handle: &core::CoreHandle) -> bool {
     }
     if let Some(arg) = input.strip_prefix("/cli_model ") {
         let arg = arg.trim();
-        let mut k = handle.knobs.write().unwrap();
+        let mut k = handle.knobs.write().unwrap_or_else(|e| e.into_inner());
         match k.set("cli_model", arg) {
             Ok(msg) => println!("{}", msg),
             Err(e) => eprintln!("Error: {}", e),
@@ -4769,7 +6613,6 @@ async fn stream_cli_events(mut events: tokio::sync::mpsc::Receiver<CoreEvent>) {
                     eprintln!("Error: {}", e);
                 }
             }
-            CoreEvent::Pulse(p) => println!("\n[pulse] {}\n", p),
         }
     }
 }
@@ -4843,19 +6686,27 @@ async fn run_chat(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feature_promotion_decision, build_feature_run_ledger,
-        build_self_build_review_checklist, classify_chat_command,
-        compute_feature_outcome_grace_secs, evaluate_self_build_guardrails,
-        latest_eval_gate_status, parse_dispatch_task_id, parse_git_status_paths,
-        plan_self_build_promotion, pulse_matches_task_id, run_feature_verify,
-        wait_for_autonomous_pulse, ChatCommand, FeatureRunStatus, SelfBuildPromoteMode,
+        append_feature_rollback_commit_policy_context, build_feature_contract_run_report,
+        build_feature_promotion_decision, build_feature_run_ledger, build_feature_task_context,
+        build_self_build_review_checklist, ci_monitor_report_green, classify_chat_command,
+        commit_message_contains_tag, compute_feature_outcome_grace_secs,
+        dashboard_output_format_label, default_dashboard_out_file, ensure_clean_working_tree,
+        evaluate_self_build_guardrails, feature_batch_configured_parallelism_from_raw,
+        feature_batch_dynamic_parallelism, format_ci_monitor_status, latest_eval_gate_status,
+        parse_dispatch_task_id, parse_git_status_paths, plan_self_build_promotion,
+        pr_view_reports_merged, pulse_matches_task_id, render_feature_ledger_markdown,
+        resolve_self_build_ci_monitor, rollback_feature_commits, run_feature_verify,
+        select_self_build_dispatch_ghost, track_feature_commits_since, wait_for_autonomous_pulse,
+        ChatCommand, DashboardOutputFormat, FeatureRunStatus, SelfBuildPromoteMode,
         WaitForAutonomousOutcome,
     };
+    use crate::ci_monitor::CiMonitorReport;
     use crate::feature_contract::{
         AcceptanceCriterion, FeatureContract, FeatureTask, VerificationCheck,
     };
+    use crate::introspect::SystemMetrics;
     use crate::pulse::{Pulse, PulseSource, Urgency};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
     #[test]
@@ -4890,6 +6741,38 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_output_format_labels_match_script_values() {
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Auto),
+            "auto"
+        );
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Markdown),
+            "markdown"
+        );
+        assert_eq!(
+            dashboard_output_format_label(DashboardOutputFormat::Html),
+            "html"
+        );
+    }
+
+    #[test]
+    fn dashboard_default_output_file_depends_on_format() {
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Auto),
+            Path::new("eval/results/dashboard.md")
+        );
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Markdown),
+            Path::new("eval/results/dashboard.md")
+        );
+        assert_eq!(
+            default_dashboard_out_file(DashboardOutputFormat::Html),
+            Path::new("eval/results/dashboard.html")
+        );
+    }
+
+    #[test]
     fn pulse_match_requires_task_id_and_source() {
         let p = Pulse::new(PulseSource::AutonomousTask, Urgency::Medium, "ok".into())
             .with_task_id("task-123");
@@ -4916,7 +6799,7 @@ mod tests {
         );
 
         let res = wait_for_autonomous_pulse(&mut rx, "task-match", 1).await;
-        assert_eq!(res, WaitForAutonomousOutcome::Received);
+        assert_eq!(res, WaitForAutonomousOutcome::Received("match".to_string()));
     }
 
     #[tokio::test]
@@ -5009,6 +6892,288 @@ mod tests {
         }
     }
 
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should launch");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    struct TempRepo {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRepo {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn init_temp_git_repo() -> TempRepo {
+        let path = std::env::temp_dir().join(format!("athena-test-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp repo dir");
+        let repo = path.as_path();
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "athena-test@example.com"]);
+        run_git(repo, &["config", "user.name", "Athena Test"]);
+        run_git(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "init"]);
+        TempRepo { path }
+    }
+
+    #[tokio::test]
+    async fn track_feature_commits_since_filters_to_owned_tagged_commits() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let mut last_head = Some(git_stdout(repo, &["rev-parse", "HEAD"]));
+        let mut seen = HashSet::new();
+        let tag = "athena-feature-run:test-123";
+
+        std::fs::write(repo.join("README.md"), "owned change\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned commit", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "unowned\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned commit"]);
+        let unowned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        let tracked = track_feature_commits_since(repo, &mut last_head, &mut seen, Some(tag))
+            .await
+            .expect("track commits");
+        assert_eq!(tracked, vec![owned_sha.clone()]);
+        assert!(!tracked.contains(&unowned_sha));
+        assert!(commit_message_contains_tag(repo, &owned_sha, tag)
+            .await
+            .expect("owned tag lookup"));
+        assert!(!commit_message_contains_tag(repo, &unowned_sha, tag)
+            .await
+            .expect("unowned tag lookup"));
+    }
+
+    #[tokio::test]
+    async fn rollback_feature_commits_reverts_owned_commit_without_touching_other_changes() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        let tag = "athena-feature-run:test-rollback";
+
+        std::fs::write(repo.join("README.md"), "owned delta\n").expect("write owned");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-m", "owned delta", "-m", tag]);
+        let owned_sha = git_stdout(repo, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("notes.txt"), "keep this\n").expect("write unowned");
+        run_git(repo, &["add", "notes.txt"]);
+        run_git(repo, &["commit", "-m", "unowned delta"]);
+
+        let rows = rollback_feature_commits(repo, &[owned_sha]).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].reverted);
+        assert!(rows[0].error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).expect("read reverted file"),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("notes.txt")).expect("read unowned file"),
+            "keep this\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_on_failure_requires_clean_working_tree() {
+        let repo_dir = init_temp_git_repo();
+        let repo = repo_dir.path();
+        ensure_clean_working_tree(repo)
+            .await
+            .expect("clean repo should pass precheck");
+
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+        let err = ensure_clean_working_tree(repo)
+            .await
+            .expect_err("dirty repo should fail precheck");
+        let msg = err.to_string();
+        assert!(msg.contains("clean working tree"));
+    }
+
+    #[test]
+    fn rollback_commit_policy_context_includes_tag_and_instruction() {
+        let context = append_feature_rollback_commit_policy_context(
+            "base context".to_string(),
+            "athena-feature-run:test-ctx",
+        );
+        assert!(context.contains("[feature_rollback_commit_tag:athena-feature-run:test-ctx]"));
+        assert!(context.contains("include the rollback tag"));
+    }
+
+    #[test]
+    fn feature_batch_configured_parallelism_clamps_values() {
+        assert_eq!(feature_batch_configured_parallelism_from_raw(None), 2);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("0")), 1);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("2")), 2);
+        assert_eq!(feature_batch_configured_parallelism_from_raw(Some("9")), 4);
+        assert_eq!(
+            feature_batch_configured_parallelism_from_raw(Some("bad")),
+            2
+        );
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_high_rss_forces_one() {
+        let metrics = SystemMetrics {
+            rss_bytes: 9_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 1);
+        assert!(reason.contains("rss_pct"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_high_container_count_forces_one() {
+        let metrics = SystemMetrics {
+            active_containers: 5,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 1);
+        assert!(reason.contains("active_containers"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_medium_rss_caps_to_two() {
+        let metrics = SystemMetrics {
+            rss_bytes: 7_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(4, Some(&metrics));
+        assert_eq!(parallelism, 2);
+        assert!(reason.contains("> 60"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_healthy_uses_configured() {
+        let metrics = SystemMetrics {
+            rss_bytes: 3_000,
+            total_memory_bytes: 10_000,
+            ..SystemMetrics::default()
+        };
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, Some(&metrics));
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("<= 60"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_metrics_unavailable_falls_back() {
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, None);
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("unavailable"));
+    }
+
+    #[test]
+    fn feature_batch_dynamic_parallelism_missing_memory_metrics_falls_back() {
+        let metrics = SystemMetrics::default();
+        let (parallelism, reason) = feature_batch_dynamic_parallelism(3, Some(&metrics));
+        assert_eq!(parallelism, 3);
+        assert!(reason.contains("rss_unavailable"));
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_auto_defaults_on() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, false, false);
+        assert!(enabled);
+        assert_eq!(source, "auto_default");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_non_auto_defaults_off() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Pr, false, false);
+        assert!(!enabled);
+        assert_eq!(source, "default_off");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_explicit_on_wins() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, true, false);
+        assert!(enabled);
+        assert_eq!(source, "explicit_on");
+    }
+
+    #[test]
+    fn resolve_self_build_ci_monitor_explicit_off_wins() {
+        let (enabled, source) =
+            resolve_self_build_ci_monitor(SelfBuildPromoteMode::Auto, false, true);
+        assert!(!enabled);
+        assert_eq!(source, "explicit_off");
+    }
+
+    #[test]
+    fn ci_monitor_helpers_capture_green_and_status_rendering() {
+        let green = CiMonitorReport {
+            pr_url: "https://github.com/acme/repo/pull/1".to_string(),
+            branch: None,
+            started_utc: "2026-03-03T00:00:00Z".to_string(),
+            finished_utc: "2026-03-03T00:01:00Z".to_string(),
+            final_status: "ci_passed".to_string(),
+            post_merge_status: "post_merge_passed".to_string(),
+            revert_pr_url: None,
+            polls: Vec::new(),
+            heal_attempts: Vec::new(),
+            merged_after_ci: true,
+            commands: Vec::new(),
+        };
+        assert!(ci_monitor_report_green(&green));
+        assert_eq!(
+            format_ci_monitor_status(&green),
+            "ci_passed / post_merge_passed".to_string()
+        );
+
+        let failing = CiMonitorReport {
+            final_status: "heal_exhausted".to_string(),
+            post_merge_status: "not_merged".to_string(),
+            revert_pr_url: Some("https://github.com/acme/repo/pull/2".to_string()),
+            ..green.clone()
+        };
+        assert!(!ci_monitor_report_green(&failing));
+        assert!(format_ci_monitor_status(&failing).contains("revert_pr="));
+    }
+
     #[test]
     fn feature_ledger_marks_unsatisfied_acceptance() {
         let contract = sample_contract();
@@ -5023,8 +7188,12 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             1,
             1,
+            0,
             0,
         );
         assert!(!ledger.summary.acceptance_satisfied);
@@ -5042,12 +7211,126 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );
         assert!(ledger.summary.acceptance_satisfied);
         assert!(ledger.summary.promotable);
+        assert!(ledger.rollback_commits.is_empty());
+    }
+
+    #[test]
+    fn feature_ledger_markdown_includes_rollback_section_when_present() {
+        let contract = sample_contract();
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert(
+            "T2".to_string(),
+            FeatureRunStatus::Failed("failed".to_string()),
+        );
+        let mut ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            1,
+            1,
+            0,
+            0,
+        );
+        ledger.rollback_commits = vec![
+            super::FeatureRollbackLedgerRow {
+                commit_sha: "abc123".to_string(),
+                reverted: true,
+                error: None,
+            },
+            super::FeatureRollbackLedgerRow {
+                commit_sha: "def456".to_string(),
+                reverted: false,
+                error: Some("conflict".to_string()),
+            },
+        ];
+
+        let md = render_feature_ledger_markdown(&ledger);
+        assert!(md.contains("ci_monitor_status"));
+        assert!(md.contains("## Rollback Commits"));
+        assert!(md.contains("abc123"));
+        assert!(md.contains("def456"));
+        assert!(md.contains("conflict"));
+    }
+
+    #[test]
+    fn feature_contract_report_sorts_tasks_and_captures_blockers() {
+        let mut contract = sample_contract();
+        contract.tasks.swap(0, 1);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("T1".to_string(), FeatureRunStatus::Succeeded);
+        statuses.insert(
+            "T2".to_string(),
+            FeatureRunStatus::Blocked("dependency 'T1' failed (timeout)".to_string()),
+        );
+        let mut blockers = HashMap::new();
+        blockers.insert(
+            "T2".to_string(),
+            vec!["dependency 'T1' failed (timeout)".to_string()],
+        );
+        let mut attempts = HashMap::new();
+        attempts.insert("T1".to_string(), 2usize);
+        let mut ci_status = HashMap::new();
+        ci_status.insert(
+            "T1".to_string(),
+            "ci_passed / post_merge_passed".to_string(),
+        );
+        let ledger = build_feature_run_ledger(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &statuses,
+            &HashMap::new(),
+            &ci_status,
+            &blockers,
+            &attempts,
+            1,
+            0,
+            0,
+            1,
+        );
+        let verify = run_feature_verify(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            "strict",
+        )
+        .unwrap();
+        let report = build_feature_contract_run_report(
+            &contract,
+            Path::new("eval/feature-contract-example.yaml"),
+            &ledger,
+            Some(&verify),
+        );
+
+        assert_eq!(report.tasks.len(), 2);
+        assert_eq!(report.tasks[0].task_id, "T1");
+        assert_eq!(report.tasks[0].attempts, 2);
+        assert_eq!(report.tasks[0].retries, 1);
+        assert_eq!(
+            report.tasks[0].ci_monitor_status.as_deref(),
+            Some("ci_passed / post_merge_passed")
+        );
+        assert_eq!(report.tasks[1].task_id, "T2");
+        assert_eq!(report.tasks[1].status, "blocked");
+        assert_eq!(
+            report.tasks[1].dependency_blockers,
+            vec!["dependency 'T1' failed (timeout)".to_string()]
+        );
+        assert_eq!(report.overall_status, "blocked");
     }
 
     #[test]
@@ -5108,7 +7391,11 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );
@@ -5147,7 +7434,11 @@ mod tests {
             Path::new("eval/feature-contract-example.yaml"),
             &statuses,
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             2,
+            0,
             0,
             0,
         );
@@ -5209,10 +7500,77 @@ mod tests {
     }
 
     #[test]
+    fn parse_dispatch_task_id_picks_first_match() {
+        let s = "task_id=11111111-1111-1111-1111-111111111111 ... task_id=22222222-2222-2222-2222-222222222222";
+        assert_eq!(
+            parse_dispatch_task_id(s).as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
+    fn parse_dispatch_task_id_rejects_malformed_uuid() {
+        let s = "Dispatched task_id=not-a-uuid value.";
+        assert!(parse_dispatch_task_id(s).is_none());
+    }
+
+    #[test]
+    fn parse_dispatch_task_id_returns_none_when_missing() {
+        let s = "Dispatched autonomous task without id.";
+        assert!(parse_dispatch_task_id(s).is_none());
+    }
+
+    #[test]
     fn parse_git_status_paths_supports_rename_line() {
         let out = " M src/main.rs\nR  old.txt -> new.txt\n?? notes.md\n";
         let paths = parse_git_status_paths(out);
         assert_eq!(paths, vec!["new.txt", "notes.md", "src/main.rs"]);
+    }
+
+    #[test]
+    fn select_self_build_dispatch_ghost_prefers_coder() {
+        let config = crate::config::Config::default();
+        let selected = select_self_build_dispatch_ghost(&config).unwrap();
+        assert_eq!(selected, "coder");
+    }
+
+    #[test]
+    fn select_self_build_dispatch_ghost_prefers_code_strategy_when_no_coder() {
+        let mut config = crate::config::Config::default();
+        config.ghosts = vec![
+            crate::config::GhostConfig {
+                name: "scout".to_string(),
+                description: "read-only".to_string(),
+                tools: vec!["file_read".to_string()],
+                mounts: Vec::new(),
+                strategy: "react".to_string(),
+                soul_file: None,
+                soul: None,
+                image: None,
+            },
+            crate::config::GhostConfig {
+                name: "architect".to_string(),
+                description: "code strategist".to_string(),
+                tools: vec!["shell".to_string()],
+                mounts: Vec::new(),
+                strategy: "code".to_string(),
+                soul_file: None,
+                soul: None,
+                image: None,
+            },
+        ];
+        let selected = select_self_build_dispatch_ghost(&config).unwrap();
+        assert_eq!(selected, "architect");
+    }
+
+    #[test]
+    fn pr_view_reports_merged_detects_merged_at() {
+        assert!(pr_view_reports_merged(
+            r#"{"number":64,"mergedAt":"2026-03-03T17:27:17Z","baseRefName":"main"}"#
+        ));
+        assert!(!pr_view_reports_merged(
+            r#"{"number":64,"mergedAt":null,"baseRefName":"main"}"#
+        ));
     }
 
     #[test]
@@ -5364,7 +7722,84 @@ index 1111111..2222222 100644
         );
 
         let res = wait_for_autonomous_pulse(&mut rx, "dispatch-42", 2).await;
-        assert_eq!(res, WaitForAutonomousOutcome::Received);
+        assert_eq!(res, WaitForAutonomousOutcome::Received("done".to_string()));
+    }
+
+    #[test]
+    fn feature_task_context_includes_predecessor_result_summaries() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert(
+            "T1".to_string(),
+            "Parser and validation implemented with tests".to_string(),
+        );
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(context.contains("Previous task results:"));
+        assert!(context.contains("- T1: Parser and validation implemented with tests"));
+    }
+
+    #[test]
+    fn feature_task_context_truncates_predecessor_result_summaries_to_500_chars() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "x".repeat(700));
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        let prefix = "- T1: ";
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .expect("expected predecessor summary line");
+        let summary = &line[prefix.len()..];
+        assert_eq!(summary.chars().count(), 500);
+    }
+
+    #[test]
+    fn feature_task_context_includes_only_direct_predecessor_summaries() {
+        let mut contract = sample_contract();
+        contract.tasks.push(FeatureTask {
+            id: "T3".to_string(),
+            goal: "task3".to_string(),
+            context: None,
+            ghost: None,
+            lane: None,
+            risk: None,
+            repo: None,
+            auto_store: None,
+            wait_secs: None,
+            cli_tool: None,
+            cli_model: None,
+            mapped_acceptance: vec!["AC-2".to_string()],
+            depends_on: vec!["T2".to_string()],
+            enabled: true,
+        });
+        let task = contract.task_by_id("T3").expect("T3 task missing");
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "summary from T1".to_string());
+        predecessor_summaries.insert("T2".to_string(), "summary from T2".to_string());
+
+        let context = build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(context.contains("Previous task results:"));
+        assert!(context.contains("- T2: summary from T2"));
+        assert!(!context.contains("- T1: summary from T1"));
+    }
+
+    #[test]
+    fn feature_task_context_omits_previous_results_when_summary_missing_or_empty() {
+        let contract = sample_contract();
+        let task = contract.task_by_id("T2").expect("T2 task missing");
+
+        let context_without_summary = build_feature_task_context(&contract, task, &HashMap::new());
+        assert!(!context_without_summary.contains("Previous task results:"));
+
+        let mut predecessor_summaries = HashMap::new();
+        predecessor_summaries.insert("T1".to_string(), "   \n\t".to_string());
+        let context_with_empty_summary =
+            build_feature_task_context(&contract, task, &predecessor_summaries);
+        assert!(!context_with_empty_summary.contains("Previous task results:"));
     }
 
     #[test]

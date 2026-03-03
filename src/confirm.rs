@@ -26,7 +26,9 @@ impl Confirmer for CliConfirmer {
         let action = action.to_string();
         tokio::task::spawn_blocking(move || {
             eprint!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
-            io::stderr().flush().unwrap();
+            io::stderr()
+                .flush()
+                .map_err(|e| AthenaError::Tool(format!("Failed to flush prompt: {}", e)))?;
 
             let mut input = String::new();
             io::stdin()
@@ -77,7 +79,13 @@ impl SensitivePatterns {
             })
             .map(|p| p.as_str())
             .collect();
-        let regex_set = regex::RegexSet::new(&valid).expect("all patterns were pre-validated");
+        let regex_set = match regex::RegexSet::new(&valid) {
+            Ok(set) => set,
+            Err(e) => {
+                tracing::warn!("Failed to compile sensitive pattern set: {}", e);
+                regex::RegexSet::empty()
+            }
+        };
         Self { regex_set }
     }
 

@@ -1,97 +1,111 @@
 # Athena Feature Contract v1
 
-Use this contract before decomposing a feature into implementation tasks.
+Feature contracts define an auditable DAG of autonomous tasks mapped to acceptance criteria.
 
-## Metadata
+Supported file formats:
+- YAML (`.yaml`, `.yml`)
+- JSON (`.json`)
+- TOML (`.toml`)
 
-- `feature_id`: `<repo>-<short-name>-<yyyy-mm-dd>`
-- `owner`: `<human or agent>`
-- `lane`: `delivery | self_improvement`
-- `risk_tier`: `low | medium | high`
-- `status`: `draft | approved | in_progress | done | archived`
+## Schema
 
-## Outcome
+Top-level fields:
+- `feature_id` (required)
+- `lane` (optional): `delivery | self_improvement`
+- `risk` (optional): `low | medium | high`
+- `repo` (optional)
+- `acceptance_criteria[]` (required)
+- `verification_checks[]` (recommended; required for `feature verify`)
+- `tasks[]` (required)
 
-- `user_problem`: one paragraph
-- `target_outcome`: measurable expected behavior/result
-- `non_goals`: explicit exclusions
+`acceptance_criteria[]`:
+- `id` (required)
+- `description` (optional)
 
-## Constraints
+`verification_checks[]`:
+- `id` (required)
+- `command` (required)
+- `profile` (optional, default `strict`): `fast | strict`
+- `mapped_acceptance[]` (required, at least one)
+- `required` (optional, default `true`)
 
-- `scope_paths`: allowed files/directories
-- `forbidden_ops`: destructive or policy-blocked actions
-- `dependencies`: upstream systems/apis this feature depends on
-- `security_constraints`: secrets/data handling boundaries
+`tasks[]`:
+- `id` (required)
+- `goal` (required when `enabled=true`)
+- `mapped_acceptance[]` (required when `enabled=true`)
+- `depends_on[]` (optional)
+- `ghost`, `context` (optional)
+- `lane`, `risk`, `repo` (optional task-level overrides)
+- `wait_secs`, `auto_store`, `cli_tool`, `cli_model` (optional)
+- `enabled` (optional, default `true`)
 
-## Acceptance Criteria
+## DAG and Validation Rules
 
-Define atomic criteria with stable IDs.
+Validation is strict and deterministic:
+- Duplicate IDs are rejected (`acceptance`, `tasks`, `verification_checks`).
+- Unknown references fail validation (`depends_on`, `mapped_acceptance`).
+- Disabled dependency references are rejected.
+- Self-dependencies are rejected.
+- Enabled tasks must map at least one acceptance criterion.
+- Every acceptance criterion must be covered by at least one enabled task.
+- Task graph must be acyclic.
 
-- `AC-1`: ...
-- `AC-2`: ...
-- `AC-3`: ...
+Cycle diagnostics include an explicit trace, for example:
 
-Each criterion must be objectively testable.
+```text
+task dependency graph contains a cycle among enabled tasks: T4 -> T2 -> T4. remaining_blocked_tasks=T2,T4
+```
 
-## Architecture and Interfaces
+Unknown ID diagnostics include nearest-ID suggestions when possible, for example:
 
-- `design_notes`: brief design rationale
-- `interface_contracts`: API/schema/event changes with compatibility plan
-- `migration_plan`: if storage/schema behavior changes
+```text
+tasks[3].depends_on[0] references unknown task 'TSK-2' (did you mean 'TASK-2'?)
+```
 
-## Task DAG
+## CLI Authoring UX
 
-Define tasks with explicit dependencies.
+Initialize a new TOML contract:
 
-| task_id | summary | depends_on | risk | mapped_acceptance |
-|---|---|---|---|---|
-| T1 | Define API contract | - | low | AC-1 |
-| T2 | Implement backend | T1 | medium | AC-1, AC-2 |
-| T3 | Implement frontend | T1 | medium | AC-2 |
-| T4 | End-to-end tests | T2, T3 | low | AC-1, AC-2, AC-3 |
+```bash
+athena feature init --file feature-contract.toml --pattern fanout-fanin
+```
 
-Rules:
+Patterns:
+- `linear`
+- `fanout-fanin`
 
-- DAG only (no cycles).
-- No task without at least one mapped acceptance criterion.
-- No acceptance criterion without at least one owning task.
+Validate (or lint) a contract:
 
-## Verification Plan
+```bash
+athena feature validate --file feature-contract.toml
+athena feature lint --file feature-contract.toml
+```
 
-- `unit_tests`: list
-- `integration_tests`: list
-- `manual_checks`: list
-- `performance_or_reliability_checks`: list
+Backward-compatible flag alias:
+- `--contract` is accepted as an alias for `--file`.
 
-Runtime shape for `athena feature verify`:
+## Report Artifact
 
-- `verification_checks[]`:
-  - `id`
-  - `command`
-  - `profile` (`fast | strict`, default `strict`)
-  - `mapped_acceptance[]`
-  - `required` (default `true`)
+`feature dispatch` and `feature gate` emit a deterministic contract-run report:
 
-## Promotion Policy
+- `artifacts/feature-contract-report-<feature_id>.json`
+- `artifacts/feature-contract-report-<feature_id>.md`
 
-- `low risk`: auto-merge allowed only when gates are green and confidence is high
-- `medium/high risk`: PR-only, human approval required
+Report includes:
+- Top-level summary (`succeeded`, `failed`, `blocked`, `skipped`, verification totals)
+- Per-task status
+- Per-task `ci_monitor_status` (when PR CI autopilot runs)
+- Dependency blockers
+- Attempts and retries
+- Task-to-acceptance and task-to-check mapping
+- Acceptance-level satisfaction rollup
 
-Runtime decision command:
+## Migration Notes
 
-- `athena feature promote --file <contract>`
-- auto-promotion additionally requires latest real eval gate (`athena-core-v2-real`) to be passing
-
-One-shot gate command:
-
-- `athena feature gate --file <contract> --verify-profile strict`
-
-## Evidence Ledger
-
-Record evidence per acceptance criterion.
-
-| acceptance_id | evidence_type | location | result |
-|---|---|---|---|
-| AC-1 | test | `<path or artifact>` | pass/fail |
-| AC-2 | benchmark | `<path or artifact>` | pass/fail |
-| AC-3 | review | `<path or artifact>` | approved/changes_requested |
+For existing users:
+1. Existing YAML/JSON contracts remain supported unchanged.
+2. Existing `--contract` CLI usage still works (`--file` is canonical).
+3. To migrate to TOML, run:
+   - `athena feature init --file <new>.toml --pattern <linear|fanout-fanin>`
+   - copy existing task/check content into the generated template.
+4. For dependency or mapping errors, prefer fixing the referenced IDs directly; diagnostics now include exact field paths and suggestions.

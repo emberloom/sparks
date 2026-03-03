@@ -26,6 +26,7 @@ class CandidateSpec:
     source: str
     dispatch_context: str
     hypothesis: str
+    mutation_dimensions: dict[str, str]
 
 
 @dataclass
@@ -34,6 +35,7 @@ class CandidateResult:
     source: str
     hypothesis: str
     dispatch_context: str
+    mutation_dimensions: dict[str, str]
     command: list[str]
     exit_code: int
     report_json: str | None
@@ -80,11 +82,28 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Require non-negative exec/task deltas in addition to score delta for promotion.",
     )
+    p.add_argument(
+        "--adaptive-guardrails",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Adapt non-critical promotion thresholds from recent safety record.",
+    )
+    p.add_argument(
+        "--guardrail-history-window",
+        type=int,
+        default=10,
+        help="How many recent tournament runs to use for adaptive guardrail policy.",
+    )
     p.add_argument("--active-profile-json", default="eval/results/optimizer-profile.json")
     p.add_argument(
         "--promote-profile",
         action="store_true",
         help="Persist winner context to active profile when gates + positive delta pass.",
+    )
+    p.add_argument(
+        "--generated-profiles-json",
+        default="eval/results/ghost-profiles-latest.json",
+        help="Path for generated specialized ghost profile metadata artifact.",
     )
     p.add_argument(
         "--fail-on-baseline-gate",
@@ -197,42 +216,61 @@ def baseline_candidate_from_profile(profile: dict[str, Any]) -> CandidateSpec:
         source=f"baseline:{source}",
         dispatch_context=str(profile.get("dispatch_context") or ""),
         hypothesis=hypothesis,
+        mutation_dimensions={
+            "constraint_strictness": "baseline",
+            "soul_composition": "baseline",
+            "mutation_strategy": "baseline",
+        },
     )
 
 
 def static_mutation_candidates(base_context: str) -> list[CandidateSpec]:
-    return [
-        CandidateSpec(
-            candidate_id="mutation_plan_verify",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "Execution contract: return PLAN and EXECUTION sections. "
-                "Run required verification commands before final completion."
-            ),
-            hypothesis="Improve structure and verification compliance.",
+    raw: list[tuple[str, str, str, str]] = [
+        (
+            "mutation_plan_verify",
+            "plan_verify",
+            "Execution contract: return PLAN and EXECUTION sections. Run required verification commands before final completion.",
+            "Improve structure and verification compliance.",
         ),
-        CandidateSpec(
-            candidate_id="mutation_minimal_diff",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "Change policy: prefer smallest safe diff, preserve existing architecture, "
-                "and avoid unrelated edits."
-            ),
-            hypothesis="Reduce noisy diffs and improve diff-quality scores.",
+        (
+            "mutation_minimal_diff",
+            "minimal_diff",
+            "Change policy: prefer smallest safe diff, preserve existing architecture, and avoid unrelated edits.",
+            "Reduce noisy diffs and improve diff-quality scores.",
         ),
-        CandidateSpec(
-            candidate_id="mutation_blocker_evidence",
-            source="mutation_static",
-            dispatch_context=(
-                f"{base_context}\n"
-                "If blocked, report deterministic evidence: command, exact stderr/stdout tail, "
-                "and one concrete next action."
-            ),
-            hypothesis="Improve failure diagnosability and recovery quality.",
+        (
+            "mutation_blocker_evidence",
+            "blocker_evidence",
+            "If blocked, report deterministic evidence: command, exact stderr/stdout tail, and one concrete next action.",
+            "Improve failure diagnosability and recovery quality.",
         ),
     ]
+    out: list[CandidateSpec] = []
+    for idx, (candidate_id, mutation_id, mutation_text, hypothesis) in enumerate(raw):
+        constraint_level = CONSTRAINT_STRICTNESS_LIBRARY[idx % len(CONSTRAINT_STRICTNESS_LIBRARY)][
+            0
+        ]
+        soul_level = SOUL_COMPOSITION_LIBRARY[idx % len(SOUL_COMPOSITION_LIBRARY)][0]
+        context = apply_mutation_axes(
+            base_context,
+            mutation_text,
+            constraint_level,
+            soul_level,
+        )
+        out.append(
+            CandidateSpec(
+                candidate_id=candidate_id,
+                source="mutation_static",
+                dispatch_context=context,
+                hypothesis=hypothesis,
+                mutation_dimensions={
+                    "mutation_strategy": mutation_id,
+                    "constraint_strictness": constraint_level,
+                    "soul_composition": soul_level,
+                },
+            )
+        )
+    return out
 
 
 def source_focus_hint(source: str) -> str:
@@ -249,6 +287,64 @@ def source_focus_hint(source: str) -> str:
     if source_key == "eval_history":
         return "Focus on improving gate pass outcomes without sacrificing verification rigor."
     return "Focus on measurable benchmark and safety improvements."
+
+
+CONSTRAINT_STRICTNESS_LIBRARY: list[tuple[str, str]] = [
+    (
+        "strict",
+        "Treat all declared constraints as mandatory and block completion when evidence is missing.",
+    ),
+    (
+        "balanced",
+        "Treat safety constraints as mandatory; optimize non-critical constraints when it improves verified outcomes.",
+    ),
+    (
+        "adaptive",
+        "Adapt non-critical constraint verbosity to task risk while preserving strict safety and verification floors.",
+    ),
+]
+
+SOUL_COMPOSITION_LIBRARY: list[tuple[str, str]] = [
+    (
+        "minimal",
+        "Use concise persona guidance: high signal, low verbosity, execution-first.",
+    ),
+    (
+        "balanced",
+        "Blend persona tone with operational rigor and explicit verification intent.",
+    ),
+    (
+        "context_rich",
+        "Use richer persona framing plus explicit mission/risk framing for complex tasks.",
+    ),
+]
+
+
+def validate_mutation_axes(constraint_level: str, soul_level: str) -> None:
+    allowed_constraints = {name for name, _ in CONSTRAINT_STRICTNESS_LIBRARY}
+    allowed_souls = {name for name, _ in SOUL_COMPOSITION_LIBRARY}
+    if constraint_level not in allowed_constraints:
+        raise ValueError(f"unsupported constraint strictness axis: {constraint_level}")
+    if soul_level not in allowed_souls:
+        raise ValueError(f"unsupported soul composition axis: {soul_level}")
+
+
+def apply_mutation_axes(
+    base_context: str,
+    mutation_text: str,
+    constraint_level: str,
+    soul_level: str,
+) -> str:
+    validate_mutation_axes(constraint_level, soul_level)
+    constraint_text = dict(CONSTRAINT_STRICTNESS_LIBRARY)[constraint_level]
+    soul_text = dict(SOUL_COMPOSITION_LIBRARY)[soul_level]
+    return (
+        f"{base_context}\n"
+        f"Mutation strategy: {mutation_text}\n"
+        f"Constraint strictness ({constraint_level}): {constraint_text}\n"
+        f"Soul composition ({soul_level}): {soul_text}\n"
+        "Safety floor: never bypass destructive-command, credential, or verification guardrails."
+    )
 
 
 BACKLOG_MUTATION_LIBRARY: list[tuple[str, str]] = [
@@ -296,13 +392,20 @@ def backlog_candidates(
         for m_idx, (mutation_id, mutation_text) in enumerate(BACKLOG_MUTATION_LIBRARY[:count], start=1):
             candidate_id = f"backlog_{idx}_{m_idx}_{mutation_id}_{title_slug}"
             hypothesis = f"Backlog hypothesis ({source}): {title}"
-            context = (
+            constraint_level = CONSTRAINT_STRICTNESS_LIBRARY[(idx + m_idx - 2) % len(CONSTRAINT_STRICTNESS_LIBRARY)][0]
+            soul_level = SOUL_COMPOSITION_LIBRARY[(idx * m_idx - 1) % len(SOUL_COMPOSITION_LIBRARY)][0]
+            base_ticket_context = (
                 f"{base_context}\n"
                 f"Backlog ticket source={source} risk={risk} score={score:.3f}: {title}\n"
                 f"Evidence: {evidence}\n"
                 f"Acceptance focus: {acceptance_focus}\n"
-                f"Source focus: {focus}\n"
-                f"Mutation strategy ({mutation_id}): {mutation_text}"
+                f"Source focus: {focus}"
+            )
+            context = apply_mutation_axes(
+                base_ticket_context,
+                f"Backlog mutation ({mutation_id}): {mutation_text}",
+                constraint_level,
+                soul_level,
             )
             out.append(
                 CandidateSpec(
@@ -310,6 +413,11 @@ def backlog_candidates(
                     source=f"backlog:{source}",
                     dispatch_context=context,
                     hypothesis=hypothesis,
+                    mutation_dimensions={
+                        "mutation_strategy": mutation_id,
+                        "constraint_strictness": constraint_level,
+                        "soul_composition": soul_level,
+                    },
                 )
             )
     return out
@@ -373,6 +481,7 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
             source=candidate.source,
             hypothesis=candidate.hypothesis,
             dispatch_context=candidate.dispatch_context,
+            mutation_dimensions=dict(candidate.mutation_dimensions),
             command=cmd,
             exit_code=0,
             report_json=None,
@@ -399,6 +508,7 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
         source=candidate.source,
         hypothesis=candidate.hypothesis,
         dispatch_context=candidate.dispatch_context,
+        mutation_dimensions=dict(candidate.mutation_dimensions),
         command=cmd,
         exit_code=p.returncode,
         report_json=report_path_text,
@@ -409,6 +519,79 @@ def run_candidate(repo: Path, args: argparse.Namespace, candidate: CandidateSpec
         task_count=task_count,
         error=err,
     )
+
+
+def recent_tournament_payloads(out_dir: Path, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    files = sorted(out_dir.glob("optimizer-tournament-*.json"), reverse=True)
+    out: list[dict[str, Any]] = []
+    for path in files[:limit]:
+        payload = load_json(path)
+        if payload:
+            out.append(payload)
+    return out
+
+
+def run_is_safety_clean(payload: dict[str, Any]) -> bool:
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        return False
+    for c in candidates:
+        if int(c.get("exit_code", 1)) != 0:
+            return False
+        if not bool(c.get("gate_ok", False)):
+            return False
+    return True
+
+
+def derive_adaptive_guardrail_policy(
+    out_dir: Path,
+    history_window: int,
+    base_min_improvement: float,
+    base_max_regression: float,
+    strict_promotion: bool,
+) -> dict[str, Any]:
+    payloads = recent_tournament_payloads(out_dir, history_window)
+    total = len(payloads)
+    clean = sum(1 for p in payloads if run_is_safety_clean(p))
+    clean_rate = (clean / total) if total > 0 else 0.0
+
+    band = "strict"
+    min_improvement = base_min_improvement
+    max_regression = base_max_regression
+    strict_mode = strict_promotion
+
+    if total >= 10 and clean_rate >= 0.8:
+        band = "relaxed_noncritical"
+        min_improvement = max(0.0, base_min_improvement * 0.5)
+        max_regression = min(0.03, base_max_regression + 0.01)
+        strict_mode = False
+    elif total >= 5 and clean_rate >= 0.6:
+        band = "balanced"
+        min_improvement = max(0.0, base_min_improvement * 0.75)
+        max_regression = min(0.025, base_max_regression + 0.005)
+    elif total >= 5 and clean_rate < 0.4:
+        band = "tightened"
+        min_improvement = min(0.05, base_min_improvement + 0.01)
+        max_regression = max(0.0, base_max_regression - 0.005)
+        strict_mode = True
+
+    return {
+        "band": band,
+        "history_window": history_window,
+        "total_runs": total,
+        "clean_runs": clean,
+        "clean_rate": round(clean_rate, 4),
+        "min_improvement": round(min_improvement, 4),
+        "max_regression": round(max_regression, 4),
+        "strict_promotion": strict_mode,
+        "safety_floor": {
+            "require_exit_zero": True,
+            "require_gate_ok": True,
+            "never_relax_destructive_or_sensitive_guardrails": True,
+        },
+    }
 
 
 def pick_winner(
@@ -505,6 +688,80 @@ def write_active_profile(
     return profile
 
 
+def specialization_hint(source: str) -> str:
+    source_lower = source.lower()
+    if "runtime_failures" in source_lower:
+        return "failure_recovery"
+    if "maintainability" in source_lower:
+        return "maintainability_refactor"
+    if "tool_usage" in source_lower:
+        return "tool_reliability"
+    if "eval_history" in source_lower:
+        return "evaluation_rigor"
+    return "general_optimization"
+
+
+def validate_generated_profile(profile: dict[str, Any]) -> bool:
+    required = [
+        "profile_id",
+        "ghost_name",
+        "source_candidate_id",
+        "dispatch_context",
+        "specialization",
+        "created_at_utc",
+    ]
+    for key in required:
+        value = profile.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    dimensions = profile.get("mutation_dimensions")
+    if not isinstance(dimensions, dict):
+        return False
+    for axis in ("constraint_strictness", "soul_composition"):
+        value = dimensions.get(axis)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    return True
+
+
+def generate_specialized_ghost_profiles(
+    results: list[CandidateResult],
+    ts: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (
+            r
+            for r in results
+            if r.candidate_id != "baseline" and r.exit_code == 0 and r.gate_ok
+        ),
+        key=lambda r: (r.overall_score, r.exec_success_rate, r.avg_task_overall),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for candidate in ranked[: max(0, limit)]:
+        profile = {
+            "profile_id": f"generated_{candidate.candidate_id}",
+            "ghost_name": "coder",
+            "source_candidate_id": candidate.candidate_id,
+            "source": candidate.source,
+            "dispatch_context": candidate.dispatch_context,
+            "hypothesis": candidate.hypothesis,
+            "specialization": specialization_hint(candidate.source),
+            "mutation_dimensions": dict(candidate.mutation_dimensions),
+            "metrics": {
+                "overall_score": candidate.overall_score,
+                "exec_success_rate": candidate.exec_success_rate,
+                "avg_task_overall": candidate.avg_task_overall,
+                "task_count": candidate.task_count,
+            },
+            "created_at_utc": ts,
+        }
+        if validate_generated_profile(profile):
+            out.append(profile)
+    return out
+
+
 def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Athena Optimizer Tournament",
@@ -546,6 +803,22 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"avg_task_delta={gate['avg_task_delta_vs_baseline']}"
         )
     lines.append("")
+    lines.append("## Adaptive Guardrail Policy")
+    gp = payload.get("guardrail_policy", {})
+    lines.append(f"- band: `{gp.get('band', 'n/a')}`")
+    lines.append(
+        f"- clean_runs/total_runs: `{gp.get('clean_runs', 0)}/{gp.get('total_runs', 0)}` "
+        f"(clean_rate={gp.get('clean_rate', 0.0)})"
+    )
+    lines.append(
+        f"- min_improvement: `{gp.get('min_improvement', '-')}` "
+        f"max_regression: `{gp.get('max_regression', '-')}` "
+        f"strict_promotion: `{gp.get('strict_promotion', '-')}`"
+    )
+    lines.append(
+        f"- safety_floor: `{gp.get('safety_floor', {})}`"
+    )
+    lines.append("")
     lines.append("## Promotion Execution")
     lines.append(f"- enabled: `{payload['promotion_execution']['enabled']}`")
     lines.append(f"- status: `{payload['promotion_execution']['status']}`")
@@ -553,6 +826,14 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- reason: {reason}")
     lines.append(
         f"- active_profile_json: `{payload['promotion_execution'].get('active_profile_json', '-')}`"
+    )
+    lines.append("")
+    lines.append("## Generated Ghost Profiles")
+    lines.append(
+        f"- count: `{payload['generated_profiles']['count']}`"
+    )
+    lines.append(
+        f"- artifact: `{payload['generated_profiles']['path']}`"
     )
     lines.append("")
     return "\n".join(lines)
@@ -603,11 +884,36 @@ def main() -> int:
             flush=True,
         )
 
+    if args.adaptive_guardrails:
+        guardrail_policy = derive_adaptive_guardrail_policy(
+            out_dir=out_dir,
+            history_window=args.guardrail_history_window,
+            base_min_improvement=args.min_improvement,
+            base_max_regression=args.max_regression,
+            strict_promotion=args.strict_promotion,
+        )
+    else:
+        guardrail_policy = {
+            "band": "manual",
+            "history_window": 0,
+            "total_runs": 0,
+            "clean_runs": 0,
+            "clean_rate": 0.0,
+            "min_improvement": args.min_improvement,
+            "max_regression": args.max_regression,
+            "strict_promotion": args.strict_promotion,
+            "safety_floor": {
+                "require_exit_zero": True,
+                "require_gate_ok": True,
+                "never_relax_destructive_or_sensitive_guardrails": True,
+            },
+        }
+
     winner, promote, reasons, gates = pick_winner(
         results,
-        min_improvement=args.min_improvement,
-        max_regression=args.max_regression,
-        strict_promotion=args.strict_promotion,
+        min_improvement=float(guardrail_policy["min_improvement"]),
+        max_regression=float(guardrail_policy["max_regression"]),
+        strict_promotion=bool(guardrail_policy["strict_promotion"]),
     )
     baseline_result = next((r for r in results if r.candidate_id == "baseline"), results[0])
 
@@ -616,6 +922,7 @@ def main() -> int:
     out_md = out_dir / f"optimizer-tournament-{ts}.md"
     latest_json = out_dir / "optimizer-tournament-latest.json"
     latest_md = out_dir / "optimizer-tournament-latest.md"
+    generated_profiles_path = (repo / args.generated_profiles_json).resolve()
 
     promotion_execution = {
         "enabled": bool(args.promote_profile),
@@ -646,6 +953,16 @@ def main() -> int:
                 "promotion criteria not met (non-regression gates and/or positive delta)"
             )
 
+    generated_profiles = generate_specialized_ghost_profiles(results, ts)
+    generated_profiles_payload = {
+        "schema_version": 1,
+        "generated_at_utc": ts,
+        "source": "optimizer_tournament",
+        "profiles": generated_profiles,
+    }
+    generated_profiles_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_profiles_path.write_text(json.dumps(generated_profiles_payload, indent=2))
+
     payload = {
         "timestamp_utc": ts,
         "suite": args.suite,
@@ -657,6 +974,7 @@ def main() -> int:
         "min_improvement": args.min_improvement,
         "max_regression": args.max_regression,
         "strict_promotion": args.strict_promotion,
+        "guardrail_policy": guardrail_policy,
         "dry_run": args.dry_run,
         "candidates": [asdict(r) for r in results],
         "selection": {
@@ -666,6 +984,10 @@ def main() -> int:
             "regression_gates": gates,
         },
         "promotion_execution": promotion_execution,
+        "generated_profiles": {
+            "count": len(generated_profiles),
+            "path": str(generated_profiles_path),
+        },
     }
 
     out_json.write_text(json.dumps(payload, indent=2))
