@@ -2,7 +2,7 @@
 
 A feature and capability comparison of autonomous and semi-autonomous coding agents.
 
-**Last updated**: 2026-02-27
+**Last updated**: 2026-03-04
 **Author**: [Stas](https://stas.vision) — Athena is a portfolio/learning project I built to explore autonomous agent architecture. This comparison documents what I learned about the landscape and where Athena fits relative to production tools backed by well-funded teams.
 **Corrections welcome**: Open a PR or issue if any rating is inaccurate or outdated.
 
@@ -69,6 +69,7 @@ Categories are weighted by how much they affect a typical engineering team's ado
 | **OpenAI Codex** | OpenAI | macOS multi-agent desktop app | Not published | $20-200/mo (ChatGPT plans) | Proprietary |
 | **Augment Intent** | Augment | Spec-driven agent workspace | Not published | Credits (beta) | Proprietary |
 | **Sweep** | Sweep AI | Ticket-to-PR agent | Not published | Freemium | Partial |
+| **Pi** | Mario Zechner | Minimalist terminal coding agent | Not published | Free (self-hosted) | Open source |
 
 ---
 
@@ -90,16 +91,16 @@ How much can the agent do without human intervention, and how does it control it
 
 **Budget/resource controls** — Can the operator track and limit token usage, API costs, or compute? Ranges from displaying costs after the fact (Basic) to enforcing hard limits that stop execution (Strong).
 
-| Capability | Athena | Pilot | Devin | OpenHands | Cursor | Copilot | Claude Code | Codex | Aider |
-|------------|--------|-------|-------|-----------|--------|---------|-------------|-------|-------|
-| Autonomous task execution | **Strong** | **Strong** | **Strong** | **Good** | **Good** (background agents) | **Good** (coding agent) | **Good** | **Strong** (parallel agents, automations) | **Good** (git loop) |
-| Bounded autonomy controls | **Good** (composable knobs: auto-approve, per-tool confirmation, spontaneity 0-1, proactive master switch, quiet hours) | **Good** (configurable approval settings) | **Good** (permissions, approval workflow) | **Basic** (agent class config) | **Good** (adjustable) | **Basic** | **Good** (permission modes: suggest/auto-edit/full-auto) | **Good** (approval scopes) | **Basic** (--yes, --auto-commits flags) |
-| Self-healing on failure | **Basic** (2 error patterns: web_fetch timeout, file_edit not-found) | **Good** (CI retry) | **Good** (error loop) | **Basic** (retry on failure) | **Basic** (lint fix loop) | **Basic** (CI retry) | **Basic** (hooks) | **Good** (error loop) | **Good** (auto-retry with context) |
-| Self-improvement | **Good** (code health monitoring + refactoring detection) | -- | **Good** (learns over time) | -- | -- | -- | -- | -- | -- |
-| Confidence-based escalation | **Good** (per-tool confirmation gates, host tools always confirm, destructive command detection) | **Good** (approval before risky actions) | **Good** (asks when unsure) | **Basic** (user confirmation prompts) | **Good** | **Basic** | **Good** (permission prompts) | **Good** (approval system) | **Basic** (prompts before changes) |
-| Budget/resource controls | **Good** (token tracking) | **Good** (cost display) | **Good** (usage tracking, spending limits) | **Basic** (token counting) | **Good** (credit system) | **Good** (request limits) | **Good** (context limits) | **Good** (message limits per tier) | **Good** (API cost display) |
+| Capability | Athena | Pilot | Devin | OpenHands | Cursor | Copilot | Claude Code | Codex | Aider | Pi |
+|------------|--------|-------|-------|-----------|--------|---------|-------------|-------|-------|----|
+| Autonomous task execution | **Strong** | **Strong** | **Strong** | **Good** | **Good** (background agents) | **Good** (coding agent) | **Good** | **Strong** (parallel agents, automations) | **Good** (git loop) | **Basic** (user-directed loop) |
+| Bounded autonomy controls | **Good** (composable knobs: auto-approve, per-tool confirmation, spontaneity 0-1, proactive master switch, quiet hours) | **Good** (configurable approval settings) | **Good** (permissions, approval workflow) | **Basic** (agent class config) | **Good** (adjustable) | **Basic** | **Good** (permission modes: suggest/auto-edit/full-auto) | **Good** (approval scopes) | **Basic** (--yes, --auto-commits flags) | **Basic** (runs unrestricted by default; user controls context explicitly) |
+| Self-healing on failure | **Basic** (2 error patterns: web_fetch timeout, file_edit not-found) | **Good** (CI retry) | **Good** (error loop) | **Basic** (retry on failure) | **Basic** (lint fix loop) | **Basic** (CI retry) | **Basic** (hooks) | **Good** (error loop) | **Good** (auto-retry with context) | -- |
+| Self-improvement | **Good** (code health monitoring + refactoring detection) | -- | **Good** (learns over time) | -- | -- | -- | -- | -- | -- | -- |
+| Confidence-based escalation | **Good** (per-tool confirmation gates, host tools always confirm, destructive command detection) | **Good** (approval before risky actions) | **Good** (asks when unsure) | **Basic** (user confirmation prompts) | **Good** | **Basic** | **Good** (permission prompts) | **Good** (approval system) | **Basic** (prompts before changes) | **Good** (user sees every token sent to model; full context transparency) |
+| Budget/resource controls | **Good** (token tracking) | **Good** (cost display) | **Good** (usage tracking, spending limits) | **Basic** (token counting) | **Good** (credit system) | **Good** (request limits) | **Good** (context limits) | **Good** (message limits per tier) | **Good** (API cost display) | **Good** (user controls context size explicitly; multi-provider switching) |
 
-Athena and Pilot lead on autonomous execution. Most agents now offer some form of bounded autonomy — from binary flags (Aider's `--yes`) to composable knobs (Athena) to permission modes (Claude Code). Self-healing remains basic across the field, with error-loop retry being the most common pattern.
+Athena and Pilot lead on autonomous execution. Most agents now offer some form of bounded autonomy — from binary flags (Aider's `--yes`) to composable knobs (Athena) to permission modes (Claude Code). Pi takes the opposite approach: no autonomous behavior, but the user retains full explicit control over what enters the model context. Self-healing remains basic across the field, with error-loop retry being the most common pattern.
 
 ---
 
@@ -185,17 +186,17 @@ Does the agent remember what it learned and get better over time?
 
 **Relationship tracking** — Does the agent track per-user interaction patterns (topics discussed, communication preferences, warmth)? Athena has the schema but sentiment computation is not fully implemented.
 
-| Capability | Athena | Pilot | Devin | OpenHands | Augment | Aider | Claude Code | Codex | Intent | Cursor |
-|------------|--------|-------|-------|-----------|---------|-------|-------------|-------|--------|--------|
-| Semantic memory (embeddings) | **Strong** (ONNX 384-dim, cosine search) | -- | -- | -- | **Good** (context engine embeddings) | -- | -- | -- | -- | **Good** (codebase embeddings) |
-| Long-term memory | **Strong** (SQLite + FTS5 + vectors) | **Basic** (session context reuse) | **Good** (project learning) | **Good** (event log) | **Good** (Memories feature) | -- | **Good** (CLAUDE.md) | **Basic** (conversation history) | **Good** (persistent sessions) | **Good** (codebase indexing) |
-| Recency decay | **Strong** (configurable half-life) | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| Deduplication | **Good** (cosine similarity threshold) | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| Cross-session learning | **Strong** (persistent memory DB) | **Good** (40% token savings) | **Good** | **Basic** (event log persists) | **Good** (persistent context) | -- | **Good** (memory files) | **Good** (persistent threads) | **Good** (persistent sessions) | **Good** |
-| Codebase indexing | -- | **Strong** (context engine) | **Strong** (Devin Wiki/Search) | **Basic** (workspace files) | **Best-in-class** (500K files) | **Good** (repo-map AST) | **Basic** (project files) | **Basic** (workspace scope) | **Strong** (context engine, multi-repo) | **Strong** (50K files) |
-| Relationship tracking | **Basic** (schema exists, partially implemented) | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Capability | Athena | Pilot | Devin | OpenHands | Augment | Aider | Claude Code | Codex | Intent | Cursor | Pi |
+|------------|--------|-------|-------|-----------|---------|-------|-------------|-------|--------|--------|----|
+| Semantic memory (embeddings) | **Strong** (ONNX 384-dim, cosine search, HNSW index) | -- | -- | -- | **Good** (context engine embeddings) | -- | -- | -- | -- | **Good** (codebase embeddings) | -- |
+| Long-term memory | **Strong** (SQLite + FTS5 + HNSW vectors) | **Basic** (session context reuse) | **Good** (project learning) | **Good** (event log) | **Good** (Memories feature) | -- | **Good** (CLAUDE.md) | **Basic** (conversation history) | **Good** (persistent sessions) | **Good** (codebase indexing) | **Basic** (JSONL session tree; no semantic memory) |
+| Recency decay | **Strong** (configurable half-life) | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Deduplication | **Good** (cosine similarity threshold) | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Cross-session learning | **Strong** (persistent memory DB) | **Good** (40% token savings) | **Good** | **Basic** (event log persists) | **Good** (persistent context) | -- | **Good** (memory files) | **Good** (persistent threads) | **Good** (persistent sessions) | **Good** | **Basic** (JSONL session tree with branching; user-managed) |
+| Codebase indexing | -- | **Strong** (context engine) | **Strong** (Devin Wiki/Search) | **Basic** (workspace files) | **Best-in-class** (500K files) | **Good** (repo-map AST) | **Basic** (project files) | **Basic** (workspace scope) | **Strong** (context engine, multi-repo) | **Strong** (50K files) | -- (user provides context explicitly) |
+| Relationship tracking | **Basic** (schema exists, partially implemented) | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 
-Athena has the most sophisticated memory architecture among self-hosted agents (embedding search, FTS5, recency decay, deduplication). However, Augment Code's context engine indexes 500K+ files across multiple repos — an area where Athena has no equivalent. Relationship tracking exists in Athena's schema but sentiment computation is not yet fully implemented.
+Athena has the most sophisticated memory architecture among self-hosted agents — now including HNSW approximate nearest-neighbor indexing for sub-millisecond semantic search at scale (LNY-36). Augment Code's context engine still leads on codebase indexing (500K+ files). Pi takes a deliberate "no memory" stance: sessions are persisted as JSONL trees with in-place branching, but memory management is the user's responsibility.
 
 ---
 
@@ -347,17 +348,18 @@ How easy is it to start using the agent and how pleasant is the day-to-day inter
 
 **Documentation** — How well-documented is the agent? Claude Code's documentation is the most comprehensive. Aider has an active community with detailed guides.
 
-| Capability | Athena | Pilot | Devin | Cursor | Copilot | Claude Code | Codex | Intent | Aider |
-|------------|--------|-------|-------|--------|---------|-------------|-------|--------|-------|
-| Setup complexity | **Good** (binary + config) | **Strong** (single Go binary) | Easy (cloud) | **Best-in-class** (IDE download) | **Best-in-class** (already in VS Code) | **Best-in-class** (npm install) | **Strong** (macOS app) | **Good** (macOS app, beta) | **Best-in-class** (pip install) |
-| Interactive chat | **Strong** (CLI + Telegram) | **Good** (TUI interface) | **Strong** (web IDE) | **Strong** (inline + sidebar) | **Strong** (inline + sidebar) | **Strong** (CLI) | **Strong** (threaded chat + terminal) | **Strong** (editor + terminal + preview) | **Good** (CLI) |
-| Streaming responses | **Strong** | **Good** (TUI streaming) | **Good** | **Strong** | **Good** | **Best-in-class** | **Strong** | **Good** | **Good** |
-| Voice input | **Good** (Telegram voice) | -- | -- | -- | -- | -- | **Good** (voice dictation) | -- | -- |
-| Custom commands | -- | **Basic** (config-based) | -- | **Good** (rules for AI) | **Good** (custom instructions) | **Strong** (slash commands) | **Strong** (Skills) | -- | **Basic** (conventions file) |
-| Configuration depth | **Strong** (50+ knobs) | **Good** | **Basic** (limited settings) | **Good** | **Good** | **Good** (settings.json) | **Good** (approval scopes, models) | **Good** (model selection per task) | **Good** (yaml config) |
-| Documentation | **Good** | **Good** | **Good** (knowledge base) | **Good** | **Strong** | **Best-in-class** | **Strong** | **Basic** (beta) | **Strong** (active community) |
+| Capability | Athena | Pilot | Devin | Cursor | Copilot | Claude Code | Codex | Intent | Aider | Pi |
+|------------|--------|-------|-------|--------|---------|-------------|-------|--------|-------|----|
+| Setup complexity | **Good** (binary + config) | **Strong** (single Go binary) | Easy (cloud) | **Best-in-class** (IDE download) | **Best-in-class** (already in VS Code) | **Best-in-class** (npm install) | **Strong** (macOS app) | **Good** (macOS app, beta) | **Best-in-class** (pip install) | **Strong** (single binary; runs inside terminal) |
+| Interactive chat | **Strong** (CLI + Telegram) | **Good** (TUI interface) | **Strong** (web IDE) | **Strong** (inline + sidebar) | **Strong** (inline + sidebar) | **Strong** (CLI) | **Strong** (threaded chat + terminal) | **Strong** (editor + terminal + preview) | **Good** (CLI) | **Strong** (terminal-native; scrollback-native UX) |
+| Streaming responses | **Strong** | **Good** (TUI streaming) | **Good** | **Strong** | **Good** | **Best-in-class** | **Strong** | **Good** | **Good** | **Strong** |
+| Voice input | **Good** (Telegram voice) | -- | -- | -- | -- | -- | **Good** (voice dictation) | -- | -- | -- |
+| Custom commands | -- | **Basic** (config-based) | -- | **Good** (rules for AI) | **Good** (custom instructions) | **Strong** (slash commands) | **Strong** (Skills) | -- | **Basic** (conventions file) | **Good** (extensions via bash; user composes with shell) |
+| Configuration depth | **Strong** (50+ knobs) | **Good** | **Basic** (limited settings) | **Good** | **Good** | **Good** (settings.json) | **Good** (approval scopes, models) | **Good** (model selection per task) | **Good** (yaml config) | **Basic** (<1K token system prompt; minimal surface area by design) |
+| Documentation | **Good** | **Good** | **Good** (knowledge base) | **Good** | **Strong** | **Best-in-class** | **Strong** | **Basic** (beta) | **Strong** (active community) | **Good** (blog post + GitHub) |
+| Multi-provider switching | **Good** (OpenAI, Ollama, OpenRouter, Zen) | **Good** | -- | **Basic** (settings) | -- | **Basic** (Anthropic only) | -- | **Good** (model per task) | **Strong** (any LLM) | **Best-in-class** (15+ providers, mid-session switching) |
 
-IDE-based tools (Cursor, Copilot) have the lowest adoption friction. Codex's macOS app offers a polished middle ground between IDE and CLI. Intent provides an all-in-one workspace (editor + terminal + browser preview) but is macOS-only and in beta. Athena has the deepest configuration system (50+ runtime knobs).
+IDE-based tools (Cursor, Copilot) have the lowest adoption friction. Codex's macOS app offers a polished middle ground between IDE and CLI. Intent provides an all-in-one workspace (editor + terminal + browser preview) but is macOS-only and in beta. Athena has the deepest configuration system (50+ runtime knobs). Pi stands out for radical simplicity — by keeping the system prompt under 1K tokens and offering only 4 tools, it achieves maximum transparency and supports 15+ LLM providers including mid-session switching.
 
 ---
 
@@ -441,8 +443,9 @@ Raw scores (0-10) multiplied by category weights. Maximum possible: 127.5.
 | **Codex** | 6 (12) | 8 (12) | 8 (12) | 6 | 6 | 3 | 6 | 6 | 3 (2.25) | 6 (4.5) | 4 (2) | **70.75** |
 | **Intent** | 4 (8) | 7 (10.5) | 4 (6) | 5 | 7 | 5 | 4 | 6 | 2 (1.5) | 4 (3) | 1 (0.5) | **56.5** |
 | **Sweep** | 7 (14) | 5 (7.5) | 4 (6) | 4 | 2 | 2 | 3 | 2 | 2 (1.5) | 3 (2.25) | 1 (0.5) | **44.75** |
+| **Pi** | 2 (4) | 8 (12) | 1 (1.5) | 2 | 1 | 1 | 2 | 2 | 5 (3.75) | 2 (1.5) | 2 (1) | **30.75** |
 
-**Reading the scores**: Athena (82.25), Pilot (77.5), and Codex (70.75) lead overall but for different reasons — Athena through depth in autonomy, memory, execution, and observability; Pilot through the pipeline and integrations; Codex through broad DX, integrations (Skills + MCP), and parallel agents. Copilot (68.5), Factory (66), and Devin (65.25) form a competitive middle tier. Intent (56.5) is early but its spec-driven multi-agent approach is architecturally interesting.
+**Reading the scores**: Athena (82.25), Pilot (77.5), and Codex (70.75) lead overall but for different reasons — Athena through depth in autonomy, memory, execution, and observability; Pilot through the pipeline and integrations; Codex through broad DX, integrations (Skills + MCP), and parallel agents. Copilot (68.5), Factory (66), and Devin (65.25) form a competitive middle tier. Intent (56.5) is early but its spec-driven multi-agent approach is architecturally interesting. Pi (30.75) scores low by this framework's weights — which favor pipeline automation and integrations — but this understates its value: Pi's score is intentional, representing a deliberate philosophy of *not* being an autonomous pipeline. Its DX score (8) reflects genuine excellence in transparency and multi-provider flexibility. The scoring framework itself is biased toward team automation use cases; Pi targets a different use case entirely (individual developer, full control, no magic).
 
 ---
 
@@ -468,6 +471,7 @@ What makes each product distinct — features that no or few competitors match.
 | **Augment Intent** | Spec-driven development (living specifications as source of truth); coordinator agent that delegates to parallel specialists; multi-model support (choose model per task); integrated workspace (editor + terminal + browser preview); persistent sessions with auto-commit |
 | **Claude Code** | Direct Anthropic model access; hook system (PreToolUse/PostToolUse); plan mode; worktree isolation; strong documentation |
 | **SWE-agent** | Most-cited academic agent; reproducible benchmarks; research baseline for the field |
+| **Pi** | Radical minimalism: <1K token system prompt, only 4 tools (read/write/edit/bash); 15+ LLM providers with mid-session switching; JSONL session trees with in-place branching; terminal-native UX (scrollback-based, not full-screen); philosophy of "if I don't need it, it won't be built" |
 
 ---
 
@@ -538,6 +542,14 @@ Honest gaps per product, based on public information and source inspection.
 - No long-term semantic memory (file-based memory only)
 - No scheduled or proactive behavior
 
+**Pi**
+- No autonomous task execution — always requires human direction
+- No memory beyond JSONL session files (user must manage context)
+- No integrations (no GitHub, no Jira, no CI/CD)
+- No sandboxing — runs directly on host
+- No sub-agents or multi-agent orchestration natively
+- Benchmark performance (Terminal-Bench 2.0) outperforms feature-rich alternatives, but no SWE-bench scores published
+
 ---
 
 ## Landscape Summary
@@ -547,6 +559,121 @@ The autonomous coding agent market is segmented: cloud SaaS products (Devin, Jul
 ## Why Athena Exists
 
 Athena is not a startup or a product — it's a portfolio project and personal learning ground. Building it from scratch was the fastest way to deeply understand the architecture behind autonomous agents: memory systems, sandboxed execution, multi-agent routing, LLM orchestration, and observability. Many of the subsystems (ONNX embeddings, Langfuse tracing, Docker hardening, cron scheduling) were built to answer "how would I implement this?" rather than "does the market need this?" The comparison above is the output of that learning process — mapping what exists, what's hard, and where the interesting unsolved problems are.
+
+---
+
+---
+
+## Reference Architecture: Stripe Minions
+
+Stripe Minions is not a standalone product — it is Stripe's internal autonomous coding system, built to serve their own engineering teams. It is not available for purchase or self-hosting. However, its published architecture (two detailed engineering blog posts, Feb 2026) is significant enough to warrant a dedicated section as a reference model for production-grade autonomous agents at scale.
+
+### What Stripe Minions Is
+
+A fleet of **fully autonomous, one-shot, end-to-end coding agents** producing 1,000+ merged pull requests per week against Stripe's production codebase. All code is AI-generated and human-reviewed; no human input occurs during agent execution.
+
+### Architecture: Blueprints
+
+Minions use a **blueprint-based orchestration model** — the most important architectural pattern to understand:
+
+```
+Blueprint = sequence of deterministic nodes + agentic nodes
+  Deterministic nodes: git ops, linting, local test runs (< 5s, predictable)
+  Agentic nodes: "implement task", "fix CI failures" (agent loop, bounded)
+```
+
+This interleaving of deterministic and agentic execution achieves reliability without full determinism. The agent loop runs inside a well-defined envelope; outside that envelope, every step is scripted and predictable. Athena's feature contracts + DAG model is the closest Athena analogue, but contracts currently cover only the task-level orchestration layer, not the intra-task interleaving.
+
+**Bounded iteration policy**: Minions attempt at most two CI cycles before handing off to humans. This hard ceiling prevents unbounded self-healing loops and ensures predictable completion time.
+
+### Infrastructure: Devbox Model
+
+- AWS EC2 instances purpose-built for each minion run, spinning up in ~10 seconds
+- Pre-loaded with Stripe's codebase, services, and dependency caches ("warmed cattle")
+- No production data access; full network sandbox
+- Single-use: each devbox is destroyed after the minion completes
+
+This maps to Athena's Docker sandbox model — the philosophy is identical (isolated, throwaway, bounded) but at cloud-VM scale with faster spin-up than cold Docker.
+
+### Tool Ecosystem: MCP + Toolshed
+
+- **MCP (Model Context Protocol)** as the integration layer for all tool calling
+- **Toolshed**: Stripe's internal MCP server hosting 500+ tools for Stripe systems (code search, metrics, runbooks, deployment, etc.)
+- Tools are **conditionally scoped** by repository subdirectory — a minion working in `payments/` gets a different tool subset than one working in `infrastructure/`
+
+This is a direct counter-argument to Athena's current MCP gap. Stripe's evidence is that MCP-based Toolshed (not native integrations) is how you scale to hundreds of domain-specific tools without maintaining custom adapters.
+
+### What Minions Validates vs. Athena's Strategy
+
+| Dimension | Stripe Minions approach | Athena current state | Fit for Athena |
+|-----------|------------------------|---------------------|----------------|
+| **Bounded autonomy** | Hard 2-CI-cycle ceiling | 5-level autonomy ladder with configurable thresholds | ✅ Strong alignment |
+| **Isolated execution** | Devbox (EC2, ~10s spin-up) | Hardened Docker containers | ✅ Same philosophy, different scale |
+| **Blueprint/DAG orchestration** | Deterministic + agentic node interleaving | Feature contracts with topological DAG ordering | ✅ Architectural similarity — Athena's contracts could adopt intra-task blueprints |
+| **MCP tooling** | Toolshed (500+ tools via MCP) | MCP ToolRegistry (recent, LNY-37) | ✅ Athena now has MCP — grow the tool catalog |
+| **Self-improvement** | None documented | 4 self-improvement funnels | ➖ Minions don't self-improve; Athena's learning loops are differentiated here |
+| **Memory** | None documented | HNSW semantic memory, recency decay | ➖ Minions operate stateless per-run; Athena's memory is a differentiator |
+| **Scale** | 1,000+ PRs/week | Single-team, single-instance | ⚠️ Minions achieves this through infrastructure, not agent sophistication |
+| **Production validation** | Proven at scale since 2025 | Portfolio project, real-gate score 0.96 | ⚠️ Minions has production proof; Athena has architectural sophistication |
+
+### Key Takeaways for Athena
+
+1. **Blueprint pattern is worth adopting**: The deterministic-agentic interleaving within a task is a gap in Athena's current model. Feature contracts handle task-level DAG ordering but execution within a single ghost invocation is a pure LLM loop. Adding deterministic "rails" within the ghost execution strategy (e.g., always run `cargo check` after each file edit, before proceeding) would reduce failure modes.
+
+2. **MCP Toolshed confirms Athena's direction**: Stripe chose MCP + a centralized Toolshed over custom integrations. Athena's recent MCP ToolRegistry (LNY-37) validates this direction. The next priority should be populating the Toolshed — especially code search, test runners, and CI status tools.
+
+3. **Bounded iteration as a first-class constraint**: Minions' "at most 2 CI cycles" is a hard operational guarantee that makes the system predictable. Athena's self-heal loop lacks a comparable hard ceiling. Consider adding a configurable `max_heal_cycles` to the execution contract.
+
+4. **Stateless per-run vs. stateful cross-run**: Minions operates stateless — each run starts fresh. Athena's long-term memory is a genuine architectural differentiator that Minions doesn't have. This is a depth dimension where Athena leads.
+
+---
+
+## Depth vs. Breadth: Strategic Analysis
+
+Three distinct philosophies of "depth" emerged from the 2026 competitive landscape:
+
+### The Minimalism Pole: Pi
+
+Pi pursues **depth in transparency and user control**. By stripping everything to 4 tools and a <1K token system prompt, it maximizes the developer's ability to understand and predict what the model sees. There is no magic — no auto-injected context, no background processes, no memory management. The user decides everything.
+
+**What fits Athena's strategy**: Nothing from Pi's architecture fits Athena's direction — Athena deliberately manages complexity on the user's behalf. However, Pi's *philosophy* is a useful counterweight. Athena's 50+ knobs and multi-layer system prompts create unpredictability that Pi avoids by design. Athena's observability stack (event streaming, Langfuse, KPI tracking) is partly a response to this complexity — making managed complexity legible.
+
+**What doesn't fit**: Radical minimalism is the wrong tradeoff for Athena's mission of sustained autonomous delivery. A tool that can't run without human direction cannot close the delivery loop.
+
+### The Industrial Scale Pole: Stripe Minions
+
+Minions pursues **depth through infrastructure integration**. Reliability comes from devboxes, pre-loaded caches, MCP Toolshed, and blueprint orchestration — not from agent sophistication. The LLM is contained inside well-defined envelopes; everything outside those envelopes is deterministic.
+
+**What fits Athena's strategy**: The bounded execution model, MCP tool ecosystem, and blueprint/DAG interleaving are all directly applicable. Minions validates Athena's bounded autonomy ladder and Docker isolation philosophy.
+
+**What doesn't fit**: Minions achieves scale through engineering headcount and infrastructure investment (AWS EC2 fleets, 500+ custom tools). Athena is a single-binary self-hosted system; it cannot replicate devbox spin-up economics. More importantly, Minions has *no self-improvement* — it doesn't learn across runs, refactor its own code, or adapt to failures over time. Athena's 4 self-improvement funnels and semantic memory represent a fundamentally different bet: that an agent that *learns* can eventually outperform one that's merely well-resourced.
+
+### Athena's Bet: Depth in Adaptive Autonomy
+
+Athena's strategy occupies a third position: **depth in learning, measurement, and bounded self-improvement**. Where Pi maximizes user control and Minions maximizes infrastructure reliability, Athena invests in the agent's ability to get better at its job without requiring either constant human direction or unlimited engineering resources.
+
+The core hypothesis: **a learning agent with measurable autonomy levels and self-improvement loops can deliver sustained value from a single instance** — no fleet of EC2s, no 500-tool Toolshed, no constant human steering.
+
+| Dimension | Pi | Stripe Minions | Athena |
+|-----------|----|----|--------|
+| **Primary depth vector** | Transparency / user control | Infrastructure integration | Adaptive learning / self-improvement |
+| **Reliability mechanism** | User oversight | Deterministic blueprint rails | KPI tracking + self-heal + bounded autonomy |
+| **Scalability model** | N/A (individual tool) | EC2 fleet, warm caches | Single-instance, learning over time |
+| **Memory** | None (user manages) | None (stateless per run) | Persistent semantic memory with decay |
+| **Self-improvement** | None | None | 4 autonomous funnels |
+| **Autonomy model** | User-directed | One-shot, bounded to 2 CI cycles | 5-level ladder, progressive |
+| **Failure handling** | User sees error | Hard stop at 2 cycles | Self-heal, pattern detection, health monitor |
+| **Production validation** | Terminal-Bench outperforms feature-rich tools | 1,000+ PRs/week merged | Real-gate score 0.96, 3/3 supervised self-builds |
+
+### Strategic Implications
+
+**Athena should not chase breadth**: Adding more integrations, IDE plugins, or ticket connectors to match Pilot or Copilot would dilute focus without winning on those dimensions — those tools have larger teams and more resources. Athena wins by being the deepest implementation of the learning-agent model.
+
+**The learning loops need to close fully**: The 55-60% end-to-end closed loop estimate (from `self-improvement-roadmap.md`) is the most important number to improve. A self-improvement system that's 55% closed isn't improving — it's just collecting data. The orchestration-layer gaps (feedback injection into classifier, failure suppression, cross-task context passing) are more strategically important than any new integration.
+
+**Blueprint rails inside ghost execution**: Minions' deterministic-within-agentic pattern is directly applicable to Athena's EXECUTE phase. Adding deterministic rails (run checks after every edit, validate before proceeding) would improve reliability without changing the architecture.
+
+**MCP Toolshed is the right integration strategy**: Athena now has MCP ToolRegistry (LNY-37). Building out the Toolshed (code search, test runners, CI status) is more valuable than direct API integrations, because MCP tools are composable and discoverable.
 
 ---
 
@@ -578,3 +705,7 @@ Athena is not a startup or a product — it's a portfolio project and personal l
 - [SWE-bench Leaderboard](https://www.swebench.com)
 - [SWE-Bench Pro Leaderboard](https://scale.com/leaderboard/swe_bench_pro_public)
 - [Self-Evolving Agents Survey](https://github.com/EvoAgentX/Awesome-Self-Evolving-Agents)
+- [Pi (pi-mono) by Mario Zechner](https://github.com/badlogic/pi-mono) — source code + README
+- [What I learned building an opinionated and minimal coding agent](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) — creator's blog post on Pi's design philosophy
+- [Stripe Minions Part 1: One-shot end-to-end coding agents](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
+- [Stripe Minions Part 2: Blueprint architecture and Toolshed](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents-part-2)

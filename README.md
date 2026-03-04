@@ -6,7 +6,8 @@ Secure autonomous multi-agent system for code execution, evaluation, and policy-
 
 - multi-ghost task execution (`coder`, `scout`, feature/task contracts)
 - guarded autonomous dispatch with outcome tracking
-- memory and embedding-backed context
+- memory and embedding-backed context (HNSW semantic index + FTS5 full-text search)
+- MCP ToolRegistry with multi-skill ghost routing
 - doctor + KPI + eval harness pipelines
 - supervised self-build and optimizer tournament tooling
 
@@ -74,6 +75,8 @@ Real-gate and nightly optimizer workflows are intentionally self-hosted.
 - `docs/feature-contract-workflow.md`
 - `docs/local-only-deployment.md`
 - `docs/security-attestation.md`
+- `docs/autonomous-agents-epic-comparison.md` — competitive landscape analysis
+- `docs/conductor-athena-gap-analysis.md` — gap analysis vs. Conductor
 
 ## Local Secrets
 
