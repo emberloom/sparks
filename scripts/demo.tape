@@ -2,36 +2,48 @@
 # Prerequisites: install VHS (https://github.com/charmbracelet/vhs)
 # Run: vhs scripts/demo.tape
 # Output: docs/demo.gif
-#
-# The demo uses --skip-llm / ghosts (no network required) so it runs
-# deterministically in CI without any API keys.
 
 Output docs/demo.gif
 
 Set FontSize 14
 Set Width 1200
-Set Height 600
+Set Height 620
 Set Theme "Dracula"
+Set Padding 20
 
-# Brief pause before starting
-Sleep 500ms
-
-Type "# List configured ghost agents (no LLM required)"
+# Set up demo alias invisibly
+Hide
+Type "alias athena='bash scripts/demo-wrapper.sh'"
 Enter
 Sleep 300ms
-
-Type "ATHENA_DISABLE_HOME_PROFILES=1 cargo run --quiet -- ghosts"
-Enter
-Sleep 8s
-
-Type "# Run the doctor health check (skips LLM connectivity)"
-Enter
+Show
+Ctrl+L
 Sleep 300ms
 
-Type "cargo run --quiet -- doctor --skip-llm"
+# Act 1: Show the agent roster
+Type "# Ghost agents configured for this workspace"
 Enter
-Sleep 10s
+Sleep 200ms
+Type "athena ghosts"
+Enter
+Sleep 6s
 
-Type "# Done! See docs/ for full documentation."
+# Separator
+Type "# Dispatching an autonomous task..."
 Enter
+Sleep 400ms
+
+# Act 2: Dispatch — wrapper prints output line-by-line with delays (~12s total)
+Type `athena dispatch --goal "Add per-IP rate limiting to the login endpoint"`
+Enter
+Sleep 15s
+
+# Act 3: KPI — show success rate after task completes
+Type "# Mission KPIs"
+Enter
+Sleep 200ms
+Type "athena kpi status"
+Enter
+Sleep 4s
+
 Sleep 2s
