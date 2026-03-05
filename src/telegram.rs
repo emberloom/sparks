@@ -198,6 +198,56 @@ async fn transcribe_voice(
         .ok_or_else(|| "STT response missing 'text' field".to_string())
 }
 
+/// Synthesize speech from text using a TTS API (OpenAI-compatible).
+/// Returns raw audio bytes (opus/ogg by default) suitable for Telegram voice messages.
+async fn synthesize_speech(
+    text: &str,
+    config: &TelegramConfig,
+) -> std::result::Result<Vec<u8>, String> {
+    let tts_url = config
+        .tts_url
+        .as_deref()
+        .ok_or("TTS not configured. Set [telegram] tts_url in config.")?;
+    let tts_key = config
+        .tts_api_key
+        .clone()
+        .or_else(|| std::env::var("ATHENA_TTS_API_KEY").ok());
+    let model = config.tts_model.as_deref().unwrap_or("tts-1");
+    let voice = config.tts_voice.as_deref().unwrap_or("alloy");
+    let response_format = config.tts_response_format.as_deref().unwrap_or("opus");
+
+    let body = serde_json::json!({
+        "model": model,
+        "input": text,
+        "voice": voice,
+        "response_format": response_format,
+    });
+
+    let client = reqwest::Client::new();
+    let mut req = client.post(tts_url).json(&body);
+    if let Some(ref key) = tts_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("TTS request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("TTS error ({}): {}", status, body));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read TTS audio: {}", e))?;
+
+    Ok(bytes.to_vec())
+}
+
 // ── Confirmer ────────────────────────────────────────────────────────
 
 /// Telegram confirmer: sends inline keyboard, waits on oneshot with timeout.
@@ -1947,8 +1997,19 @@ async fn dispatch_to_core(
     session: SessionContext,
     text: String,
     initial_status: &str,
+    was_voice: bool,
 ) -> ResponseResult<()> {
-    dispatch_to_core_with_followup(bot, chat_id, state, session, text, initial_status, None).await
+    dispatch_to_core_with_followup(
+        bot,
+        chat_id,
+        state,
+        session,
+        text,
+        initial_status,
+        None,
+        was_voice,
+    )
+    .await
 }
 
 async fn dispatch_to_core_with_followup(
@@ -1959,8 +2020,10 @@ async fn dispatch_to_core_with_followup(
     text: String,
     initial_status: &str,
     followup: Option<(String, InlineKeyboardMarkup)>,
+    was_voice: bool,
 ) -> ResponseResult<()> {
     let confirmer = telegram_confirmer(&bot, chat_id, &state);
+    let config = state.config.clone();
 
     tracing::debug!("Sending status message");
     let status_msg = bot
@@ -1987,7 +2050,15 @@ async fn dispatch_to_core_with_followup(
     };
 
     tokio::spawn(async move {
-        forward_telegram_events(bot.clone(), chat_id, status_msg.id, events).await;
+        forward_telegram_events(
+            bot.clone(),
+            chat_id,
+            status_msg.id,
+            events,
+            was_voice,
+            config,
+        )
+        .await;
         if let Some((msg, kb)) = followup {
             let _ = bot
                 .send_message(chat_id, msg)
@@ -2141,6 +2212,7 @@ async fn handle_planning_message(
                     "<b>Plan generated.</b> What would you like to do next?".to_string(),
                     planning_post_generate_keyboard(),
                 )),
+                false,
             )
             .await?;
             Ok(true)
@@ -2199,6 +2271,8 @@ async fn forward_telegram_events(
     chat_id: ChatId,
     status_id: teloxide::types::MessageId,
     mut events: tokio::sync::mpsc::Receiver<CoreEvent>,
+    was_voice: bool,
+    config: TelegramConfig,
 ) {
     let mut stream_buffer = String::new();
     let mut last_edit = tokio::time::Instant::now();
@@ -2245,6 +2319,22 @@ async fn forward_telegram_events(
                 };
                 if response_text.trim().is_empty() {
                     break;
+                }
+                // Voice talk-back: if the user sent a voice message and TTS is
+                // configured, synthesize audio and send as a Telegram voice
+                // message. Always send text as well so the user has a readable
+                // copy (and as a fallback if TTS fails).
+                if was_voice && config.tts_url.is_some() {
+                    match synthesize_speech(&response_text, &config).await {
+                        Ok(audio) => {
+                            let input_file =
+                                teloxide::types::InputFile::memory(audio).file_name("voice.ogg");
+                            let _ = bot.send_voice(chat_id, input_file).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "TTS synthesis failed, falling back to text");
+                        }
+                    }
                 }
                 send_response_chunks(&bot, chat_id, &response_text).await;
             }
@@ -2371,6 +2461,7 @@ mod tests {
 /// Handle an incoming message (text, voice, or photo).
 async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
+    let was_voice = msg.voice().is_some();
 
     let Some(text) = preflight_message(&bot, &msg, chat_id, &state).await? else {
         return Ok(());
@@ -2401,6 +2492,7 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) -> Respons
         session,
         text,
         "<i>Status: Starting...</i>",
+        was_voice,
     )
     .await
 }
@@ -2693,6 +2785,7 @@ async fn execute_planning_action(
                     "<b>Plan generated.</b> What would you like to do next?".to_string(),
                     planning_post_generate_keyboard(),
                 )),
+                false,
             )
             .await?;
         }
@@ -2787,6 +2880,7 @@ async fn handle_implement_callback(
             ctx.prompt,
             "<i>Status: Implementing…</i>",
             Some((report_html, report_kb)),
+            false,
         )
         .await?;
     } else if kind == "start" && value == "cancel" {

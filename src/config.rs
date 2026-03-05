@@ -356,6 +356,16 @@ pub struct TelegramConfig {
     pub stt_api_key: Option<String>,
     /// STT model name (default: whisper-large-v3)
     pub stt_model: Option<String>,
+    /// Text-to-speech API URL (e.g. http://localhost:8880/v1/audio/speech)
+    pub tts_url: Option<String>,
+    /// TTS API key (or set ATHENA_TTS_API_KEY env var)
+    pub tts_api_key: Option<String>,
+    /// TTS model name (default: "tts-1")
+    pub tts_model: Option<String>,
+    /// TTS voice name (default: "alloy")
+    pub tts_voice: Option<String>,
+    /// TTS audio format: "opus", "mp3", "wav", "flac" (default: "opus")
+    pub tts_response_format: Option<String>,
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -372,6 +382,11 @@ impl std::fmt::Debug for TelegramConfig {
             .field("stt_url", &self.stt_url)
             .field("stt_api_key", &"[REDACTED]")
             .field("stt_model", &self.stt_model)
+            .field("tts_url", &self.tts_url)
+            .field("tts_api_key", &"[REDACTED]")
+            .field("tts_model", &self.tts_model)
+            .field("tts_voice", &self.tts_voice)
+            .field("tts_response_format", &self.tts_response_format)
             .finish()
     }
 }
@@ -390,6 +405,11 @@ impl Default for TelegramConfig {
             stt_url: None,
             stt_api_key: None,
             stt_model: None,
+            tts_url: None,
+            tts_api_key: None,
+            tts_model: None,
+            tts_voice: None,
+            tts_response_format: None,
         }
     }
 }
@@ -1363,6 +1383,9 @@ impl Config {
         }
         if let Ok(key) = std::env::var("ATHENA_STT_API_KEY") {
             self.telegram.stt_api_key = Some(key);
+        }
+        if let Ok(key) = std::env::var("ATHENA_TTS_API_KEY") {
+            self.telegram.tts_api_key = Some(key);
         }
         if let Ok(token) = std::env::var("GH_TOKEN") {
             self.github.token = Some(token);
