@@ -10,7 +10,7 @@ semantic memory, and deep observability — built in Rust.</strong></p>
 [![CI](https://github.com/Enreign/athena/actions/workflows/maintainability.yml/badge.svg)](https://github.com/Enreign/athena/actions/workflows/maintainability.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/github/v/tag/Enreign/athena?label=version&color=blue)](https://github.com/Enreign/athena/releases)
 [![Status](https://img.shields.io/badge/status-active%20development-yellow.svg)](CHANGELOG.md)
 
 <br>
