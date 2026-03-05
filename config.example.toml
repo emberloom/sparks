@@ -12,6 +12,22 @@ profile = "container_strict"
 [llm]
 provider = "openai"
 
+# OpenAI-compatible API server (for IDE/client integrations).
+# Disabled by default; when enabled, Athena exposes:
+# - GET  /v1/models
+# - POST /v1/chat/completions
+[openai_api]
+enabled = false
+bind = "127.0.0.1:8787"
+# Set a bearer key in env (recommended):
+# export ATHENA_OPENAI_API_KEY="change-me"
+api_key_env = "ATHENA_OPENAI_API_KEY"
+principal = "self"
+requests_per_minute = 120
+burst = 30
+# Optional explicit model IDs to advertise (defaults include "athena", current model, and ghost IDs).
+# advertised_models = ["athena", "athena/coder", "athena/scout"]
+
 # Fully local profile (copy into your active config):
 # [runtime]
 # profile = "local_only"
@@ -111,6 +127,24 @@ enabled = false
 # [docker]
 # timeout_secs = 600
 
+[mcp]
+enabled = false
+# How long discovered MCP capabilities stay fresh before a refresh attempt.
+discovery_ttl_secs = 60
+
+# Example stdio server (tool names become "mcp:<server>:<tool>").
+# [[mcp.servers]]
+# name = "linear"
+# enabled = true
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-linear"]
+# env = ["LINEAR_API_KEY"]
+# timeout_secs = 30
+# reconnect_delay_secs = 5
+# requires_confirmation = true
+# allowed_tools = ["search_documents", "get_issue", "mcp:linear:search_documents"]
+
 # Athena's persona — soul file is a freeform markdown identity document
 # loaded at startup and injected as the first section of the manager's system prompt.
 [persona]
@@ -123,8 +157,13 @@ enabled = false
 name = "coder"
 description = "Complex multi-file coding tasks: refactoring, new features, bug fixes across files."
 tools = ["file_read", "file_write", "shell", "git", "gh"]
+role = "coder"
 strategy = "code"
 # soul_file = "~/.athena/souls/coder.md"
+# skill_file = "~/.athena/skills/coder.md"
+# skill_files = ["~/.athena/skills/rust-core.md", "~/.athena/skills/secure-coding.md"]
+# Multiple skill files are merged in order (legacy `skill_file` is still supported).
+# To reuse a skill between ghosts, point both ghosts at the same file path.
 
 [[ghosts.mounts]]
 host_path = "."
@@ -135,8 +174,11 @@ read_only = false
 name = "scout"
 description = "Explores files and runs read-only commands. Cannot modify anything."
 tools = ["file_read", "shell"]
+role = "worker"
 strategy = "react"
 # soul_file = "~/.athena/souls/scout.md"
+# skill_file = "~/.athena/skills/scout.md"
+# skill_files = ["~/.athena/skills/rust-core.md"]
 
 [[ghosts.mounts]]
 host_path = "."
@@ -154,6 +196,16 @@ enabled = true
 # dedup_threshold = 0.95
 # In-process LRU capacity for hybrid retrieval results (0 disables cache).
 # retrieval_cache_capacity = 256
+# Enable HNSW approximate nearest-neighbor index for semantic retrieval.
+# hnsw_enabled = true
+# Minimum embedded memory count before HNSW is built (below this uses exact cosine fallback).
+# hnsw_min_index_size = 64
+# HNSW graph connectivity parameter (typical range: 8-48).
+# hnsw_m = 16
+# HNSW construction breadth (higher is slower build, better recall).
+# hnsw_ef_construction = 200
+# HNSW query breadth (higher is slower query, better recall).
+# hnsw_ef_search = 64
 
 [telegram]
 # token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`

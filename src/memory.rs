@@ -5,6 +5,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
 use chrono::{NaiveDateTime, Utc};
+use hnsw_rs::prelude::{DistCosine, Hnsw};
 use rusqlite::Connection;
 
 use crate::embeddings::cosine_similarity;
@@ -200,29 +201,83 @@ impl RetrievalLruCache {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct HnswIndexConfig {
+    pub enabled: bool,
+    pub min_index_size: usize,
+    pub m: usize,
+    pub ef_construction: usize,
+    pub ef_search: usize,
+}
+
+impl Default for HnswIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_index_size: 64,
+            m: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        }
+    }
+}
+
+struct HnswSemanticIndex {
+    graph: Hnsw<'static, f32, DistCosine>,
+    memory_ids: Vec<String>,
+}
+
+impl std::fmt::Debug for HnswSemanticIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnswSemanticIndex")
+            .field("points", &self.memory_ids.len())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct SemanticIndexState {
+    index: Option<HnswSemanticIndex>,
+    dirty: bool,
+}
+
+impl SemanticIndexState {
+    fn new() -> Self {
+        Self {
+            index: None,
+            dirty: true,
+        }
+    }
+}
+
 pub struct MemoryStore {
     conn: Mutex<Connection>,
     embedding_cache: RwLock<HashMap<String, Vec<f32>>>,
     retrieval_cache: Mutex<RetrievalLruCache>,
+    semantic_index: RwLock<SemanticIndexState>,
     memory_generation: AtomicU64,
     recency_half_life_days: f32,
     dedup_threshold: f32,
+    hnsw: HnswIndexConfig,
 }
 
 impl MemoryStore {
-    pub fn new(
+    pub fn new_with_hnsw(
         conn: Connection,
         recency_half_life_days: f32,
         dedup_threshold: f32,
         retrieval_cache_capacity: usize,
+        hnsw: HnswIndexConfig,
     ) -> Self {
         let store = Self {
             conn: Mutex::new(conn),
             embedding_cache: RwLock::new(HashMap::new()),
             retrieval_cache: Mutex::new(RetrievalLruCache::new(retrieval_cache_capacity)),
+            semantic_index: RwLock::new(SemanticIndexState::new()),
             memory_generation: AtomicU64::new(0),
             recency_half_life_days,
             dedup_threshold,
+            hnsw,
         };
         if let Err(e) = store.load_embedding_cache() {
             tracing::warn!("Failed to load embedding cache: {}", e);
@@ -243,6 +298,7 @@ impl MemoryStore {
 
     fn invalidate_retrieval_cache(&self) {
         let generation = self.memory_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.mark_semantic_index_dirty();
         match self.retrieval_cache.lock() {
             Ok(mut cache) => cache.invalidate_all(),
             Err(e) => {
@@ -251,6 +307,17 @@ impl MemoryStore {
                     "Retrieval cache lock poisoned during invalidation: {}",
                     e
                 );
+            }
+        }
+    }
+
+    fn mark_semantic_index_dirty(&self) {
+        match self.semantic_index.write() {
+            Ok(mut state) => {
+                state.dirty = true;
+            }
+            Err(e) => {
+                tracing::warn!("Semantic index lock poisoned while marking dirty: {}", e);
             }
         }
     }
@@ -294,6 +361,21 @@ impl MemoryStore {
             cache.reset_stats();
         } else {
             tracing::warn!("Retrieval cache lock poisoned while resetting stats");
+        }
+    }
+
+    #[cfg(test)]
+    pub fn semantic_index_point_count(&self) -> usize {
+        match self.semantic_index.read() {
+            Ok(state) => state
+                .index
+                .as_ref()
+                .map(|index| index.memory_ids.len())
+                .unwrap_or(0),
+            Err(e) => {
+                tracing::warn!("Semantic index lock poisoned while reading status: {}", e);
+                0
+            }
         }
     }
 
@@ -491,8 +573,7 @@ impl MemoryStore {
         Ok(results)
     }
 
-    /// Semantic search: cosine similarity via in-memory embedding cache.
-    pub fn search_semantic(
+    fn search_semantic_exact(
         &self,
         query_embedding: &[f32],
         limit: usize,
@@ -509,7 +590,7 @@ impl MemoryStore {
             id_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             id_scores.truncate(limit);
             id_scores
-        }; // cache read lock dropped
+        };
 
         if id_scores.is_empty() {
             return Ok(vec![]);
@@ -537,6 +618,186 @@ impl MemoryStore {
             }
         }
         Ok(results)
+    }
+
+    fn rebuild_semantic_index(&self) -> Result<bool> {
+        if !self.hnsw.enabled {
+            return Ok(false);
+        }
+
+        let snapshot: Vec<(String, Vec<f32>)> = {
+            let cache = self.embedding_cache.read().map_err(|e| {
+                AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e))
+            })?;
+            cache
+                .iter()
+                .map(|(id, emb)| (id.clone(), emb.clone()))
+                .collect()
+        };
+
+        if snapshot.len() < self.hnsw.min_index_size {
+            if let Ok(mut state) = self.semantic_index.write() {
+                state.index = None;
+                state.dirty = false;
+            }
+            return Ok(false);
+        }
+
+        let max_nb_connection = self.hnsw.m.clamp(2, 256);
+        let ef_construction = self.hnsw.ef_construction.max(max_nb_connection);
+        let max_elements = snapshot.len().max(self.hnsw.min_index_size) * 2;
+        let max_layer = 16usize.min(((snapshot.len() as f32).ln().ceil() as usize).max(1));
+        let graph = Hnsw::<f32, DistCosine>::new(
+            max_nb_connection,
+            max_elements,
+            max_layer,
+            ef_construction,
+            DistCosine {},
+        );
+
+        let mut memory_ids = Vec::with_capacity(snapshot.len());
+        for (data_id, (memory_id, emb)) in snapshot.into_iter().enumerate() {
+            graph.insert((emb.as_slice(), data_id));
+            memory_ids.push(memory_id);
+        }
+
+        let mut state = self.semantic_index.write().map_err(|e| {
+            AthenaError::Internal(format!(
+                "Semantic index lock poisoned during rebuild: {}",
+                e
+            ))
+        })?;
+        state.index = Some(HnswSemanticIndex { graph, memory_ids });
+        state.dirty = false;
+
+        Ok(true)
+    }
+
+    fn semantic_index_needs_rebuild(&self) -> Option<bool> {
+        match self.semantic_index.read() {
+            Ok(state) => Some(state.dirty || state.index.is_none()),
+            Err(e) => {
+                tracing::warn!("Semantic index lock poisoned during read: {}", e);
+                None
+            }
+        }
+    }
+
+    fn hnsw_candidate_ids(&self, query_embedding: &[f32], limit: usize) -> Option<Vec<String>> {
+        match self.semantic_index.read() {
+            Ok(state) => {
+                let index = state.index.as_ref()?;
+                let ef_search = self.hnsw.ef_search.max(limit);
+                Some(
+                    index
+                        .graph
+                        .search(query_embedding, limit, ef_search)
+                        .into_iter()
+                        .filter_map(|n| index.memory_ids.get(n.d_id).cloned())
+                        .collect(),
+                )
+            }
+            Err(e) => {
+                tracing::warn!("Semantic index lock poisoned during search: {}", e);
+                None
+            }
+        }
+    }
+
+    fn score_hnsw_candidates(
+        &self,
+        query_embedding: &[f32],
+        candidate_ids: &[String],
+    ) -> Result<HashMap<String, f32>> {
+        let cache = self
+            .embedding_cache
+            .read()
+            .map_err(|e| AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
+        Ok(candidate_ids
+            .iter()
+            .filter_map(|id| {
+                cache
+                    .get(id)
+                    .map(|emb| (id.clone(), cosine_similarity(query_embedding, emb)))
+            })
+            .collect())
+    }
+
+    fn fetch_memories_with_scores(
+        &self,
+        candidate_ids: Vec<String>,
+        score_map: &HashMap<String, f32>,
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>> {
+        let conn = self.conn()?;
+        let mut results = Vec::new();
+        for id in candidate_ids {
+            let Some(score) = score_map.get(&id).copied() else {
+                continue;
+            };
+            match conn.query_row(
+                "SELECT id, category, content, active, created_at FROM memories WHERE id = ?1 AND active = 1",
+                rusqlite::params![id],
+                |row| {
+                    Ok(Memory {
+                        id: row.get(0)?,
+                        category: row.get(1)?,
+                        content: row.get(2)?,
+                        active: row.get::<_, i32>(3)? != 0,
+                        created_at: row.get(4)?,
+                    })
+                },
+            ) {
+                Ok(m) => results.push((m, score)),
+                Err(_) => continue,
+            }
+        }
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    fn search_semantic_hnsw(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Option<Vec<(Memory, f32)>>> {
+        if !self.hnsw.enabled || limit == 0 {
+            return Ok(None);
+        }
+        let Some(needs_rebuild) = self.semantic_index_needs_rebuild() else {
+            return Ok(None);
+        };
+        if needs_rebuild {
+            if let Err(e) = self.rebuild_semantic_index() {
+                tracing::warn!("Failed to rebuild HNSW semantic index: {}", e);
+                return Ok(None);
+            }
+        }
+        let Some(candidate_ids) = self.hnsw_candidate_ids(query_embedding, limit) else {
+            return Ok(None);
+        };
+        if candidate_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let score_map = self.score_hnsw_candidates(query_embedding, &candidate_ids)?;
+        let results = self.fetch_memories_with_scores(candidate_ids, &score_map, limit)?;
+        Ok(Some(results))
+    }
+
+    /// Semantic search: HNSW ANN (with exact fallback) over in-memory embeddings.
+    pub fn search_semantic(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(Memory, f32)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(results) = self.search_semantic_hnsw(query_embedding, limit)? {
+            return Ok(results);
+        }
+        self.search_semantic_exact(query_embedding, limit)
     }
 
     /// Hybrid search: FTS5 keyword + semantic, merged with time decay.
@@ -790,6 +1051,17 @@ impl MemoryStore {
         }
         turns.reverse(); // chronological order
         Ok(turns)
+    }
+
+    /// Count total turns for a session.
+    pub fn turn_count(&self, session_key: &str) -> Result<usize> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE session_key = ?1",
+            rusqlite::params![session_key],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     /// Delete old conversation turns (older than N days).
@@ -1221,7 +1493,56 @@ mod tests {
                 PRIMARY KEY (user_id, key)
             );"
         ).unwrap();
-        MemoryStore::new(conn, half_life, dedup_threshold, retrieval_cache_capacity)
+        MemoryStore::new_with_hnsw(
+            conn,
+            half_life,
+            dedup_threshold,
+            retrieval_cache_capacity,
+            HnswIndexConfig::default(),
+        )
+    }
+
+    fn setup_test_db_with_hnsw(
+        half_life: f32,
+        dedup_threshold: f32,
+        retrieval_cache_capacity: usize,
+        hnsw: HnswIndexConfig,
+    ) -> MemoryStore {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                embedding BLOB
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content);
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_key, created_at);
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, key)
+            );"
+        ).unwrap();
+        MemoryStore::new_with_hnsw(
+            conn,
+            half_life,
+            dedup_threshold,
+            retrieval_cache_capacity,
+            hnsw,
+        )
     }
 
     fn fake_embedding(seed: f32) -> Vec<f32> {
@@ -1317,6 +1638,99 @@ mod tests {
         let query = fake_embedding(0.5);
         let results = store.search_semantic(&query, 2).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_semantic_search_uses_hnsw_index_when_enabled() {
+        let store = setup_test_db_with_hnsw(
+            30.0,
+            1.0,
+            256,
+            HnswIndexConfig {
+                enabled: true,
+                min_index_size: 2,
+                m: 16,
+                ef_construction: 200,
+                ef_search: 64,
+            },
+        );
+
+        let emb1 = fake_embedding(0.9);
+        let emb2 = fake_embedding(0.1);
+        let emb3 = fake_embedding(0.85);
+        store.store("fact", "I prefer Python", Some(&emb1)).unwrap();
+        store
+            .store("fact", "The weather is nice", Some(&emb2))
+            .unwrap();
+        store
+            .store("fact", "I also like Rust", Some(&emb3))
+            .unwrap();
+
+        assert_eq!(store.semantic_index_point_count(), 0);
+        let query = fake_embedding(0.9);
+        let results = store.search_semantic(&query, 3).unwrap();
+        assert_eq!(store.semantic_index_point_count(), 3);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0.content, "I prefer Python");
+    }
+
+    #[test]
+    fn test_semantic_search_falls_back_when_hnsw_disabled() {
+        let store = setup_test_db_with_hnsw(
+            30.0,
+            1.0,
+            256,
+            HnswIndexConfig {
+                enabled: false,
+                min_index_size: 1,
+                m: 16,
+                ef_construction: 200,
+                ef_search: 64,
+            },
+        );
+
+        let emb1 = fake_embedding(0.9);
+        let emb2 = fake_embedding(0.1);
+        store.store("fact", "I prefer Python", Some(&emb1)).unwrap();
+        store
+            .store("fact", "The weather is nice", Some(&emb2))
+            .unwrap();
+
+        let query = fake_embedding(0.9);
+        let results = store.search_semantic(&query, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(store.semantic_index_point_count(), 0);
+        assert_eq!(results[0].0.content, "I prefer Python");
+    }
+
+    #[test]
+    fn test_semantic_hnsw_rebuilds_after_memory_mutation() {
+        let store = setup_test_db_with_hnsw(
+            30.0,
+            1.0,
+            256,
+            HnswIndexConfig {
+                enabled: true,
+                min_index_size: 1,
+                m: 16,
+                ef_construction: 200,
+                ef_search: 64,
+            },
+        );
+
+        let emb1 = fake_embedding(0.2);
+        let emb2 = fake_embedding(0.8);
+        store.store("fact", "memory one", Some(&emb1)).unwrap();
+        let query = fake_embedding(0.2);
+        let first = store.search_semantic(&query, 10).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(store.semantic_index_point_count(), 1);
+
+        store.store("fact", "memory two", Some(&emb2)).unwrap();
+        let second = store.search_semantic(&query, 10).unwrap();
+        assert_eq!(store.semantic_index_point_count(), 2);
+        assert_eq!(second.len(), 2);
+        assert!(second.iter().any(|(m, _)| m.content == "memory two"));
     }
 
     #[test]

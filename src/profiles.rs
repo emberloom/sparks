@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::{Config, GhostConfig, MountConfig};
+use crate::config::{Config, GhostConfig, GhostRole, MountConfig};
 use crate::error::{AthenaError, Result};
 
 /// A profile file loaded from ~/.athena/ghosts/*.toml
@@ -10,12 +11,19 @@ struct GhostProfile {
     description: String,
     #[serde(default)]
     tools: Vec<String>,
+    #[serde(default)]
+    role: GhostRole,
     #[serde(default = "default_strategy")]
     strategy: String,
     #[serde(default)]
     mounts: Vec<MountConfig>,
     /// Path to a soul file (markdown identity document)
     soul_file: Option<String>,
+    /// Path to a skill file (markdown procedures/heuristics)
+    skill_file: Option<String>,
+    /// Additional skill files merged in order.
+    #[serde(default)]
+    skill_files: Vec<String>,
     /// Docker image override
     image: Option<String>,
 }
@@ -61,6 +69,7 @@ fn home_profile_loading_disabled() -> bool {
 /// Profile ghosts override config ghosts with the same name.
 pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let mut ghosts: Vec<GhostConfig> = config.ghosts.clone();
+    let mut skill_cache: HashMap<String, Option<String>> = HashMap::new();
 
     if home_profile_loading_disabled() {
         tracing::info!("Home ghost profiles disabled via ATHENA_DISABLE_HOME_PROFILES");
@@ -104,39 +113,8 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
                     profile.name,
                     path.display()
                 );
-
-                let soul =
-                    profile.soul_file.as_ref().and_then(
-                        |path| match crate::config::load_soul_file(path) {
-                            Ok(content) => {
-                                tracing::info!(
-                                    "Loaded soul for profile ghost '{}' from {}",
-                                    profile.name,
-                                    path
-                                );
-                                Some(content)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load soul for profile ghost '{}': {}",
-                                    profile.name,
-                                    e
-                                );
-                                None
-                            }
-                        },
-                    );
-
-                let ghost = GhostConfig {
-                    name: profile.name.clone(),
-                    description: profile.description,
-                    tools: profile.tools,
-                    strategy: profile.strategy,
-                    mounts: profile.mounts,
-                    soul_file: profile.soul_file,
-                    soul,
-                    image: normalize_profile_image(profile.image, &config.docker.image),
-                };
+                let ghost =
+                    build_ghost_from_profile(profile, &config.docker.image, &mut skill_cache);
 
                 // Deduplicate: profile overrides config ghost with same name
                 ghosts.retain(|g| g.name != ghost.name);
@@ -149,6 +127,98 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     }
 
     Ok(ghosts)
+}
+
+fn load_profile_soul(profile_name: &str, soul_file: Option<&String>) -> Option<String> {
+    soul_file.and_then(|path| match crate::config::load_soul_file(path) {
+        Ok(content) => {
+            tracing::info!(
+                "Loaded soul for profile ghost '{}' from {}",
+                profile_name,
+                path
+            );
+            Some(content)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load soul for profile ghost '{}': {}",
+                profile_name,
+                e
+            );
+            None
+        }
+    })
+}
+
+fn load_profile_skill_bundle(
+    profile_name: &str,
+    skill_file: Option<&String>,
+    skill_files: &[String],
+    skill_cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    let skill_paths = crate::config::resolve_ghost_skill_paths(skill_file, skill_files);
+    let mut loaded_skills: Vec<(String, String)> = Vec::new();
+    for path in skill_paths {
+        if let Some(cached) = skill_cache.get(&path) {
+            if let Some(content) = cached {
+                loaded_skills.push((path, content.clone()));
+            }
+            continue;
+        }
+        match crate::config::load_soul_file(&path) {
+            Ok(content) => {
+                tracing::info!(
+                    "Loaded skill for profile ghost '{}' from {}",
+                    profile_name,
+                    path
+                );
+                skill_cache.insert(path.clone(), Some(content.clone()));
+                loaded_skills.push((path, content));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load skill for profile ghost '{}' from {}: {}",
+                    profile_name,
+                    path,
+                    e
+                );
+                skill_cache.insert(path, None);
+            }
+        }
+    }
+    if loaded_skills.is_empty() {
+        None
+    } else {
+        Some(crate::config::compose_ghost_skill_bundle(&loaded_skills))
+    }
+}
+
+fn build_ghost_from_profile(
+    profile: GhostProfile,
+    fallback_image: &str,
+    skill_cache: &mut HashMap<String, Option<String>>,
+) -> GhostConfig {
+    let soul = load_profile_soul(&profile.name, profile.soul_file.as_ref());
+    let skill = load_profile_skill_bundle(
+        &profile.name,
+        profile.skill_file.as_ref(),
+        &profile.skill_files,
+        skill_cache,
+    );
+    GhostConfig {
+        name: profile.name.clone(),
+        description: profile.description,
+        tools: profile.tools,
+        role: profile.role,
+        strategy: profile.strategy,
+        mounts: profile.mounts,
+        soul_file: profile.soul_file,
+        skill_file: profile.skill_file,
+        skill_files: profile.skill_files,
+        soul,
+        skill,
+        image: normalize_profile_image(profile.image, fallback_image),
+    }
 }
 
 fn load_profile(path: &PathBuf) -> Result<GhostProfile> {

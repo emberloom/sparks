@@ -216,6 +216,7 @@ async fn handle_chat_completions(
     headers: HeaderMap,
     payload: Result<Json<ChatCompletionsRequest>, JsonRejection>,
 ) -> Response {
+    let request_id = format!("oaiapi-{}", uuid::Uuid::new_v4().simple());
     if let Err(resp) = authorize_and_rate_limit(&state, &headers).await {
         return resp;
     }
@@ -232,6 +233,18 @@ async fn handle_chat_completions(
         }
     };
 
+    if let Some(option) = first_unsupported_option(&req) {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Unsupported option '{}' for Athena OpenAI-compatible API.",
+                option
+            ),
+            "invalid_request_error",
+            Some("unsupported_option"),
+        );
+    }
+
     let requested_model = req.model.trim().to_string();
     if requested_model.is_empty() {
         return openai_error(
@@ -244,7 +257,10 @@ async fn handle_chat_completions(
     if !state.models_lookup.contains(&requested_model) {
         return openai_error(
             StatusCode::BAD_REQUEST,
-            format!("Model '{}' is not available on this Athena instance.", requested_model),
+            format!(
+                "Model '{}' is not available on this Athena instance.",
+                requested_model
+            ),
             "invalid_request_error",
             Some("model_not_found"),
         );
@@ -281,6 +297,7 @@ async fn handle_chat_completions(
     };
 
     let chat_id = sanitize_segment(req.user.as_deref().unwrap_or("default"), "default");
+    let requested_tool_count = observed_requested_tool_count(&req);
     let session = SessionContext {
         platform: "openai_api".to_string(),
         user_id: state.principal.clone(),
@@ -289,8 +306,8 @@ async fn handle_chat_completions(
     state.observer.log(
         ObserverCategory::ChatIn,
         format!(
-            "openai_api /v1/chat/completions accepted (session={}, model={})",
-            chat_id, requested_model
+            "openai_api /v1/chat/completions request_id={} status=accepted session={} model={} requested_tools={}",
+            request_id, chat_id, requested_model, requested_tool_count
         ),
     );
 
@@ -300,7 +317,10 @@ async fn handle_chat_completions(
         Err(e) => {
             state.observer.log(
                 ObserverCategory::ChatOut,
-                format!("openai_api dispatch failed: {}", e),
+                format!(
+                    "openai_api /v1/chat/completions request_id={} status=dispatch_failed session={} model={} requested_tools={} error={}",
+                    request_id, chat_id, requested_model, requested_tool_count, e
+                ),
             );
             return openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -317,11 +337,14 @@ async fn handle_chat_completions(
     )
     .await
     {
-        Ok(Ok(text)) => text,
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => {
             state.observer.log(
                 ObserverCategory::ChatOut,
-                format!("openai_api request errored: {}", e),
+                format!(
+                    "openai_api /v1/chat/completions request_id={} status=core_error session={} model={} requested_tools={} error={}",
+                    request_id, chat_id, requested_model, requested_tool_count, e
+                ),
             );
             return openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -333,10 +356,13 @@ async fn handle_chat_completions(
         Err(_) => {
             state.observer.log(
                 ObserverCategory::ChatOut,
-                "openai_api request timed out".to_string(),
+                format!(
+                    "openai_api /v1/chat/completions request_id={} status=timeout session={} model={} requested_tools={}",
+                    request_id, chat_id, requested_model, requested_tool_count
+                ),
             );
             return openai_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::GATEWAY_TIMEOUT,
                 "Athena core timed out while completing the request.",
                 "server_error",
                 Some("timeout"),
@@ -347,8 +373,12 @@ async fn handle_chat_completions(
     state.observer.log(
         ObserverCategory::ChatOut,
         format!(
-            "openai_api /v1/chat/completions completed (session={}, model={})",
-            chat_id, requested_model
+            "openai_api /v1/chat/completions request_id={} status=ok session={} model={} requested_tools={} observed_tools={}",
+            request_id,
+            chat_id,
+            requested_model,
+            requested_tool_count,
+            response_text.observed_tool_runs
         ),
     );
 
@@ -356,7 +386,7 @@ async fn handle_chat_completions(
         StatusCode::OK,
         Json(build_chat_completion_response(
             requested_model,
-            response_text,
+            response_text.content,
         )),
     )
         .into_response()
@@ -410,15 +440,61 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
-async fn await_final_response(mut events: tokio::sync::mpsc::Receiver<CoreEvent>) -> anyhow::Result<String> {
+async fn await_final_response(
+    mut events: tokio::sync::mpsc::Receiver<CoreEvent>,
+) -> anyhow::Result<FinalResponse> {
+    let mut tool_runs = 0u32;
     while let Some(event) = events.recv().await {
         match event {
-            CoreEvent::Response(text) => return Ok(text),
+            CoreEvent::Response(text) => {
+                return Ok(FinalResponse {
+                    content: text,
+                    observed_tool_runs: tool_runs,
+                });
+            }
             CoreEvent::Error(err) => return Err(anyhow!(err)),
-            CoreEvent::Status(_) | CoreEvent::StreamChunk(_) | CoreEvent::ToolRun { .. } => {}
+            CoreEvent::ToolRun { .. } => {
+                tool_runs = tool_runs.saturating_add(1);
+            }
+            CoreEvent::Status(_) | CoreEvent::StreamChunk(_) => {}
         }
     }
-    Err(anyhow!("Athena core closed event stream without a final response"))
+    Err(anyhow!(
+        "Athena core closed event stream without a final response"
+    ))
+}
+
+#[derive(Debug)]
+struct FinalResponse {
+    content: String,
+    observed_tool_runs: u32,
+}
+
+fn first_unsupported_option(req: &ChatCompletionsRequest) -> Option<&'static str> {
+    if req.tools.is_some() {
+        return Some("tools");
+    }
+    if req.functions.is_some() {
+        return Some("functions");
+    }
+    if req.tool_choice.is_some() {
+        return Some("tool_choice");
+    }
+    if req.function_call.is_some() {
+        return Some("function_call");
+    }
+    if req.response_format.is_some() {
+        return Some("response_format");
+    }
+    None
+}
+
+fn observed_requested_tool_count(req: &ChatCompletionsRequest) -> usize {
+    req.tools
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(std::vec::Vec::len)
+        .unwrap_or(0)
 }
 
 fn normalize_messages(messages: &[ChatMessageIn]) -> std::result::Result<String, String> {
@@ -553,6 +629,16 @@ struct ChatCompletionsRequest {
     stream: Option<bool>,
     #[serde(default)]
     user: Option<String>,
+    #[serde(default)]
+    tools: Option<Value>,
+    #[serde(default)]
+    functions: Option<Value>,
+    #[serde(default)]
+    tool_choice: Option<Value>,
+    #[serde(default)]
+    function_call: Option<Value>,
+    #[serde(default)]
+    response_format: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -681,5 +767,27 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["role"], "assistant");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
         assert!(body.get("usage").is_some());
+    }
+
+    #[test]
+    fn rejects_unsupported_tools_option() {
+        let req: ChatCompletionsRequest = serde_json::from_value(json!({
+            "model": "athena",
+            "messages": [{"role":"user","content":"hi"}],
+            "tools": [{"type":"function","function":{"name":"x"}}]
+        }))
+        .expect("request parses");
+        assert_eq!(first_unsupported_option(&req), Some("tools"));
+    }
+
+    #[test]
+    fn requested_tool_count_reads_tools_array_length() {
+        let req: ChatCompletionsRequest = serde_json::from_value(json!({
+            "model": "athena",
+            "messages": [{"role":"user","content":"hi"}],
+            "tools": [{"type":"function"},{"type":"function"}]
+        }))
+        .expect("request parses");
+        assert_eq!(observed_requested_tool_count(&req), 2);
     }
 }

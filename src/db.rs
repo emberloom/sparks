@@ -138,6 +138,41 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE ticket_intake_log ADD COLUMN ci_monitor_status TEXT;",
     // v15: record selected coding CLI for tool-level routing KPIs
     "ALTER TABLE autonomous_task_outcomes ADD COLUMN cli_tool_used TEXT;",
+    // v16: session activity log for review & explainability
+    "CREATE TABLE IF NOT EXISTS session_activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT,
+        ghost TEXT,
+        tool_name TEXT,
+        task_id TEXT,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_activity_session_time
+        ON session_activity_log(session_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_session_activity_type_time
+        ON session_activity_log(event_type, created_at DESC);",
+    // v17: tool detail capture + execution trees + alert rules for session review
+    "ALTER TABLE session_activity_log ADD COLUMN tool_input TEXT;
+    ALTER TABLE session_activity_log ADD COLUMN tool_output TEXT;
+    ALTER TABLE session_activity_log ADD COLUMN parent_id INTEGER REFERENCES session_activity_log(id);
+    CREATE INDEX IF NOT EXISTS idx_session_activity_parent
+        ON session_activity_log(parent_id);
+    CREATE TABLE IF NOT EXISTS review_alert_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        target TEXT NOT NULL DEFAULT 'tool_name',
+        severity TEXT NOT NULL DEFAULT 'warn',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        chat_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
+        ON review_alert_rules(enabled);",
 ];
 
 pub fn init_db(path: &Path) -> Result<Connection> {

@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, GhostConfig};
+use crate::config::{Config, GhostConfig, GhostRole};
 use crate::confirm::Confirmer;
+use crate::context_budget::{self, ContextAssemblyMetrics};
 use crate::core::{CoreEvent, SessionContext};
 use crate::doctor;
 use crate::dynamic_tools::{self, DynamicTool};
@@ -18,10 +19,12 @@ use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::{self, LlmProvider, Message};
 use crate::memory::MemoryStore;
 use crate::mood::MoodState;
-use crate::observer::ObserverHandle;
+use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes;
 use crate::strategy::{StatusSender, TaskContract};
+use crate::session_review::ActivityLogStore;
 use crate::tool_usage::ToolUsageStore;
+use std::future::Future;
 
 /// A single step in a direct execution fast path.
 #[derive(Debug, Clone)]
@@ -41,6 +44,14 @@ const TOKEN_ESTIMATOR_CONFIDENCE_FLOOR: f64 = 0.50;
 const TOKEN_BUDGET_CONTEXT_SOFT_CHARS: usize = 24_000;
 const TOKEN_BUDGET_CONTEXT_HARD_CHARS: usize = 12_000;
 const TOKEN_BUDGET_GOAL_CHUNK_WORDS: usize = 120;
+const CRITIC_MAX_FEEDBACK_ITEMS: usize = 6;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CriticReview {
+    approved: bool,
+    summary: String,
+    feedback: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 struct TokenBudgetEstimate {
@@ -129,6 +140,8 @@ pub struct Manager {
     metrics: SharedMetrics,
     /// Langfuse observability client
     langfuse: SharedLangfuse,
+    /// Observer event stream
+    observer: ObserverHandle,
     /// Short-lived KPI prompt cache to avoid repeated DB hits per turn.
     kpi_context_cache: Arc<tokio::sync::RwLock<Option<KpiPromptCache>>>,
 }
@@ -150,8 +163,10 @@ impl Manager {
         metrics: SharedMetrics,
         langfuse: SharedLangfuse,
         observer: ObserverHandle,
+        activity_log: Arc<ActivityLogStore>,
     ) -> Self {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
+        let mcp_registry = crate::mcp::McpRegistry::from_config(&config.mcp, observer.clone());
         let executor = Executor::new(
             config.docker.clone(),
             config.self_dev_trusted_enabled(),
@@ -160,11 +175,13 @@ impl Manager {
             config.manager.sensitive_patterns.clone(),
             config.manager.loop_guard.clone(),
             dynamic_tools_path.clone(),
+            mcp_registry,
             knobs.clone(),
             config.github.token.clone(),
             usage_store.clone(),
-            observer,
+            observer.clone(),
             langfuse.clone(),
+            Some(activity_log),
         );
 
         // Discover host tools for direct execution fast path
@@ -222,6 +239,7 @@ impl Manager {
             usage_store,
             metrics,
             langfuse,
+            observer,
             kpi_context_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
@@ -246,6 +264,21 @@ impl Manager {
         &self.host_workspace
     }
 
+    pub async fn with_activity_context_base<F, Fut, T>(
+        &self,
+        session_key: &str,
+        parent_id: Option<i64>,
+        f: F,
+    ) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        self.executor
+            .with_activity_context_base(session_key, parent_id, f)
+            .await
+    }
+
     /// Handle a user message: classify, delegate or answer directly
     #[tracing::instrument(skip(self, session, confirmer, status_tx), fields(input_len = user_input.len()))]
     pub async fn handle(
@@ -265,9 +298,12 @@ impl Manager {
         let session_key = session.session_key();
 
         // Get recent conversation context BEFORE saving current turn
+        // Use adaptive budget to determine how many turns to fetch
+        let turn_count = self.memory.turn_count(&session_key).unwrap_or(0);
+        let classifier_plan = context_budget::infer_classifier_plan(user_input, turn_count);
         let recent = self
             .memory
-            .recent_turns(&session_key, 20)
+            .recent_turns(&session_key, classifier_plan.recent_turns_limit)
             .unwrap_or_default();
 
         // Save user turn
@@ -295,8 +331,18 @@ impl Manager {
         let (conversation_summary, recent_messages) = summarize_conversation(&recent);
         let enriched = build_enriched_query(&recent, user_input);
 
-        // Embed enriched query on blocking thread to avoid stalling tokio
-        let query_embedding = embed_blocking(&self.embedder, &enriched).await;
+        // Start context assembly timer
+        let mut ctx_timer = ContextAssemblyMetrics::start();
+
+        // Embed enriched query on blocking thread — only if classifier plan needs memories
+        let embed_started = Instant::now();
+        let query_embedding = if classifier_plan.memory_limit > 0 {
+            embed_blocking(&self.embedder, &enriched).await
+        } else {
+            ctx_timer.record_skipped();
+            None
+        };
+        ctx_timer.record_embedding(embed_started.elapsed().as_millis());
 
         // Start Langfuse trace for this chat request
         let lf_trace = self.langfuse.as_ref().map(|lf| {
@@ -310,17 +356,30 @@ impl Manager {
             )
         });
 
-        // Load relevant memories via hybrid search (keyword + semantic)
-        let mem_span = lf_trace
-            .as_ref()
-            .map(|t| t.span("memory_retrieval", Some(user_input)));
-        let memories = self
-            .memory
-            .search_hybrid(user_input, query_embedding.as_deref(), 10)
-            .unwrap_or_default();
-        if let Some(s) = mem_span {
-            s.end(Some(&format!("{} memories found", memories.len())));
-        }
+        // Load relevant memories via hybrid search — gated on classifier budget
+        let mem_started = Instant::now();
+        let memories = if classifier_plan.memory_limit > 0 {
+            let mem_span = lf_trace
+                .as_ref()
+                .map(|t| t.span("memory_retrieval", Some(user_input)));
+            let mems = self
+                .memory
+                .search_hybrid(
+                    user_input,
+                    query_embedding.as_deref(),
+                    classifier_plan.memory_limit,
+                )
+                .unwrap_or_default();
+            if let Some(s) = mem_span {
+                s.end(Some(&format!("{} memories found", mems.len())));
+            }
+            ctx_timer.record_loaded();
+            mems
+        } else {
+            ctx_timer.record_skipped();
+            Vec::new()
+        };
+        ctx_timer.record_memory_search(mem_started.elapsed().as_millis());
 
         let memory_context = format_memory_context(&memories);
         let user_context_section = self.build_user_profile_section(&session.user_id);
@@ -328,11 +387,25 @@ impl Manager {
         let metrics_section = self.build_metrics_section();
         let mood_section = self.build_mood_section();
         let relationship_section = self.build_relationship_section(&session.user_id);
+
+        // Build routing context — gated on classifier budget
         let routing_context_started = Instant::now();
-        let routing_context = self
-            .build_routing_prompt_context(user_input, &recent_messages)
-            .await;
+        let routing_context = if classifier_plan.load_kpi || classifier_plan.load_lessons {
+            ctx_timer.record_loaded();
+            self.build_routing_prompt_context(user_input, &recent_messages)
+                .await
+        } else {
+            ctx_timer.record_skipped();
+            RoutingPromptContext {
+                scope: infer_kpi_prompt_scope(user_input, &recent_messages),
+                kpi_context: String::new(),
+                lesson_context: String::new(),
+                kpi_available: false,
+                lesson_count: 0,
+            }
+        };
         let routing_context_ms = routing_context_started.elapsed().as_millis();
+        ctx_timer.record_kpi(routing_context_ms);
         if routing_context_ms > ROUTING_CONTEXT_LATENCY_WARN_MS {
             tracing::warn!(
                 routing_context_ms,
@@ -340,6 +413,20 @@ impl Manager {
                 "Routing context build latency exceeded threshold"
             );
         }
+
+        let ctx_metrics = ctx_timer.finish();
+        tracing::info!(
+            total_ms = ctx_metrics.total_ms,
+            sources_loaded = ctx_metrics.sources_loaded,
+            sources_skipped = ctx_metrics.sources_skipped,
+            memory_search_ms = ?ctx_metrics.memory_search_ms,
+            embedding_ms = ?ctx_metrics.embedding_ms,
+            kpi_ms = ?ctx_metrics.kpi_ms,
+            memory_limit = classifier_plan.memory_limit,
+            load_kpi = classifier_plan.load_kpi,
+            load_lessons = classifier_plan.load_lessons,
+            "Context assembly complete (adaptive classifier budget)"
+        );
 
         // Classify the request (pass conversation history for context)
         let classify_gen = lf_trace.as_ref().map(|t| {
@@ -397,24 +484,7 @@ impl Manager {
                     .find(|g| g.name == ghost_name)
                     .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
-                self.run_compile_runtime_preflight_if_needed(ghost, &goal, status_tx)
-                    .await?;
-
                 eprintln!("Delegating to ghost: {}", ghost.name);
-
-                let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
-                let is_self_dev = ghost_name == "coder" || goal.to_lowercase().contains("refactor");
-                let contract = self.prepare_contract_for_token_budget(TaskContract {
-                    context,
-                    goal,
-                    constraints: vec![],
-                    soul: ghost.soul.clone(),
-                    tools_doc: self.tools_doc.clone(),
-                    cli_tool_preference: cli_pref,
-                    cli_tool_routing_order: Vec::new(),
-                    test_generation: is_self_dev,
-                    memory: Some(self.memory.clone()),
-                });
 
                 // Send delegation status if we have a sender
                 if let Some(tx) = status_tx {
@@ -426,28 +496,36 @@ impl Manager {
                         .await;
                 }
 
-                let ghost_span = lf_trace
-                    .as_ref()
-                    .map(|t| t.span(&format!("ghost:{}", ghost.name), Some(&contract.goal)));
-                let result = self
-                    .executor
-                    .run(
-                        &contract,
+                let result = if self.is_hierarchical_coordinator(ghost) {
+                    self.run_hierarchical_pipeline(
                         ghost,
-                        &*self.llm,
+                        &goal,
+                        &context,
+                        None,
+                        None,
                         confirmer,
                         status_tx,
                         lf_trace.as_ref(),
+                        false,
                     )
-                    .await?;
-                if let Some(s) = ghost_span {
-                    let preview = if result.len() > 500 {
-                        &result[..result.floor_char_boundary(500)]
-                    } else {
-                        &result
-                    };
-                    s.end(Some(preview));
-                }
+                    .await?
+                } else {
+                    let is_self_dev =
+                        ghost_name == "coder" || goal.to_lowercase().contains("refactor");
+                    self.run_ghost_task(
+                        ghost,
+                        &goal,
+                        &context,
+                        None,
+                        None,
+                        is_self_dev,
+                        confirmer,
+                        status_tx,
+                        lf_trace.as_ref(),
+                        false,
+                    )
+                    .await?
+                };
 
                 // Optionally save a lesson
                 self.maybe_save_lesson(user_input, &result).await;
@@ -528,9 +606,96 @@ impl Manager {
 
         tracing::info!(ghost = %ghost.name, goal = %goal, "Autonomous task executing");
 
-        self.run_compile_runtime_preflight_if_needed(ghost, goal, None)
-            .await?;
+        let lf_trace = self.langfuse.as_ref().map(|lf| {
+            ActiveTrace::start(
+                lf.clone(),
+                "autonomous_task",
+                None,
+                None,
+                Some(goal),
+                vec!["funnel4", &format!("ghost:{}", ghost.name)],
+            )
+        });
 
+        let result = if self.is_hierarchical_coordinator(ghost) {
+            self.run_hierarchical_pipeline(
+                ghost,
+                goal,
+                context,
+                lane,
+                repo,
+                confirmer,
+                None,
+                lf_trace.as_ref(),
+                true,
+            )
+            .await?
+        } else {
+            self.run_ghost_task(
+                ghost,
+                goal,
+                context,
+                lane,
+                repo,
+                ghost.name == "coder",
+                confirmer,
+                None,
+                lf_trace.as_ref(),
+                true,
+            )
+            .await?
+        };
+
+        if let Some(t) = lf_trace {
+            let preview = if result.len() > 500 {
+                &result[..result.floor_char_boundary(500)]
+            } else {
+                &result
+            };
+            t.end(Some(preview));
+        }
+
+        self.maybe_save_lesson(goal, &result).await;
+
+        Ok(result)
+    }
+
+    fn is_hierarchical_coordinator(&self, ghost: &GhostConfig) -> bool {
+        ghost.role == GhostRole::Coordinator || ghost.name.eq_ignore_ascii_case("coordinator")
+    }
+
+    pub fn ghost_names(&self) -> Vec<String> {
+        self.ghosts.iter().map(|g| g.name.clone()).collect()
+    }
+
+    fn find_pipeline_ghost(&self, role: GhostRole, fallback_name: &str) -> Option<&GhostConfig> {
+        self.ghosts
+            .iter()
+            .find(|g| g.role == role)
+            .or_else(|| self.ghosts.iter().find(|g| g.name == fallback_name))
+    }
+
+    fn resolve_hierarchical_ghosts(&self) -> Result<(&GhostConfig, &GhostConfig)> {
+        let coder = self
+            .find_pipeline_ghost(GhostRole::Coder, "coder")
+            .ok_or_else(|| {
+                AthenaError::Tool(
+                    "Hierarchical pipeline requires a coder ghost (role=coder or name='coder')"
+                        .to_string(),
+                )
+            })?;
+        let critic = self
+            .find_pipeline_ghost(GhostRole::Critic, "critic")
+            .ok_or_else(|| {
+                AthenaError::Tool(
+                    "Hierarchical pipeline requires a critic ghost (role=critic or name='critic')"
+                        .to_string(),
+                )
+            })?;
+        Ok((coder, critic))
+    }
+
+    fn build_autonomous_context_enrichment(&self, ghost: &GhostConfig) -> String {
         let metrics_ctx = if self
             .knobs
             .read()
@@ -546,7 +711,7 @@ impl Manager {
             String::new()
         };
 
-        let structure_ctx = if ghost_name == "coder" {
+        let structure_ctx = if ghost.name == "coder" {
             let mut structure_memories = self
                 .memory
                 .search_hybrid("module dependencies imports", None, 24)
@@ -567,56 +732,421 @@ impl Manager {
             String::new()
         };
 
-        let enriched_context = format!("{}{}{}", context, metrics_ctx, structure_ctx);
+        format!("{}{}", metrics_ctx, structure_ctx)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "orchestration helper carries explicit task context and runtime handles"
+    )]
+    async fn run_ghost_task(
+        &self,
+        ghost: &GhostConfig,
+        goal: &str,
+        context: &str,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        test_generation: bool,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<String> {
+        self.run_compile_runtime_preflight_if_needed(ghost, goal, status_tx)
+            .await?;
+
+        let context_enrichment = if enrich_for_autonomous {
+            self.build_autonomous_context_enrichment(ghost)
+        } else {
+            String::new()
+        };
+        let effective_context = format!("{}{}", context, context_enrichment);
+
         let cli_pref = self.knobs.read().ok().map(|k| k.cli_tool.clone());
-        let cli_tool_routing_order = self.resolve_cli_tool_routing_order(lane, repo).await;
+        let cli_tool_routing_order = if ghost.name == "coder" {
+            self.resolve_cli_tool_routing_order(lane, repo).await
+        } else {
+            Vec::new()
+        };
+
         let contract = self.prepare_contract_for_token_budget(TaskContract {
-            context: enriched_context,
+            context: effective_context,
             goal: goal.to_string(),
             constraints: vec![],
             soul: ghost.soul.clone(),
+            skill: ghost.skill.clone(),
             tools_doc: self.tools_doc.clone(),
             cli_tool_preference: cli_pref,
             cli_tool_routing_order,
-            test_generation: ghost.name == "coder",
+            test_generation,
             memory: Some(self.memory.clone()),
         });
 
-        let lf_trace = self.langfuse.as_ref().map(|lf| {
-            ActiveTrace::start(
-                lf.clone(),
-                "autonomous_task",
-                None,
-                None,
-                Some(goal),
-                vec!["funnel4", &format!("ghost:{}", ghost.name)],
-            )
-        });
-
+        let ghost_span =
+            trace.map(|t| t.span(&format!("ghost:{}", ghost.name), Some(&contract.goal)));
         let result = self
             .executor
-            .run(
-                &contract,
-                ghost,
-                &*self.llm,
-                confirmer,
-                None,
-                lf_trace.as_ref(),
-            )
+            .run(&contract, ghost, &*self.llm, confirmer, status_tx, trace)
             .await?;
-
-        if let Some(t) = lf_trace {
+        if let Some(s) = ghost_span {
             let preview = if result.len() > 500 {
                 &result[..result.floor_char_boundary(500)]
             } else {
                 &result
             };
-            t.end(Some(preview));
+            s.end(Some(preview));
+        }
+        Ok(result)
+    }
+
+    fn build_critic_goal(&self, goal: &str) -> String {
+        format!(
+            "Review the coder output against the original goal and return ONLY JSON.\n\
+             Original goal:\n{}\n\n\
+             Required JSON schema:\n\
+             {{\"approved\": <true|false>, \"summary\": \"<short summary>\", \"feedback\": [\"<actionable item>\", ...]}}\n\
+             Rules:\n\
+             - Set approved=true only if the goal is met and risks are acceptable.\n\
+             - If approved=false include 1-{} concrete, actionable feedback items.\n\
+             - Do not output markdown or prose outside JSON.",
+            goal, CRITIC_MAX_FEEDBACK_ITEMS
+        )
+    }
+
+    fn build_critic_context(
+        &self,
+        base_context: &str,
+        coordinator_output: &str,
+        coder_output: &str,
+    ) -> String {
+        format!(
+            "{}\n\nCOORDINATOR PLAN:\n{}\n\nCODER OUTPUT TO REVIEW:\n{}",
+            base_context, coordinator_output, coder_output
+        )
+    }
+
+    async fn send_status(status_tx: Option<&StatusSender>, message: String) {
+        if let Some(tx) = status_tx {
+            let _ = tx.send(CoreEvent::Status(message)).await;
+        }
+    }
+
+    fn log_hierarchical_review(&self, pass: u8, review: &CriticReview) {
+        self.observer.log(
+            ObserverCategory::AutonomousTask,
+            format!(
+                "Hierarchical critic pass#{} approved={} feedback_items={}",
+                pass,
+                review.approved,
+                review.feedback.len()
+            ),
+        );
+    }
+
+    fn format_critic_approval(&self, output: &str, summary: &str) -> String {
+        format!("{}\n\n[critic]\napproved=true\nsummary={}", output, summary)
+    }
+
+    fn hierarchical_failure_error(&self, review: &CriticReview) -> AthenaError {
+        let remaining = review
+            .feedback
+            .iter()
+            .map(|item| format!("- {}", item))
+            .collect::<Vec<_>>()
+            .join("\n");
+        AthenaError::Tool(format!(
+            "Hierarchical pipeline did not pass critic after one second-pass coder iteration.\n\
+             Critic summary: {}\n\
+             Remaining feedback:\n{}",
+            review.summary, remaining
+        ))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "pipeline helper receives explicit context for deterministic orchestration"
+    )]
+    async fn run_pipeline_actor(
+        &self,
+        ghost: &GhostConfig,
+        status_message: String,
+        goal: &str,
+        context: &str,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        test_generation: bool,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<String> {
+        Self::send_status(status_tx, status_message).await;
+        self.run_ghost_task(
+            ghost,
+            goal,
+            context,
+            lane,
+            repo,
+            test_generation,
+            confirmer,
+            status_tx,
+            trace,
+            enrich_for_autonomous,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "stage helper receives explicit context for deterministic orchestration"
+    )]
+    async fn run_critic_stage(
+        &self,
+        critic: &GhostConfig,
+        goal: &str,
+        base_context: &str,
+        coordinator_output: &str,
+        coder_output: &str,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<CriticReview> {
+        let review_goal = self.build_critic_goal(goal);
+        let review_context =
+            self.build_critic_context(base_context, coordinator_output, coder_output);
+        let critic_output = self
+            .run_ghost_task(
+                critic,
+                &review_goal,
+                &review_context,
+                lane,
+                repo,
+                false,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        Ok(parse_critic_review(&critic_output))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "stage helper receives explicit context for deterministic orchestration"
+    )]
+    async fn run_hierarchical_first_pass(
+        &self,
+        coordinator: &GhostConfig,
+        coder: &GhostConfig,
+        critic: &GhostConfig,
+        goal: &str,
+        context: &str,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<(String, String, CriticReview)> {
+        let coordinator_goal = format!(
+            "Produce a concise execution plan for the coder.\nOriginal goal:\n{}",
+            goal
+        );
+        let coordinator_output = self
+            .run_pipeline_actor(
+                coordinator,
+                format!("Coordinator {} is preparing plan...", coordinator.name),
+                &coordinator_goal,
+                context,
+                lane,
+                repo,
+                false,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+
+        let coder_context = format!("{}\n\nCOORDINATOR PLAN:\n{}", context, coordinator_output);
+        let first_coder_output = self
+            .run_pipeline_actor(
+                coder,
+                format!("Coder {} is implementing the plan...", coder.name),
+                goal,
+                &coder_context,
+                lane,
+                repo,
+                true,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+
+        Self::send_status(
+            status_tx,
+            format!("Critic {} is reviewing the implementation...", critic.name),
+        )
+        .await;
+        let first_review = self
+            .run_critic_stage(
+                critic,
+                goal,
+                context,
+                &coordinator_output,
+                &first_coder_output,
+                lane,
+                repo,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        Ok((coordinator_output, first_coder_output, first_review))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "stage helper receives explicit context for deterministic orchestration"
+    )]
+    async fn run_hierarchical_second_pass(
+        &self,
+        coder: &GhostConfig,
+        critic: &GhostConfig,
+        goal: &str,
+        context: &str,
+        coordinator_output: &str,
+        first_coder_output: &str,
+        first_review: &CriticReview,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<(String, CriticReview)> {
+        let feedback_block = first_review
+            .feedback
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| format!("{}. {}", idx + 1, item))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self::send_status(
+            status_tx,
+            "Critic requested revisions; running one constrained coder second pass...".to_string(),
+        )
+        .await;
+        let second_context = format!(
+            "{}\n\nCOORDINATOR PLAN:\n{}\n\nCRITIC FEEDBACK (address every item exactly once):\n{}\n\nFIRST CODER OUTPUT:\n{}",
+            context, coordinator_output, feedback_block, first_coder_output
+        );
+        let second_coder_output = self
+            .run_ghost_task(
+                coder,
+                goal,
+                &second_context,
+                lane,
+                repo,
+                true,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        let second_review = self
+            .run_critic_stage(
+                critic,
+                goal,
+                context,
+                coordinator_output,
+                &second_coder_output,
+                lane,
+                repo,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        Ok((second_coder_output, second_review))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "hierarchical execution requires explicit stage dependencies"
+    )]
+    async fn run_hierarchical_pipeline(
+        &self,
+        coordinator: &GhostConfig,
+        goal: &str,
+        context: &str,
+        lane: Option<&str>,
+        repo: Option<&str>,
+        confirmer: &dyn Confirmer,
+        status_tx: Option<&StatusSender>,
+        trace: Option<&ActiveTrace>,
+        enrich_for_autonomous: bool,
+    ) -> Result<String> {
+        let (coder, critic) = self.resolve_hierarchical_ghosts()?;
+        self.observer.log(
+            ObserverCategory::AutonomousTask,
+            format!(
+                "Hierarchical pipeline start coordinator={} coder={} critic={}",
+                coordinator.name, coder.name, critic.name
+            ),
+        );
+
+        let (coordinator_output, first_coder_output, first_review) = self
+            .run_hierarchical_first_pass(
+                coordinator,
+                coder,
+                critic,
+                goal,
+                context,
+                lane,
+                repo,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        self.log_hierarchical_review(1, &first_review);
+        if first_review.approved {
+            return Ok(self.format_critic_approval(&first_coder_output, &first_review.summary));
         }
 
-        self.maybe_save_lesson(goal, &result).await;
-
-        Ok(result)
+        let (second_coder_output, second_review) = self
+            .run_hierarchical_second_pass(
+                coder,
+                critic,
+                goal,
+                context,
+                &coordinator_output,
+                &first_coder_output,
+                &first_review,
+                lane,
+                repo,
+                confirmer,
+                status_tx,
+                trace,
+                enrich_for_autonomous,
+            )
+            .await?;
+        self.log_hierarchical_review(2, &second_review);
+        if second_review.approved {
+            return Ok(self.format_critic_approval(&second_coder_output, &second_review.summary));
+        }
+        Err(self.hierarchical_failure_error(&second_review))
     }
 
     async fn run_compile_runtime_preflight_if_needed(
@@ -1046,7 +1576,7 @@ impl Manager {
         let ghost_list: String = self
             .ghosts
             .iter()
-            .map(|g| format!("- {} — {}", g.name, g.description))
+            .map(|g| format!("- {} [{}] — {}", g.name, g.role.as_str(), g.description))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1529,6 +2059,64 @@ fn format_memory_context(memories: &[crate::memory::Memory]) -> String {
     }
 }
 
+fn parse_critic_review(raw: &str) -> CriticReview {
+    let fallback = CriticReview {
+        approved: false,
+        summary: "Critic response was not structured; defaulting to revision required.".to_string(),
+        feedback: vec![compact_context_line(raw, 220)],
+    };
+    let Some(json) = llm::extract_json(raw) else {
+        return fallback;
+    };
+
+    let approved = json
+        .get("approved")
+        .and_then(|v| v.as_bool())
+        .or_else(|| json.get("approve").and_then(|v| v.as_bool()))
+        .or_else(|| json.get("pass").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    let summary = json
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if approved {
+            "Approved by critic."
+        } else {
+            "Critic requested revision."
+        })
+        .to_string();
+
+    let mut feedback: Vec<String> = Vec::new();
+    if let Some(items) = json.get("feedback").and_then(|v| v.as_array()) {
+        feedback.extend(
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    } else if let Some(text) = json.get("feedback").and_then(|v| v.as_str()) {
+        let line = text.trim();
+        if !line.is_empty() {
+            feedback.push(line.to_string());
+        }
+    }
+
+    if feedback.is_empty() && !approved {
+        feedback.push("Critic rejected without actionable feedback.".to_string());
+    }
+    feedback.truncate(CRITIC_MAX_FEEDBACK_ITEMS);
+
+    CriticReview {
+        approved,
+        summary,
+        feedback,
+    }
+}
+
 fn query_kpi_rollup(
     conn: &rusqlite::Connection,
     repo: &str,
@@ -1679,6 +2267,7 @@ fn estimate_token_budget(contract: &TaskContract, context_window: usize) -> Toke
         contract.goal.as_str(),
         contract.context.as_str(),
         contract.soul.as_deref().unwrap_or_default(),
+        contract.skill.as_deref().unwrap_or_default(),
         contract.tools_doc.as_deref().unwrap_or_default(),
     ];
     let mut weighted_confidence = 0.0;
@@ -1995,7 +2584,7 @@ mod tests {
         apply_token_budget_strategy, classification_route_target, count_section_bullets,
         estimate_token_budget, format_ghost_success_context, format_kpi_context,
         format_kpi_fallback_context, format_lesson_context, format_lesson_fallback_context,
-        goal_requires_compile_runtime_preflight, infer_kpi_prompt_scope,
+        goal_requires_compile_runtime_preflight, infer_kpi_prompt_scope, parse_critic_review,
         routing_feature_payload_preview, Classification, KpiPromptScope, Manager,
     };
     use crate::dynamic_tools::{DynamicTool, DynamicToolDefinition, ExecutionMode};
@@ -2030,6 +2619,7 @@ mod tests {
             goal: goal.to_string(),
             constraints: Vec::new(),
             soul: None,
+            skill: None,
             tools_doc: None,
             cli_tool_preference: None,
             cli_tool_routing_order: Vec::new(),
@@ -2329,5 +2919,26 @@ mod tests {
         assert!(payload.contains("lessons=1"));
         assert!(payload.contains("kpi_preview="));
         assert!(payload.contains("lesson_preview="));
+    }
+
+    #[test]
+    fn parse_critic_review_accepts_structured_feedback() {
+        let raw = r#"{
+            "approved": false,
+            "summary": "Found regression risk",
+            "feedback": ["Add test for edge case", "Handle empty input path"]
+        }"#;
+        let review = parse_critic_review(raw);
+        assert!(!review.approved);
+        assert_eq!(review.summary, "Found regression risk");
+        assert_eq!(review.feedback.len(), 2);
+        assert_eq!(review.feedback[0], "Add test for edge case");
+    }
+
+    #[test]
+    fn parse_critic_review_falls_back_on_unstructured_output() {
+        let review = parse_critic_review("Looks good overall, maybe revise error handling.");
+        assert!(!review.approved);
+        assert!(!review.feedback.is_empty());
     }
 }

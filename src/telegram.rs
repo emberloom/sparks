@@ -10,6 +10,7 @@ use crate::confirm::Confirmer;
 use crate::core::{CoreEvent, CoreHandle, SessionContext};
 use crate::error::{AthenaError, Result};
 use crate::observer::ObserverCategory;
+use crate::session_review::{ActivityEntry, ActivityLogStore};
 
 /// System info passed from main to the Telegram bot.
 #[derive(Clone)]
@@ -702,6 +703,11 @@ async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
         /ghosts — List active ghosts
         /memories — List saved memories
         /dispatch <code>&lt;ghost&gt; &lt;goal&gt;</code> — Run an autonomous task
+        /review <code>[summary|detailed] [hours]</code> — Review session activity
+        /explain <code>[summary|detailed] [hours]</code> — Conceptual explanation of work
+        /watch <code>[seconds]</code> — Real-time activity stream
+        /search <code>&lt;query&gt;</code> — Search across all sessions
+        /alerts — Manage notification alert rules
         /help — This help message
 
         Send any message to chat with Athena.";
@@ -1018,6 +1024,421 @@ async fn command_session(
     send_html(bot, chat_id, &html).await
 }
 
+async fn command_review(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::{render_review, ReviewDetail};
+
+    // Parse detail level from argument: /review [summary|standard|detailed] [hours]
+    let args: Vec<&str> = text.strip_prefix("/review").unwrap_or("").trim().split_whitespace().collect();
+    let detail = args.first().map(|a| ReviewDetail::from_str_loose(a)).unwrap_or(ReviewDetail::Standard);
+    let hours: u32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(24);
+
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+
+    let entries = match state.handle.activity_log.recent(&session_key, 200) {
+        Ok(e) => e,
+        Err(e) => {
+            let html = format!("<b>Error loading activity log:</b> {}", escape_html(&e.to_string()));
+            return send_html(bot, chat_id, &html).await;
+        }
+    };
+
+    // Also include autonomous task entries
+    let auto_entries = state.handle.activity_log.recent("autonomous", 100).unwrap_or_default();
+
+    let mut all_entries = entries;
+    all_entries.extend(auto_entries);
+    all_entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    // Filter to requested time window
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+    let filtered: Vec<_> = all_entries.into_iter().filter(|e| e.created_at >= cutoff_str).collect();
+
+    let review = render_review(&filtered, detail);
+    send_html(bot, chat_id, &review).await
+}
+
+async fn command_explain(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::{generate_explanation, ReviewDetail};
+
+    // Parse: /explain [summary|standard|detailed] [hours]
+    let args: Vec<&str> = text.strip_prefix("/explain").unwrap_or("").trim().split_whitespace().collect();
+    let detail = args.first().map(|a| ReviewDetail::from_str_loose(a)).unwrap_or(ReviewDetail::Standard);
+    let hours: u32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(24);
+
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+
+    let _ = send_html(bot, chat_id, "<i>Generating explanation...</i>").await;
+
+    let entries = state.handle.activity_log.recent(&session_key, 200).unwrap_or_default();
+    let auto_entries = state.handle.activity_log.recent("autonomous", 100).unwrap_or_default();
+
+    let mut all_entries = entries;
+    all_entries.extend(auto_entries);
+    all_entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
+    let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+    let filtered: Vec<_> = all_entries.into_iter().filter(|e| e.created_at >= cutoff_str).collect();
+
+    match generate_explanation(&filtered, state.handle.llm.as_ref(), detail).await {
+        Ok(explanation) => {
+            let html = format!("<b>🧠 Session Explanation</b>\n\n{}", escape_html(&explanation));
+            send_html(bot, chat_id, &html).await
+        }
+        Err(e) => {
+            let html = format!("<b>Error generating explanation:</b> {}", escape_html(&e.to_string()));
+            send_html(bot, chat_id, &html).await
+        }
+    }
+}
+
+async fn command_search(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::render_search_results;
+
+    let query = text.strip_prefix("/search").unwrap_or("").trim();
+    if query.is_empty() {
+        return send_html(
+            bot,
+            chat_id,
+            "<b>Usage:</b> <code>/search &lt;query&gt;</code>\n\nSearch across all sessions for tool calls, messages, and activity.",
+        ).await;
+    }
+
+    let entries = state.handle.activity_log.search(query, 50).unwrap_or_default();
+    let html = render_search_results(&entries, query);
+    send_html(bot, chat_id, &html).await
+}
+
+async fn command_alerts(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let args: Vec<&str> = text
+        .strip_prefix("/alerts")
+        .unwrap_or("")
+        .trim()
+        .splitn(5, ' ')
+        .collect();
+    let subcommand = args.first().copied().unwrap_or("");
+
+    match subcommand {
+        "add" => handle_alerts_add(bot, chat_id, &args, state).await,
+        "remove" | "rm" | "delete" => handle_alerts_remove(bot, chat_id, &args, state).await,
+        "toggle" => handle_alerts_toggle(bot, chat_id, &args, state).await,
+        _ => handle_alerts_list(bot, chat_id, state).await,
+    }
+}
+
+async fn handle_alerts_add(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: &[&str],
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    if args.len() < 3 {
+        return send_html(
+            bot,
+            chat_id,
+            "<b>Usage:</b> <code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n\n\
+             Targets: tool_name, summary, detail, tool_input, tool_output, ghost, event_type, any\n\
+             Severity: info, warn, critical",
+        )
+        .await;
+    }
+    let name = args[1];
+    let pattern = args[2];
+    let target = args.get(3).copied().unwrap_or("tool_name");
+    let severity = args.get(4).copied().unwrap_or("warn");
+    let chat_str = chat_id.0.to_string();
+
+    match state
+        .handle
+        .activity_log
+        .add_alert_rule(name, pattern, target, severity, Some(&chat_str))
+    {
+        Ok(id) => {
+            let html = format!(
+                "✅ Alert rule <b>#{}</b> created: <code>{}</code> on <i>{}</i> [{}]",
+                id, pattern, target, severity
+            );
+            send_html(bot, chat_id, &html).await
+        }
+        Err(e) => {
+            let html = format!("<b>Error:</b> {}", escape_html(&e.to_string()));
+            send_html(bot, chat_id, &html).await
+        }
+    }
+}
+
+async fn handle_alerts_remove(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: &[&str],
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let id: i64 = match args.get(1).and_then(|s| s.parse().ok()) {
+        Some(id) => id,
+        None => {
+            return send_html(bot, chat_id, "<b>Usage:</b> <code>/alerts remove &lt;id&gt;</code>")
+                .await;
+        }
+    };
+    match state.handle.activity_log.remove_alert_rule(id) {
+        Ok(true) => send_html(bot, chat_id, &format!("✅ Alert rule #{} removed.", id)).await,
+        Ok(false) => send_html(bot, chat_id, &format!("⚠️ Alert rule #{} not found.", id)).await,
+        Err(e) => {
+            send_html(bot, chat_id, &format!("<b>Error:</b> {}", escape_html(&e.to_string()))).await
+        }
+    }
+}
+
+async fn handle_alerts_toggle(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: &[&str],
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let id: i64 = match args.get(1).and_then(|s| s.parse().ok()) {
+        Some(id) => id,
+        None => {
+            return send_html(bot, chat_id, "<b>Usage:</b> <code>/alerts toggle &lt;id&gt;</code>")
+                .await;
+        }
+    };
+    let rules = state.handle.activity_log.list_alert_rules().unwrap_or_default();
+    let current = rules.iter().find(|r| r.id == id);
+    let new_state = current.map(|r| !r.enabled).unwrap_or(true);
+    match state.handle.activity_log.toggle_alert_rule(id, new_state) {
+        Ok(true) => {
+            let label = if new_state { "enabled" } else { "disabled" };
+            send_html(bot, chat_id, &format!("✅ Alert rule #{} {}.", id, label)).await
+        }
+        Ok(false) => send_html(bot, chat_id, &format!("⚠️ Alert rule #{} not found.", id)).await,
+        Err(e) => {
+            send_html(bot, chat_id, &format!("<b>Error:</b> {}", escape_html(&e.to_string()))).await
+        }
+    }
+}
+
+async fn handle_alerts_list(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    use crate::session_review::render_alert_rules;
+
+    let rules = state.handle.activity_log.list_alert_rules().unwrap_or_default();
+    let html = render_alert_rules(&rules);
+    send_html(bot, chat_id, &html).await
+}
+
+async fn command_watch(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg: &Message,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<()> {
+    let duration_secs = parse_watch_duration(text);
+    let session_key = format!("telegram:{}:{}", session_user_id(msg), chat_id.0);
+    let activity_log = state.handle.activity_log.clone();
+    send_html(
+        bot,
+        chat_id,
+        &format!(
+            "👁 <b>Watch mode active</b> for {} seconds.\nNew activity will be streamed here in real-time.",
+            duration_secs
+        ),
+    ).await?;
+    spawn_watch_loop(
+        bot.clone(),
+        chat_id,
+        session_key,
+        duration_secs,
+        activity_log,
+    );
+    Ok(())
+}
+
+fn parse_watch_duration(text: &str) -> u64 {
+    let args: Vec<&str> = text
+        .strip_prefix("/watch")
+        .unwrap_or("")
+        .trim()
+        .split_whitespace()
+        .collect();
+    let duration_secs: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(300);
+    duration_secs.min(3600)
+}
+
+fn spawn_watch_loop(
+    bot: Bot,
+    chat_id: ChatId,
+    session_key: String,
+    duration_secs: u64,
+    activity_log: Arc<ActivityLogStore>,
+) {
+    tokio::spawn(async move {
+        run_watch_loop(&bot, chat_id, &session_key, duration_secs, activity_log).await;
+    });
+}
+
+async fn run_watch_loop(
+    bot: &Bot,
+    chat_id: ChatId,
+    session_key: &str,
+    duration_secs: u64,
+    activity_log: Arc<ActivityLogStore>,
+) {
+    let mut last_id = latest_entry_id(&activity_log, session_key);
+    let mut last_auto_id = latest_entry_id(&activity_log, "autonomous");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(duration_secs);
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let new_entries = activity_log.recent(session_key, 20).unwrap_or_default();
+        emit_session_entries(bot, chat_id, &activity_log, &new_entries, &mut last_id).await;
+        let auto_entries = activity_log.recent("autonomous", 20).unwrap_or_default();
+        emit_autonomous_entries(bot, chat_id, &activity_log, &auto_entries, &mut last_auto_id).await;
+    }
+
+    let _ = bot
+        .send_message(chat_id, "👁 Watch mode ended.")
+        .parse_mode(ParseMode::Html)
+        .await;
+}
+
+fn latest_entry_id(activity_log: &ActivityLogStore, session_key: &str) -> i64 {
+    activity_log
+        .recent(session_key, 1)
+        .ok()
+        .and_then(|e| e.last().map(|entry| entry.id))
+        .unwrap_or(0)
+}
+
+async fn emit_session_entries(
+    bot: &Bot,
+    chat_id: ChatId,
+    activity_log: &ActivityLogStore,
+    entries: &[ActivityEntry],
+    last_id: &mut i64,
+) {
+    for entry in entries {
+        if entry.id > *last_id {
+            *last_id = entry.id;
+            let html = format_session_entry(entry);
+            let _ = bot.send_message(chat_id, &html).parse_mode(ParseMode::Html).await;
+            send_alerts(bot, chat_id, activity_log, entry).await;
+        }
+    }
+}
+
+async fn emit_autonomous_entries(
+    bot: &Bot,
+    chat_id: ChatId,
+    activity_log: &ActivityLogStore,
+    entries: &[ActivityEntry],
+    last_id: &mut i64,
+) {
+    for entry in entries {
+        if entry.id > *last_id {
+            *last_id = entry.id;
+            let html = format_autonomous_entry(entry);
+            let _ = bot.send_message(chat_id, &html).parse_mode(ParseMode::Html).await;
+            send_alerts(bot, chat_id, activity_log, entry).await;
+        }
+    }
+}
+
+fn format_session_entry(entry: &ActivityEntry) -> String {
+    let emoji = match entry.event_type.as_str() {
+        "chat_in" => "💬",
+        "chat_out" => "🤖",
+        "tool_run" => "🔧",
+        "task_start" => "🚀",
+        "task_finish" => "✅",
+        "task_fail" => "❌",
+        _ => "•",
+    };
+    let mut html = format!("{} {}", emoji, escape_html(&entry.summary));
+    if let Some(ref tool) = entry.tool_name {
+        html.push_str(&format!(" [{}]", escape_html(tool)));
+    }
+    if let Some(ms) = entry.duration_ms {
+        html.push_str(&format!(" <i>({}ms)</i>", ms));
+    }
+    if let Some(ref input) = entry.tool_input {
+        let preview = if input.len() > 100 {
+            &input[..input.floor_char_boundary(100)]
+        } else {
+            input
+        };
+        html.push_str(&format!("\n<code>{}</code>", escape_html(preview)));
+    }
+    html
+}
+
+fn format_autonomous_entry(entry: &ActivityEntry) -> String {
+    let emoji = match entry.event_type.as_str() {
+        "task_start" => "🚀",
+        "task_finish" => "✅",
+        "task_fail" => "❌",
+        "tool_run" => "🔧",
+        _ => "⚡",
+    };
+    let mut html = format!("[auto] {} {}", emoji, escape_html(&entry.summary));
+    if let Some(ref ghost) = entry.ghost {
+        html.push_str(&format!(" [{}]", escape_html(ghost)));
+    }
+    if let Some(ms) = entry.duration_ms {
+        html.push_str(&format!(" <i>({}ms)</i>", ms));
+    }
+    html
+}
+
+async fn send_alerts(
+    bot: &Bot,
+    chat_id: ChatId,
+    activity_log: &ActivityLogStore,
+    entry: &ActivityEntry,
+) {
+    if let Ok(alerts) = activity_log.check_alerts(entry) {
+        for alert in alerts {
+            let alert_html = format!(
+                "🔔 <b>Alert:</b> {} [{}]\n  Pattern <code>{}</code> matched on {}",
+                escape_html(&alert.rule.name),
+                escape_html(&alert.rule.severity),
+                escape_html(&alert.rule.pattern),
+                escape_html(&alert.rule.target),
+            );
+            let _ = bot
+                .send_message(chat_id, &alert_html)
+                .parse_mode(ParseMode::Html)
+                .await;
+        }
+    }
+}
+
 async fn command_cli(bot: &Bot, chat_id: ChatId, state: &TelegramState) -> ResponseResult<()> {
     let current = state
         .handle
@@ -1319,6 +1740,39 @@ async fn handle_slash_commands(
         command_cli_model(bot, chat_id, text, state).await?;
         return Ok(true);
     }
+    if handle_activity_commands(bot, msg, chat_id, text, state).await? {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn handle_activity_commands(
+    bot: &Bot,
+    msg: &Message,
+    chat_id: ChatId,
+    text: &str,
+    state: &TelegramState,
+) -> ResponseResult<bool> {
+    if text == "/review" || text.starts_with("/review ") {
+        command_review(bot, chat_id, msg, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/explain" || text.starts_with("/explain ") {
+        command_explain(bot, chat_id, msg, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/search" || text.starts_with("/search ") {
+        command_search(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/alerts" || text.starts_with("/alerts ") {
+        command_alerts(bot, chat_id, text, state).await?;
+        return Ok(true);
+    }
+    if text == "/watch" || text.starts_with("/watch ") {
+        command_watch(bot, chat_id, msg, text, state).await?;
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -1595,41 +2049,10 @@ fn planning_advance_step(
             )
         }
         PlanningStep::Summary => {
-            if is_confirm_text(text) {
-                let prompt = planning_build_prompt(interview);
-                interview.step = PlanningStep::Refining;
-                PlanningAction::Dispatch(prompt)
-            } else if is_edit_text(text) {
-                interview.step = PlanningStep::Editing;
-                PlanningAction::Prompt(
-                    "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".to_string(),
-                    None,
-                )
-            } else if apply_planning_edits(interview, text) {
-                PlanningAction::Prompt(
-                    planning_summary_html(interview),
-                    Some(planning_confirm_keyboard()),
-                )
-            } else {
-                PlanningAction::Prompt(
-                    "Reply <code>confirm</code> to proceed, or send edits like <code>Goal: ...</code>.".to_string(),
-                    Some(planning_confirm_keyboard()),
-                )
-            }
+            planning_summary_step(interview, text)
         }
         PlanningStep::Editing => {
-            if apply_planning_edits(interview, text) {
-                interview.step = PlanningStep::Summary;
-                PlanningAction::Prompt(
-                    planning_summary_html(interview),
-                    Some(planning_confirm_keyboard()),
-                )
-            } else {
-                PlanningAction::Prompt(
-                    "I couldn't read those edits. Try lines like <code>Goal: ...</code> or <code>Constraints: ...</code>.".to_string(),
-                    None,
-                )
-            }
+            planning_editing_step(interview, text)
         }
         PlanningStep::Refining => {
             if is_done_text(text) {
@@ -1639,6 +2062,46 @@ fn planning_advance_step(
                 PlanningAction::Dispatch(text.to_string())
             }
         }
+    }
+}
+
+fn planning_summary_step(interview: &mut PlanningInterview, text: &str) -> PlanningAction {
+    if is_confirm_text(text) {
+        let prompt = planning_build_prompt(interview);
+        interview.step = PlanningStep::Refining;
+        PlanningAction::Dispatch(prompt)
+    } else if is_edit_text(text) {
+        interview.step = PlanningStep::Editing;
+        PlanningAction::Prompt(
+            "Send corrections using lines like:\n<code>Goal: ...</code>\n<code>Constraints: ...</code>\n<code>Timeline: ...</code>\n<code>Scope: ...</code>\n<code>Depth: ...</code>\n<code>Output: ...</code>".to_string(),
+            None,
+        )
+    } else if apply_planning_edits(interview, text) {
+        PlanningAction::Prompt(
+            planning_summary_html(interview),
+            Some(planning_confirm_keyboard()),
+        )
+    } else {
+        PlanningAction::Prompt(
+            "Reply <code>confirm</code> to proceed, or send edits like <code>Goal: ...</code>."
+                .to_string(),
+            Some(planning_confirm_keyboard()),
+        )
+    }
+}
+
+fn planning_editing_step(interview: &mut PlanningInterview, text: &str) -> PlanningAction {
+    if apply_planning_edits(interview, text) {
+        interview.step = PlanningStep::Summary;
+        PlanningAction::Prompt(
+            planning_summary_html(interview),
+            Some(planning_confirm_keyboard()),
+        )
+    } else {
+        PlanningAction::Prompt(
+            "I couldn't read those edits. Try lines like <code>Goal: ...</code> or <code>Constraints: ...</code>.".to_string(),
+            None,
+        )
     }
 }
 
@@ -1653,43 +2116,7 @@ async fn handle_planning_message(
         return Ok(false);
     }
 
-    let now = tokio::time::Instant::now();
-    let action = {
-        let mut planning = state.planning.lock().await;
-        if let Some(interview) = planning.get_mut(&chat_id.0) {
-            interview.last_updated = now;
-            if is_cancel_text(text) {
-                planning.remove(&chat_id.0);
-                PlanningAction::Cancelled
-            } else {
-                let mut remove = false;
-                let action = planning_advance_step(interview, text, &mut remove);
-                if remove {
-                    planning.remove(&chat_id.0);
-                }
-                action
-            }
-        } else if state.config.planning_auto && should_start_planning_interview(text) {
-            let mut interview = PlanningInterview::new(now);
-            if !is_bare_plan_request(text) {
-                interview.goal = Some(text.to_string());
-                interview.step = PlanningStep::Constraints;
-                planning.insert(chat_id.0, interview);
-                PlanningAction::Prompt(
-                    "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)".to_string(),
-                    Some(planning_constraints_keyboard()),
-                )
-            } else {
-                planning.insert(chat_id.0, interview);
-                PlanningAction::Prompt(
-                    "<b>Quick planning interview</b>\n\nWhat does success look like? One sentence is fine.".to_string(),
-                    None,
-                )
-            }
-        } else {
-            PlanningAction::None
-        }
-    };
+    let action = planning_action_for_message(state, chat_id, text).await;
 
     match action {
         PlanningAction::None => Ok(false),
@@ -1722,6 +2149,48 @@ async fn handle_planning_message(
             send_html(bot, chat_id, "<i>Plan finalised.</i>").await?;
             Ok(true)
         }
+    }
+}
+
+async fn planning_action_for_message(
+    state: &TelegramState,
+    chat_id: ChatId,
+    text: &str,
+) -> PlanningAction {
+    let now = tokio::time::Instant::now();
+    let mut planning = state.planning.lock().await;
+    if let Some(interview) = planning.get_mut(&chat_id.0) {
+        interview.last_updated = now;
+        if is_cancel_text(text) {
+            planning.remove(&chat_id.0);
+            PlanningAction::Cancelled
+        } else {
+            let mut remove = false;
+            let action = planning_advance_step(interview, text, &mut remove);
+            if remove {
+                planning.remove(&chat_id.0);
+            }
+            action
+        }
+    } else if state.config.planning_auto && should_start_planning_interview(text) {
+        let mut interview = PlanningInterview::new(now);
+        if !is_bare_plan_request(text) {
+            interview.goal = Some(text.to_string());
+            interview.step = PlanningStep::Constraints;
+            planning.insert(chat_id.0, interview);
+            PlanningAction::Prompt(
+                "Got it. A couple quick questions to sharpen the plan.\n\nAny constraints I should respect? (timeline, budget, stack, scope)".to_string(),
+                Some(planning_constraints_keyboard()),
+            )
+        } else {
+            planning.insert(chat_id.0, interview);
+            PlanningAction::Prompt(
+                "<b>Quick planning interview</b>\n\nWhat does success look like? One sentence is fine.".to_string(),
+                None,
+            )
+        }
+    } else {
+        PlanningAction::None
     }
 }
 
@@ -2557,6 +3026,11 @@ pub async fn run_telegram(
         BotCommand::new("ghosts", "List active ghosts"),
         BotCommand::new("memories", "List saved memories"),
         BotCommand::new("dispatch", "Dispatch autonomous task to ghost"),
+        BotCommand::new("review", "Review session activity log"),
+        BotCommand::new("explain", "Conceptual explanation of recent work"),
+        BotCommand::new("watch", "Real-time activity stream"),
+        BotCommand::new("search", "Search across all session activity"),
+        BotCommand::new("alerts", "Manage notification alert rules"),
     ];
     bot.set_my_commands(commands)
         .await

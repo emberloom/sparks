@@ -40,6 +40,26 @@ CI smoke suite:
 
 ## Run
 
+Preferred CLI entrypoint:
+
+```bash
+cargo run -- eval run --suite eval/benchmark-suite.json
+```
+
+Compare against a baseline scorecard:
+
+```bash
+cargo run -- eval compare \
+  --baseline eval/results/eval-scorecard-baseline.json \
+  --candidate eval/results/eval-scorecard-latest.json
+```
+
+Scenario library manifest (used in scorecard metadata):
+
+- `eval/scenario-library-v1.json`
+
+Raw harness invocation:
+
 ```bash
 python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --athena-bin target/debug/athena
 ```

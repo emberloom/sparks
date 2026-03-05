@@ -7,13 +7,13 @@ description = "Secure autonomous multi-agent system"
 [features]
 default = []
 telegram = ["teloxide"]
-webhook = ["axum", "tower", "hmac"]
+webhook = ["tower", "hmac"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
-axum = { version = "0.7", features = ["macros"], optional = true }
+axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.5", optional = true }
 reqwest = { version = "0.12", features = ["json", "blocking", "multipart", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -50,3 +50,4 @@ humantime = "2"
 dotenvy = "0.15"
 keyring = "3"
 rpassword = "7"
+hnsw_rs = "0.3.2"

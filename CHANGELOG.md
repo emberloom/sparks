@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- pending
+### Added
+
+- OpenAI-compatible API endpoints (`/v1/models`, `/v1/chat/completions`) with auth, rate limits, and docs.
+- Ghost auto-specialization based on KPI outcomes with stability thresholds and rollback behavior.
+
+### Changed
+
+- Autonomous task routing now evaluates historical KPI outcomes when selecting a default ghost.
 
 ## [0.1.0] - 2026-02-26
 

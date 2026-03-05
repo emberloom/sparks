@@ -7,10 +7,11 @@ use crate::config::{Config, GhostConfig};
 use crate::confirm::{AutoConfirmer, Confirmer};
 use crate::embeddings::Embedder;
 use crate::error::Result;
+use crate::ghost_policy::{self, GhostPolicyAction, GhostPolicyScope, GhostPolicyThresholds};
 use crate::heartbeat;
 use crate::introspect::{self, SharedMetrics, SystemMetrics};
 use crate::knobs::{RuntimeKnobs, SharedKnobs};
-use crate::kpi::TaskOutcomeStore;
+use crate::kpi::{self, TaskOutcomeStore};
 use crate::langfuse::SharedLangfuse;
 use crate::llm::LlmProvider;
 use crate::manager::Manager;
@@ -26,10 +27,16 @@ use crate::pulse::{self, Pulse, PulseBus};
 use crate::randomness;
 use crate::scheduler::CronEngine;
 use crate::ticket_intake::{self, TicketIntakeStore, TicketProvider};
+use crate::session_review::{ActivityEventType, ActivityLogStore};
 use crate::tool_usage::ToolUsageStore;
 
 const STALE_STARTED_TASK_SECS: u64 = 30 * 60;
 const STALE_STARTED_REASON: &str = "stale_started";
+const GHOST_SPECIALIZATION_MIN_SAMPLES: u64 = 3;
+const GHOST_SPECIALIZATION_CONFIDENCE_THRESHOLD: f64 = 0.05;
+const GHOST_SPECIALIZATION_ROLLBACK_MIN_SAMPLES: u64 = 3;
+const GHOST_SPECIALIZATION_MAX_ALLOWED_REGRESSION: f64 = 0.08;
+const GHOST_SPECIALIZATION_STABILITY_WINDOW: usize = 3;
 
 /// Identifies who is talking — scopes memory and conversation.
 #[derive(Debug, Clone)]
@@ -127,6 +134,8 @@ pub struct CoreHandle {
     pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
     pub auto_tx: mpsc::Sender<AutonomousTask>,
     pub metrics: SharedMetrics,
+    #[cfg(feature = "telegram")]
+    pub activity_log: Arc<ActivityLogStore>,
 }
 
 impl CoreHandle {
@@ -199,13 +208,12 @@ struct CoreRuntimeHandles {
     outcome_store: Arc<TaskOutcomeStore>,
     cron_engine: Arc<CronEngine>,
     metrics: SharedMetrics,
+    activity_log: Arc<ActivityLogStore>,
 }
 
 impl AthenaCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
         let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
-        let llm_for_handle = llm.clone();
-        let prompt_scanner = Arc::new(PromptScanner::new(config.prompt_scanner.clone()));
 
         spawn_embedding_backfill(memory.clone(), embedder.clone());
 
@@ -224,11 +232,12 @@ impl AthenaCore {
             outcome_store,
             cron_engine,
             metrics,
+            activity_log,
         } = init_runtime_handles(&config, memory.clone(), llm.clone())?;
         let manager = build_manager(
             &config,
             merged_ghosts,
-            llm,
+            llm.clone(),
             orchestrator,
             memory.clone(),
             embedder,
@@ -238,46 +247,194 @@ impl AthenaCore {
             metrics.clone(),
             langfuse.clone(),
             observer.clone(),
+            activity_log.clone(),
         );
-        let persona_soul_for_reentry = config.persona.soul.clone();
-
         let (tx, rx) = init_core_channel();
-
         let llm_for_reentry = manager.llm_ref();
         spawn_core_loops(
             rx,
             manager,
             auto_rx,
             config.clone(),
-            prompt_scanner,
+            Arc::new(PromptScanner::new(config.prompt_scanner.clone())),
             activity.clone(),
             knobs.clone(),
             observer.clone(),
             pulse_bus.clone(),
             memory.clone(),
             llm_for_reentry,
-            persona_soul_for_reentry,
+            config.persona.soul.clone(),
             langfuse.clone(),
             outcome_store,
             config.ticket_intake.mock_dispatch,
+            activity_log.clone(),
         );
 
-        Ok(CoreHandle {
+        let handle = build_core_handle_for_runtime(
             tx,
-            ghosts: Arc::new(ghosts),
+            ghosts,
             memory,
-            llm: llm_for_handle,
+            llm.clone(),
             knobs,
             observer,
             pulse_bus,
             activity,
             mood,
-            cron_engine: Some(cron_engine),
-            delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
+            cron_engine,
+            delivered_rx,
             auto_tx,
             metrics,
-        })
+            activity_log,
+        );
+
+        maybe_spawn_openai_api(&config, &handle).await?;
+
+        Ok(handle)
     }
+}
+
+#[cfg(feature = "telegram")]
+fn build_core_handle_for_runtime(
+    tx: mpsc::Sender<CoreRequest>,
+    ghosts: Vec<GhostInfo>,
+    memory: Arc<MemoryStore>,
+    llm: Arc<dyn LlmProvider>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    activity: Arc<ActivityTracker>,
+    mood: Arc<MoodState>,
+    cron_engine: Arc<CronEngine>,
+    delivered_rx: mpsc::Receiver<Pulse>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
+    metrics: SharedMetrics,
+    activity_log: Arc<ActivityLogStore>,
+) -> CoreHandle {
+    build_core_handle(
+        tx,
+        ghosts,
+        memory,
+        llm,
+        knobs,
+        observer,
+        pulse_bus,
+        activity,
+        mood,
+        cron_engine,
+        delivered_rx,
+        auto_tx,
+        metrics,
+        activity_log,
+    )
+}
+
+#[cfg(not(feature = "telegram"))]
+fn build_core_handle_for_runtime(
+    tx: mpsc::Sender<CoreRequest>,
+    ghosts: Vec<GhostInfo>,
+    memory: Arc<MemoryStore>,
+    llm: Arc<dyn LlmProvider>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    activity: Arc<ActivityTracker>,
+    mood: Arc<MoodState>,
+    cron_engine: Arc<CronEngine>,
+    delivered_rx: mpsc::Receiver<Pulse>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
+    metrics: SharedMetrics,
+    activity_log: Arc<ActivityLogStore>,
+) -> CoreHandle {
+    let _ = activity_log;
+    build_core_handle(
+        tx,
+        ghosts,
+        memory,
+        llm,
+        knobs,
+        observer,
+        pulse_bus,
+        activity,
+        mood,
+        cron_engine,
+        delivered_rx,
+        auto_tx,
+        metrics,
+    )
+}
+
+#[cfg(feature = "telegram")]
+fn build_core_handle(
+    tx: mpsc::Sender<CoreRequest>,
+    ghosts: Vec<GhostInfo>,
+    memory: Arc<MemoryStore>,
+    llm: Arc<dyn LlmProvider>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    activity: Arc<ActivityTracker>,
+    mood: Arc<MoodState>,
+    cron_engine: Arc<CronEngine>,
+    delivered_rx: mpsc::Receiver<Pulse>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
+    metrics: SharedMetrics,
+    activity_log: Arc<ActivityLogStore>,
+) -> CoreHandle {
+    CoreHandle {
+        tx,
+        ghosts: Arc::new(ghosts),
+        memory,
+        llm,
+        knobs,
+        observer,
+        pulse_bus,
+        activity,
+        mood,
+        cron_engine: Some(cron_engine),
+        delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
+        auto_tx,
+        metrics,
+        activity_log,
+    }
+}
+
+#[cfg(not(feature = "telegram"))]
+fn build_core_handle(
+    tx: mpsc::Sender<CoreRequest>,
+    ghosts: Vec<GhostInfo>,
+    memory: Arc<MemoryStore>,
+    llm: Arc<dyn LlmProvider>,
+    knobs: SharedKnobs,
+    observer: ObserverHandle,
+    pulse_bus: PulseBus,
+    activity: Arc<ActivityTracker>,
+    mood: Arc<MoodState>,
+    cron_engine: Arc<CronEngine>,
+    delivered_rx: mpsc::Receiver<Pulse>,
+    auto_tx: mpsc::Sender<AutonomousTask>,
+    metrics: SharedMetrics,
+) -> CoreHandle {
+    CoreHandle {
+        tx,
+        ghosts: Arc::new(ghosts),
+        memory,
+        llm,
+        knobs,
+        observer,
+        pulse_bus,
+        activity,
+        mood,
+        cron_engine: Some(cron_engine),
+        delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
+        auto_tx,
+        metrics,
+    }
+}
+
+async fn maybe_spawn_openai_api(config: &Config, handle: &CoreHandle) -> Result<()> {
+    crate::openai_api::spawn_openai_api(config.openai_api.clone(), handle.clone())
+        .await
+        .map_err(|e| crate::error::AthenaError::Tool(e.to_string()))
 }
 
 async fn init_llm_stack(
@@ -317,6 +474,7 @@ fn spawn_core_loops(
     _langfuse: SharedLangfuse,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     spawn_core_event_loop(
         rx,
@@ -327,6 +485,7 @@ fn spawn_core_loops(
         observer.clone(),
         memory.clone(),
         persona_soul_for_reentry,
+        activity_log.clone(),
     );
     spawn_autonomous_task_consumer(
         auto_rx,
@@ -338,6 +497,7 @@ fn spawn_core_loops(
         memory,
         outcome_store,
         mock_ticket_intake_dispatch,
+        activity_log,
     );
 }
 
@@ -358,6 +518,7 @@ fn init_runtime_handles(
     let (auto_tx, auto_rx) = mpsc::channel::<AutonomousTask>(32);
     let usage_store = create_usage_store(config)?;
     let outcome_store = create_task_outcome_store(config)?;
+    let activity_log = create_activity_log_store(config)?;
     expire_stale_started_tasks(&outcome_store, &observer);
 
     spawn_housekeeping_loops(
@@ -403,6 +564,7 @@ fn init_runtime_handles(
         outcome_store,
         cron_engine,
         metrics,
+        activity_log,
     })
 }
 
@@ -638,6 +800,7 @@ fn build_manager(
     metrics: SharedMetrics,
     langfuse: SharedLangfuse,
     observer: ObserverHandle,
+    activity_log: Arc<ActivityLogStore>,
 ) -> Arc<Manager> {
     let manager = Arc::new(Manager::new(
         config,
@@ -655,6 +818,7 @@ fn build_manager(
         metrics,
         langfuse,
         observer.clone(),
+        activity_log,
     ));
     if let Some(dt_path) = manager.dynamic_tools_path() {
         crate::dynamic_tools::spawn_hot_reload(
@@ -680,6 +844,7 @@ fn spawn_core_event_loop(
     observer: ObserverHandle,
     memory: Arc<MemoryStore>,
     persona_soul: Option<String>,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -695,6 +860,7 @@ fn spawn_core_event_loop(
                     observer.clone(),
                     memory.clone(),
                     persona_soul.clone(),
+                    activity_log.clone(),
                 )
                 .instrument(request_span),
             );
@@ -851,6 +1017,7 @@ async fn handle_core_request(
     observer: ObserverHandle,
     memory: Arc<MemoryStore>,
     persona_soul: Option<String>,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     activity.touch();
     let session_key = req.session.session_key();
@@ -858,6 +1025,19 @@ async fn handle_core_request(
         ObserverCategory::ChatIn,
         format!("{} \"{}\"", session_key, truncate_obs(&req.input, 80)),
     ));
+
+    // Log incoming chat message
+    let _ = activity_log.record(
+        &session_key,
+        ActivityEventType::ChatIn,
+        &truncate_obs(&req.input, 200),
+        Some(&req.input),
+        None,
+        None,
+        None,
+        None,
+    );
+
     if should_block_chat_input(&req, &prompt_scanner, &observer, &session_key).await {
         return;
     }
@@ -870,14 +1050,25 @@ async fn handle_core_request(
     let bridge_handle = spawn_status_bridge(status_rx, req.event_tx.clone());
 
     tracing::debug!("Calling manager.handle()");
+    let start = std::time::Instant::now();
+    let input = req.input.clone();
+    let session = req.session.clone();
+    let confirmer = req.confirmer.clone();
+    let manager_for_handle = manager.clone();
+    let status_tx_for_handle = status_tx.clone();
     let result = manager
-        .handle(
-            &req.input,
-            &req.session,
-            req.confirmer.as_ref(),
-            Some(&status_tx),
-        )
+        .with_activity_context_base(&session_key, None, || async move {
+            manager_for_handle
+                .handle(
+                    &input,
+                    &session,
+                    confirmer.as_ref(),
+                    Some(&status_tx_for_handle),
+                )
+                .await
+        })
         .await;
+    let elapsed_ms = start.elapsed().as_millis() as i64;
 
     drop(status_tx);
     let _ = bridge_handle.await;
@@ -892,6 +1083,19 @@ async fn handle_core_request(
                 )
                 .with_details(truncate_obs(&response, 100)),
             );
+
+            // Log outgoing response
+            let _ = activity_log.record(
+                &session_key,
+                ActivityEventType::ChatOut,
+                &format!("Response ({} chars)", response.len()),
+                Some(&truncate_obs(&response, 1000)),
+                None,
+                None,
+                None,
+                Some(elapsed_ms),
+            );
+
             let _ = req.event_tx.send(CoreEvent::Response(response)).await;
         }
         Err(e) => {
@@ -928,6 +1132,7 @@ fn spawn_autonomous_task_consumer(
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     tokio::spawn(async move {
         while let Some(task) = auto_rx.recv().await {
@@ -939,6 +1144,7 @@ fn spawn_autonomous_task_consumer(
             let memory = memory.clone();
             let outcome_store = outcome_store.clone();
             let mock_ticket_intake_dispatch = mock_ticket_intake_dispatch;
+            let activity_log = activity_log.clone();
             tokio::spawn(async move {
                 execute_autonomous_task(
                     task,
@@ -950,6 +1156,7 @@ fn spawn_autonomous_task_consumer(
                     memory,
                     outcome_store,
                     mock_ticket_intake_dispatch,
+                    activity_log,
                 )
                 .await;
             });
@@ -958,7 +1165,7 @@ fn spawn_autonomous_task_consumer(
 }
 
 async fn execute_autonomous_task(
-    task: AutonomousTask,
+    mut task: AutonomousTask,
     manager: Arc<Manager>,
     config: Config,
     prompt_scanner: Arc<PromptScanner>,
@@ -967,6 +1174,7 @@ async fn execute_autonomous_task(
     memory: Arc<MemoryStore>,
     outcome_store: Arc<TaskOutcomeStore>,
     mock_ticket_intake_dispatch: bool,
+    activity_log: Arc<ActivityLogStore>,
 ) {
     let confirmer = AutoConfirmer;
     expire_stale_started_tasks(&outcome_store, &observer);
@@ -974,10 +1182,24 @@ async fn execute_autonomous_task(
         .task_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let ghost_label = task.ghost.clone().unwrap_or_else(|| "auto".into());
+    let selected_ghost =
+        resolve_autonomous_task_ghost(&mut task, manager.as_ref(), &config, &observer);
+    let ghost_label = selected_ghost.unwrap_or_else(|| "auto".into());
     let goal_summary = truncate_obs(&task.goal, 120);
     record_autonomous_task_start(&outcome_store, &task_id, &task);
     log_autonomous_dispatch(&observer, &task, &ghost_label);
+
+    // Log task start to activity log (use "autonomous" as session key for background tasks)
+    let activity_session_key = "autonomous";
+    let task_start_id = log_autonomous_activity_start(
+        &activity_log,
+        activity_session_key,
+        &task_id,
+        &goal_summary,
+        &task.context,
+        &ghost_label,
+    );
+
     introspect::inc_active_tasks();
 
     if maybe_handle_mock_ticket_intake_dispatch(
@@ -1017,7 +1239,26 @@ async fn execute_autonomous_task(
         introspect::dec_active_tasks();
         return;
     }
-    let manager_result = run_manager_autonomous_task(&manager, &task, &confirmer).await;
+    let task_start = std::time::Instant::now();
+    let manager_for_task = manager.clone();
+    let task_ref = &task;
+    let confirmer_ref = &confirmer;
+    let manager_result = manager
+        .with_activity_context_base(activity_session_key, task_start_id, || async move {
+            run_manager_autonomous_task(&manager_for_task, task_ref, confirmer_ref).await
+        })
+        .await;
+    let task_elapsed_ms = task_start.elapsed().as_millis() as i64;
+
+    log_autonomous_activity_outcome(
+        &activity_log,
+        activity_session_key,
+        &task_id,
+        &ghost_label,
+        &manager_result,
+        task_elapsed_ms,
+    );
+
     finalize_autonomous_task_run(
         &task,
         &task_id,
@@ -1036,6 +1277,64 @@ async fn execute_autonomous_task(
     introspect::dec_active_tasks();
 }
 
+fn log_autonomous_activity_start(
+    activity_log: &ActivityLogStore,
+    activity_session_key: &str,
+    task_id: &str,
+    goal_summary: &str,
+    context: &str,
+    ghost_label: &str,
+) -> Option<i64> {
+    activity_log
+        .record(
+            activity_session_key,
+            ActivityEventType::AutonomousTaskStart,
+            goal_summary,
+            Some(context),
+            Some(ghost_label),
+            None,
+            Some(task_id),
+            None,
+        )
+        .ok()
+}
+
+fn log_autonomous_activity_outcome(
+    activity_log: &ActivityLogStore,
+    activity_session_key: &str,
+    task_id: &str,
+    ghost_label: &str,
+    manager_result: &Result<String>,
+    elapsed_ms: i64,
+) {
+    match manager_result {
+        Ok(result) => {
+            let _ = activity_log.record(
+                activity_session_key,
+                ActivityEventType::AutonomousTaskFinish,
+                &format!("{} completed ({} chars)", ghost_label, result.len()),
+                Some(&truncate_obs(result, 500)),
+                Some(ghost_label),
+                None,
+                Some(task_id),
+                Some(elapsed_ms),
+            );
+        }
+        Err(err) => {
+            let _ = activity_log.record(
+                activity_session_key,
+                ActivityEventType::AutonomousTaskFail,
+                &format!("{} failed: {}", ghost_label, truncate_obs(&err.to_string(), 200)),
+                Some(&err.to_string()),
+                Some(ghost_label),
+                None,
+                Some(task_id),
+                Some(elapsed_ms),
+            );
+        }
+    }
+}
+
 async fn run_manager_autonomous_task(
     manager: &Manager,
     task: &AutonomousTask,
@@ -1051,6 +1350,251 @@ async fn run_manager_autonomous_task(
             confirmer,
         )
         .await
+}
+
+fn resolve_autonomous_task_ghost(
+    task: &mut AutonomousTask,
+    manager: &Manager,
+    config: &Config,
+    observer: &ObserverHandle,
+) -> Option<String> {
+    if let Some(explicit) = task.ghost.clone() {
+        log_ghost_specialization_decision(
+            observer,
+            task,
+            &explicit,
+            "explicit",
+            0,
+            None,
+            None,
+            "explicit ghost requested; specialization bypassed",
+        );
+        return Some(explicit);
+    }
+
+    let available_ghosts = manager.ghost_names();
+    let Some(baseline_ghost) = select_default_autonomous_ghost(&available_ghosts) else {
+        log_ghost_specialization_decision(
+            observer,
+            task,
+            "auto",
+            "no_ghosts_configured",
+            0,
+            None,
+            None,
+            "no configured ghosts available",
+        );
+        return None;
+    };
+
+    let outcome =
+        match evaluate_autonomous_ghost_selection(config, task, &available_ghosts, &baseline_ghost)
+        {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                task.ghost = Some(baseline_ghost.clone());
+                log_ghost_specialization_decision(
+                    observer,
+                    task,
+                    &baseline_ghost,
+                    "fallback_on_policy_error",
+                    0,
+                    None,
+                    None,
+                    &format!("policy evaluation error: {}", e),
+                );
+                return Some(baseline_ghost);
+            }
+        };
+
+    task.ghost = Some(outcome.selected_ghost.clone());
+    log_ghost_specialization_decision(
+        observer,
+        task,
+        &outcome.selected_ghost,
+        outcome.selection_mode,
+        outcome.sample_count,
+        outcome.success_rate,
+        outcome.confidence_gap,
+        &outcome.rationale,
+    );
+    Some(outcome.selected_ghost)
+}
+
+#[derive(Debug, Clone)]
+struct GhostSelectionOutcome {
+    selected_ghost: String,
+    selection_mode: &'static str,
+    sample_count: u64,
+    success_rate: Option<f64>,
+    confidence_gap: Option<f64>,
+    rationale: String,
+}
+
+fn evaluate_autonomous_ghost_selection(
+    config: &Config,
+    task: &AutonomousTask,
+    available_ghosts: &[String],
+    baseline_ghost: &str,
+) -> Result<GhostSelectionOutcome> {
+    let thresholds = GhostPolicyThresholds {
+        min_samples: GHOST_SPECIALIZATION_MIN_SAMPLES,
+        confidence_threshold: GHOST_SPECIALIZATION_CONFIDENCE_THRESHOLD,
+        rollback_min_samples: GHOST_SPECIALIZATION_ROLLBACK_MIN_SAMPLES,
+        max_allowed_regression: GHOST_SPECIALIZATION_MAX_ALLOWED_REGRESSION,
+        stability_window: GHOST_SPECIALIZATION_STABILITY_WINDOW,
+    };
+    let scope = GhostPolicyScope {
+        repo: task.repo.clone(),
+        lane: task.lane.clone(),
+        risk_tier: Some(task.risk_tier.clone()),
+    };
+    let decision = resolve_ghost_policy_decision(
+        config,
+        &scope,
+        available_ghosts,
+        baseline_ghost,
+        &thresholds,
+    )?;
+    Ok(ghost_selection_outcome_from_decision(decision))
+}
+
+fn ghost_selection_outcome_from_decision(
+    decision: ghost_policy::GhostPolicyDecision,
+) -> GhostSelectionOutcome {
+    let selection_mode = match &decision.action {
+        GhostPolicyAction::Promote { .. } => "promote",
+        GhostPolicyAction::Rollback { .. } => "rollback",
+        GhostPolicyAction::KeepDefault => "fallback_default",
+    };
+    let selected_metrics = if decision.selected_ghost == decision.baseline_ghost {
+        decision.explanation.baseline_metrics.as_ref()
+    } else {
+        decision
+            .explanation
+            .candidate_stats
+            .iter()
+            .find(|c| c.ghost == decision.selected_ghost)
+            .and_then(|c| c.overall.as_ref())
+    };
+    let sample_count = selected_metrics.map(|m| m.tasks_started).unwrap_or(0);
+    let success_rate = selected_metrics.map(|m| m.success_rate);
+    let confidence_gap = if decision.selected_ghost == decision.baseline_ghost {
+        None
+    } else {
+        decision
+            .explanation
+            .candidate_stats
+            .iter()
+            .find(|c| c.ghost == decision.selected_ghost)
+            .and_then(|c| c.score_margin_vs_baseline)
+    };
+
+    GhostSelectionOutcome {
+        selected_ghost: decision.selected_ghost,
+        selection_mode,
+        sample_count,
+        success_rate,
+        confidence_gap,
+        rationale: decision.explanation.reason_codes.join("|"),
+    }
+}
+
+fn resolve_ghost_policy_decision(
+    config: &Config,
+    scope: &GhostPolicyScope,
+    available_ghosts: &[String],
+    baseline_ghost: &str,
+    thresholds: &GhostPolicyThresholds,
+) -> Result<ghost_policy::GhostPolicyDecision> {
+    let conn = kpi::open_connection(config)?;
+    let overall_metrics = kpi::query_ghost_policy_metrics(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+    )?;
+    let recent_metrics = kpi::query_recent_ghost_policy_metrics(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+        thresholds.stability_window,
+    )?;
+    let previous_selected = kpi::query_last_selected_ghost(
+        &conn,
+        &scope.repo,
+        Some(&scope.lane),
+        scope.risk_tier.as_deref(),
+    )?;
+
+    Ok(ghost_policy::evaluate_ghost_policy(
+        scope.clone(),
+        available_ghosts,
+        baseline_ghost,
+        previous_selected.as_deref(),
+        thresholds.clone(),
+        &overall_metrics,
+        &recent_metrics,
+    ))
+}
+
+fn select_default_autonomous_ghost(available_ghosts: &[String]) -> Option<String> {
+    if available_ghosts.iter().any(|g| g == "coder") {
+        Some("coder".to_string())
+    } else {
+        available_ghosts.first().cloned()
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "compact specialization telemetry payload"
+)]
+fn log_ghost_specialization_decision(
+    observer: &ObserverHandle,
+    task: &AutonomousTask,
+    selected_ghost: &str,
+    selection_mode: &str,
+    sample_count: u64,
+    success_rate: Option<f64>,
+    confidence_gap: Option<f64>,
+    rationale: &str,
+) {
+    let success_rate_text = success_rate
+        .map(|v| format!("{:.4}", v))
+        .unwrap_or_else(|| "n/a".to_string());
+    let confidence_gap_text = confidence_gap
+        .map(|v| format!("{:.4}", v))
+        .unwrap_or_else(|| "n/a".to_string());
+
+    observer.log(
+        ObserverCategory::AutonomousTask,
+        format!(
+            "Ghost specialization lane={} repo={} risk={} selected_ghost={} selection_mode={} sample_count={} success_rate={} confidence_gap={} rationale={}",
+            task.lane,
+            task.repo,
+            task.risk_tier,
+            selected_ghost,
+            selection_mode,
+            sample_count,
+            success_rate_text,
+            confidence_gap_text,
+            rationale
+        ),
+    );
+    tracing::info!(
+        lane = %task.lane,
+        repo = %task.repo,
+        risk = %task.risk_tier,
+        selected_ghost = %selected_ghost,
+        selection_mode = %selection_mode,
+        sample_count,
+        success_rate = %success_rate_text,
+        confidence_gap = %confidence_gap_text,
+        rationale = %rationale,
+        "Ghost specialization decision"
+    );
 }
 
 #[allow(
@@ -1778,6 +2322,18 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
     Ok(Arc::new(TaskOutcomeStore::new(conn)))
+}
+
+fn create_activity_log_store(config: &Config) -> Result<Arc<ActivityLogStore>> {
+    let db_path = config.db_path().map_err(|e| {
+        crate::error::AthenaError::Config(format!(
+            "Failed to resolve DB path for activity log store: {}",
+            e
+        ))
+    })?;
+    let conn = rusqlite::Connection::open(&db_path)?;
+    let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    Ok(Arc::new(ActivityLogStore::new(conn)))
 }
 
 fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>> {

@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::error::{AthenaError, Result};
+use crate::ghost_policy::GhostPolicyMetrics;
 use crate::langfuse::LangfuseClient;
 
 #[derive(Debug, Clone, Serialize)]
@@ -236,6 +237,161 @@ pub fn query_ghost_success_rates(
     Ok(out)
 }
 
+pub fn query_ghost_policy_metrics(
+    conn: &Connection,
+    repo: &str,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+) -> Result<Vec<GhostPolicyMetrics>> {
+    let mut sql = String::from(
+        "SELECT
+            ghost,
+            status,
+            verification_total,
+            verification_passed,
+            rolled_back
+         FROM autonomous_task_outcomes
+         WHERE repo = ?1
+           AND ghost IS NOT NULL
+           AND TRIM(ghost) != ''
+           AND status IN ('succeeded', 'failed', 'rolled_back')",
+    );
+    let mut args: Vec<rusqlite::types::Value> = vec![repo.to_string().into()];
+    if let Some(v) = lane {
+        sql.push_str(" AND lane = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    if let Some(v) = risk_tier {
+        sql.push_str(" AND risk_tier = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    sql.push_str(
+        " ORDER BY datetime(COALESCE(finished_at, started_at)) DESC, started_at DESC, task_id DESC",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |row| {
+        Ok(GhostOutcomeSample {
+            ghost: row.get(0)?,
+            status: row.get(1)?,
+            verification_total: row.get::<_, i64>(2)?.max(0) as u64,
+            verification_passed: row.get::<_, i64>(3)?.max(0) as u64,
+            rolled_back: row.get::<_, i64>(4)?.max(0) as u64,
+        })
+    })?;
+
+    let mut samples = Vec::new();
+    for row in rows {
+        samples.push(row?);
+    }
+    Ok(aggregate_ghost_policy_metrics(samples))
+}
+
+pub fn query_recent_ghost_policy_metrics(
+    conn: &Connection,
+    repo: &str,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+    recent_window: usize,
+) -> Result<Vec<GhostPolicyMetrics>> {
+    if recent_window == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut sql = String::from(
+        "SELECT
+            ghost,
+            status,
+            verification_total,
+            verification_passed,
+            rolled_back
+         FROM autonomous_task_outcomes
+         WHERE repo = ?1
+           AND ghost IS NOT NULL
+           AND TRIM(ghost) != ''
+           AND status IN ('succeeded', 'failed', 'rolled_back')",
+    );
+    let mut args: Vec<rusqlite::types::Value> = vec![repo.to_string().into()];
+    if let Some(v) = lane {
+        sql.push_str(" AND lane = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    if let Some(v) = risk_tier {
+        sql.push_str(" AND risk_tier = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    sql.push_str(
+        " ORDER BY ghost ASC, datetime(COALESCE(finished_at, started_at)) DESC, started_at DESC, task_id DESC",
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |row| {
+        Ok(GhostOutcomeSample {
+            ghost: row.get(0)?,
+            status: row.get(1)?,
+            verification_total: row.get::<_, i64>(2)?.max(0) as u64,
+            verification_passed: row.get::<_, i64>(3)?.max(0) as u64,
+            rolled_back: row.get::<_, i64>(4)?.max(0) as u64,
+        })
+    })?;
+
+    let mut accepted: Vec<GhostOutcomeSample> = Vec::new();
+    let mut per_ghost_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let sample = row?;
+        let counter = per_ghost_count.entry(sample.ghost.clone()).or_insert(0);
+        if *counter >= recent_window {
+            continue;
+        }
+        *counter += 1;
+        accepted.push(sample);
+    }
+
+    Ok(aggregate_ghost_policy_metrics(accepted))
+}
+
+pub fn query_last_selected_ghost(
+    conn: &Connection,
+    repo: &str,
+    lane: Option<&str>,
+    risk_tier: Option<&str>,
+) -> Result<Option<String>> {
+    let mut sql = String::from(
+        "SELECT ghost
+         FROM autonomous_task_outcomes
+         WHERE repo = ?1
+           AND ghost IS NOT NULL
+           AND TRIM(ghost) != ''",
+    );
+    let mut args: Vec<rusqlite::types::Value> = vec![repo.to_string().into()];
+    if let Some(v) = lane {
+        sql.push_str(" AND lane = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    if let Some(v) = risk_tier {
+        sql.push_str(" AND risk_tier = ?");
+        sql.push_str(&(args.len() + 1).to_string());
+        args.push(v.to_string().into());
+    }
+    sql.push_str(
+        " ORDER BY datetime(COALESCE(finished_at, started_at)) DESC, started_at DESC, task_id DESC LIMIT 1",
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+    if let Some(row) = rows.next()? {
+        let ghost: String = row.get(0)?;
+        Ok(Some(ghost))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn query_cli_tool_success_rates(
     conn: &Connection,
     repo: &str,
@@ -309,6 +465,66 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
     } else {
         numerator as f64 / denominator as f64
     }
+}
+
+#[derive(Debug, Clone)]
+struct GhostOutcomeSample {
+    ghost: String,
+    status: String,
+    verification_total: u64,
+    verification_passed: u64,
+    rolled_back: u64,
+}
+
+fn aggregate_ghost_policy_metrics(samples: Vec<GhostOutcomeSample>) -> Vec<GhostPolicyMetrics> {
+    #[derive(Default)]
+    struct Totals {
+        tasks_started: u64,
+        tasks_succeeded: u64,
+        verification_total: u64,
+        verification_passed: u64,
+        rollbacks: u64,
+    }
+
+    let mut per_ghost: std::collections::HashMap<String, Totals> = std::collections::HashMap::new();
+    for sample in samples {
+        let totals = per_ghost.entry(sample.ghost).or_default();
+        totals.tasks_started += 1;
+        if sample.status == "succeeded" {
+            totals.tasks_succeeded += 1;
+        }
+        totals.verification_total += sample.verification_total;
+        totals.verification_passed += sample.verification_passed;
+        totals.rollbacks += sample.rolled_back;
+    }
+
+    let mut out = per_ghost
+        .into_iter()
+        .map(|(ghost, totals)| {
+            let success_rate = ratio(totals.tasks_succeeded, totals.tasks_started);
+            let verification_pass_rate =
+                ratio(totals.verification_passed, totals.verification_total);
+            let rollback_rate = ratio(totals.rollbacks, totals.tasks_started);
+            GhostPolicyMetrics {
+                ghost,
+                tasks_started: totals.tasks_started,
+                tasks_succeeded: totals.tasks_succeeded,
+                success_rate,
+                verification_total: totals.verification_total,
+                verification_passed: totals.verification_passed,
+                verification_pass_rate,
+                rollbacks: totals.rollbacks,
+                rollback_rate,
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.success_rate
+            .total_cmp(&a.success_rate)
+            .then_with(|| b.tasks_started.cmp(&a.tasks_started))
+            .then_with(|| a.ghost.cmp(&b.ghost))
+    });
+    out
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -1078,5 +1294,62 @@ mod tests {
         let none_rows =
             query_cli_tool_success_rates(&conn, "athena", Some("delivery"), 4, 5).unwrap();
         assert!(none_rows.is_empty());
+    }
+
+    #[test]
+    fn query_ghost_policy_metrics_includes_verification_and_rollback_rates() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO autonomous_task_outcomes
+             (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, verification_total, verification_passed, rolled_back)
+             VALUES
+             ('p1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
+             ('p2','delivery','athena','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
+             ('p3','delivery','athena','medium','scout','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00',2,1,0)",
+            [],
+        )
+        .unwrap();
+
+        let rows =
+            query_ghost_policy_metrics(&conn, "athena", Some("delivery"), Some("medium")).unwrap();
+        let coder = rows.iter().find(|r| r.ghost == "coder").unwrap();
+        assert_eq!(coder.tasks_started, 2);
+        assert_eq!(coder.tasks_succeeded, 1);
+        assert_eq!(coder.verification_total, 2);
+        assert_eq!(coder.verification_passed, 1);
+        assert_eq!(coder.rollbacks, 1);
+        assert!((coder.success_rate - 0.5).abs() < 1e-9);
+        assert!((coder.verification_pass_rate - 0.5).abs() < 1e-9);
+        assert!((coder.rollback_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn query_recent_ghost_policy_metrics_limits_rows_per_ghost() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO autonomous_task_outcomes
+             (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, verification_total, verification_passed, rolled_back)
+             VALUES
+             ('r1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
+             ('r2','delivery','athena','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
+             ('r3','delivery','athena','medium','coder','c','failed','2026-01-01 10:04:00','2026-01-01 10:05:00',1,0,0),
+             ('r4','delivery','athena','medium','scout','d','succeeded','2026-01-01 10:06:00','2026-01-01 10:07:00',1,1,0),
+             ('r5','delivery','athena','medium','scout','e','succeeded','2026-01-01 10:08:00','2026-01-01 10:09:00',1,1,0)",
+            [],
+        )
+        .unwrap();
+
+        let recent =
+            query_recent_ghost_policy_metrics(&conn, "athena", Some("delivery"), Some("medium"), 2)
+                .unwrap();
+        let coder = recent.iter().find(|r| r.ghost == "coder").unwrap();
+        // Only last two coder rows (r3 + r2): both failed.
+        assert_eq!(coder.tasks_started, 2);
+        assert_eq!(coder.tasks_succeeded, 0);
+        assert_eq!(coder.rollbacks, 1);
+
+        let last =
+            query_last_selected_ghost(&conn, "athena", Some("delivery"), Some("medium")).unwrap();
+        assert_eq!(last.as_deref(), Some("scout"));
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -13,9 +14,11 @@ use crate::error::{AthenaError, Result};
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
+use crate::mcp::McpRegistry;
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
+use crate::session_review::ActivityLogStore;
 use crate::strategy::{self, StatusSender, TaskContract};
 use crate::tool_usage::ToolUsageStore;
 use crate::tools::ToolRegistry;
@@ -133,6 +136,7 @@ pub struct Executor {
     max_steps: usize,
     sensitive_patterns: SensitivePatterns,
     dynamic_tools_path: Option<PathBuf>,
+    mcp_registry: Option<Arc<McpRegistry>>,
     knobs: SharedKnobs,
     github_token: Option<String>,
     usage_store: Arc<ToolUsageStore>,
@@ -140,6 +144,26 @@ pub struct Executor {
     loop_guard: ToolLoopGuard,
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
+    activity_log: Option<Arc<ActivityLogStore>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityContext {
+    ghost: String,
+    session_key: String,
+    /// Row id of the parent task_start entry for execution tree linking.
+    parent_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityContextBase {
+    session_key: String,
+    parent_id: Option<i64>,
+}
+
+tokio::task_local! {
+    static ACTIVITY_BASE: ActivityContextBase;
+    static ACTIVITY_CONTEXT: ActivityContext;
 }
 
 impl Executor {
@@ -151,11 +175,13 @@ impl Executor {
         sensitive_patterns: Vec<String>,
         loop_guard_config: LoopGuardConfig,
         dynamic_tools_path: Option<PathBuf>,
+        mcp_registry: Option<Arc<McpRegistry>>,
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Arc<ToolUsageStore>,
         observer: ObserverHandle,
         langfuse: SharedLangfuse,
+        activity_log: Option<Arc<ActivityLogStore>>,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
@@ -165,13 +191,40 @@ impl Executor {
             max_steps,
             sensitive_patterns: compiled,
             dynamic_tools_path,
+            mcp_registry,
             knobs,
             github_token,
             usage_store,
             observer,
             loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
+            activity_log,
         }
+    }
+
+    pub async fn with_activity_context_base<F, Fut, T>(
+        &self,
+        session_key: &str,
+        parent_id: Option<i64>,
+        f: F,
+    ) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let base = ActivityContextBase {
+            session_key: session_key.to_string(),
+            parent_id,
+        };
+        ACTIVITY_BASE.scope(base, f()).await
+    }
+
+    fn current_activity_base() -> Option<ActivityContextBase> {
+        ACTIVITY_BASE.try_with(|base| base.clone()).ok()
+    }
+
+    fn current_activity_context() -> Option<ActivityContext> {
+        ACTIVITY_CONTEXT.try_with(|ctx| ctx.clone()).ok()
     }
 
     /// Run a task contract using the specified ghost
@@ -185,91 +238,113 @@ impl Executor {
         status_tx: Option<&StatusSender>,
         trace: Option<&ActiveTrace>,
     ) -> Result<String> {
-        tracing::info!(ghost = %ghost.name, goal = %contract.goal, "Starting executor");
-
-        let run_span = trace.map(|t| t.span("ghost_run", Some(&contract.goal)));
-
-        // Create session-scoped container
-        let trusted_repo_policy = if self.self_dev_trusted_mode {
-            Some(self.trusted_repos.as_slice())
-        } else {
-            None
+        let base = Self::current_activity_base().unwrap_or(ActivityContextBase {
+            session_key: "autonomous".to_string(),
+            parent_id: None,
+        });
+        let ctx = ActivityContext {
+            ghost: ghost.name.clone(),
+            session_key: base.session_key,
+            parent_id: base.parent_id,
         };
-        let session = DockerSession::new(ghost, &self.docker_config, trusted_repo_policy).await?;
-        let tools = ToolRegistry::for_ghost(
-            ghost,
-            self.dynamic_tools_path.as_deref(),
-            self.knobs.clone(),
-            self.github_token.clone(),
-            Some(self.usage_store.clone()),
-        );
-        let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
-        // Try direct tool completion first (precheck)
-        let precheck = match strategy::try_direct_completion(
-            contract, &tools, &session, llm, self, confirmer, status_tx, trace,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                self.close_session(session).await;
-                return Err(e);
-            }
-        };
-        if let Some(result) = precheck {
-            tracing::info!(ghost = %ghost.name, "Task completed via direct tool use (precheck)");
-            self.close_session(session).await;
-            if let Some(s) = run_span {
-                let preview = if result.len() > 500 {
-                    &result[..result.floor_char_boundary(500)]
+        ACTIVITY_CONTEXT
+            .scope(ctx, async {
+                tracing::info!(ghost = %ghost.name, goal = %contract.goal, "Starting executor");
+
+                let run_span = trace.map(|t| t.span("ghost_run", Some(&contract.goal)));
+
+                // Create session-scoped container
+                let trusted_repo_policy = if self.self_dev_trusted_mode {
+                    Some(self.trusted_repos.as_slice())
                 } else {
-                    &result
+                    None
                 };
-                s.end(Some(preview));
-            }
-            return Ok(result);
-        }
-
-        // Run the strategy loop
-        let result = strategy
-            .run(
-                contract,
-                &tools,
-                &session,
-                llm,
-                self.max_steps,
-                self,
-                confirmer,
-                status_tx,
-                trace,
-            )
-            .await;
-
-        // Always clean up the container
-        self.close_session(session).await;
-
-        match result {
-            Ok(output) => {
-                tracing::info!(ghost = %ghost.name, "Task completed");
-                if let Some(s) = run_span {
-                    let preview = if output.len() > 500 {
-                        &output[..output.floor_char_boundary(500)]
-                    } else {
-                        &output
-                    };
-                    s.end(Some(preview));
+                let session =
+                    DockerSession::new(ghost, &self.docker_config, trusted_repo_policy).await?;
+                if let Some(registry) = self.mcp_registry.as_ref() {
+                    registry.refresh_if_stale().await;
                 }
-                Ok(output)
-            }
-            Err(e) => {
-                tracing::error!(ghost = %ghost.name, error = %e, "Task failed");
-                if let Some(s) = run_span {
-                    s.end(Some(&format!("error: {}", e)));
+                let tools = ToolRegistry::for_ghost(
+                    ghost,
+                    self.dynamic_tools_path.as_deref(),
+                    self.mcp_registry.clone(),
+                    self.knobs.clone(),
+                    self.github_token.clone(),
+                    Some(self.usage_store.clone()),
+                );
+                let strategy = strategy::strategy_from_config(&ghost.strategy)?;
+
+                // Try direct tool completion first (precheck)
+                let precheck = match strategy::try_direct_completion(
+                    contract, &tools, &session, llm, self, confirmer, status_tx, trace,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        self.close_session(session).await;
+                        return Err(e);
+                    }
+                };
+                if let Some(result) = precheck {
+                    tracing::info!(
+                        ghost = %ghost.name,
+                        "Task completed via direct tool use (precheck)"
+                    );
+                    self.close_session(session).await;
+                    if let Some(s) = run_span {
+                        let preview = if result.len() > 500 {
+                            &result[..result.floor_char_boundary(500)]
+                        } else {
+                            &result
+                        };
+                        s.end(Some(preview));
+                    }
+                    return Ok(result);
                 }
-                Err(e)
-            }
-        }
+
+                // Run the strategy loop
+                let result = strategy
+                    .run(
+                        contract,
+                        &tools,
+                        &session,
+                        llm,
+                        self.max_steps,
+                        self,
+                        confirmer,
+                        status_tx,
+                        trace,
+                    )
+                    .await;
+
+                // Always clean up the container
+                self.close_session(session).await;
+
+                match result {
+                    Ok(output) => {
+                        tracing::info!(ghost = %ghost.name, "Task completed");
+                        if let Some(s) = run_span {
+                            let preview = if output.len() > 500 {
+                                &output[..output.floor_char_boundary(500)]
+                            } else {
+                                &output
+                            };
+                            s.end(Some(preview));
+                        }
+                        Ok(output)
+                    }
+                    Err(e) => {
+                        tracing::error!(ghost = %ghost.name, error = %e, "Task failed");
+                        if let Some(s) = run_span {
+                            s.end(Some(&format!("error: {}", e)));
+                        }
+                        Err(e)
+                    }
+                }
+            })
+            .await
     }
 
     async fn close_session(&self, session: DockerSession) {
@@ -399,6 +474,60 @@ impl Executor {
                     duration_ms
                 ),
             );
+
+            // Record tool call details to activity log
+            if let Some(ref activity_log) = self.activity_log {
+                let input_str = serde_json::to_string(&params).unwrap_or_default();
+                let input_truncated = if input_str.len() > 2000 {
+                    &input_str[..input_str.floor_char_boundary(2000)]
+                } else {
+                    &input_str
+                };
+                // Bind output to a local to avoid dangling temporary reference
+                let output_owned = match &result {
+                    Ok(r) => r.output.clone(),
+                    Err(e) => e.to_string(),
+                };
+                let output_truncated = if output_owned.len() > 2000 {
+                    &output_owned[..output_owned.floor_char_boundary(2000)]
+                } else {
+                    &output_owned
+                };
+                let summary = format!(
+                    "{} {} ({:.0}ms)",
+                    tool_name,
+                    if success { "ok" } else { "FAIL" },
+                    duration_ms
+                );
+                // Pull ghost, session key, and parent_id from activity context
+                let ctx = Self::current_activity_context();
+                let base = if ctx.is_none() {
+                    Self::current_activity_base()
+                } else {
+                    None
+                };
+                let session_key = ctx
+                    .as_ref()
+                    .map(|c| c.session_key.as_str())
+                    .or_else(|| base.as_ref().map(|b| b.session_key.as_str()))
+                    .unwrap_or(docker.session_id());
+                let ghost = ctx.as_ref().map(|c| c.ghost.as_str());
+                let parent_id = ctx
+                    .as_ref()
+                    .and_then(|c| c.parent_id)
+                    .or_else(|| base.as_ref().and_then(|b| b.parent_id));
+                let _ = activity_log.record_tool(
+                    session_key,
+                    tool_name,
+                    &summary,
+                    Some(input_truncated),
+                    Some(output_truncated),
+                    ghost,
+                    None,
+                    Some(duration_ms as i64),
+                    parent_id,
+                );
+            }
         }
 
         let output = match result {

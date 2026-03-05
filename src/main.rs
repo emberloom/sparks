@@ -1,6 +1,7 @@
 mod ci_monitor;
 mod config;
 mod confirm;
+mod context_budget;
 mod core;
 mod db;
 mod docker;
@@ -8,8 +9,10 @@ mod doctor;
 mod dynamic_tools;
 mod embeddings;
 mod error;
+mod eval;
 mod executor;
 mod feature_contract;
+mod ghost_policy;
 mod heartbeat;
 mod introspect;
 mod knobs;
@@ -17,9 +20,11 @@ mod kpi;
 mod langfuse;
 mod llm;
 mod manager;
+mod mcp;
 mod memory;
 mod mood;
 mod observer;
+mod openai_api;
 mod openai_auth;
 mod proactive;
 mod profiles;
@@ -30,6 +35,7 @@ mod reason_codes;
 mod scheduler;
 mod secrets;
 mod self_heal;
+mod session_review;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
@@ -47,7 +53,7 @@ use config::Config;
 use confirm::CliConfirmer;
 use core::{AthenaCore, CoreEvent, SessionContext};
 use embeddings::Embedder;
-use memory::MemoryStore;
+use memory::{HnswIndexConfig, MemoryStore};
 use observer::ObserverCategory;
 use scheduler::Schedule;
 
@@ -217,6 +223,11 @@ enum Commands {
         /// Output file path (default depends on --output-format)
         #[arg(long)]
         out_file: Option<PathBuf>,
+    },
+    /// Run versioned eval suites and compare scorecards
+    Eval {
+        #[command(subcommand)]
+        action: eval::EvalAction,
     },
     /// Execute multi-task feature contracts with DAG dependency ordering
     Feature {
@@ -611,6 +622,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
     }
+    // Handle eval subcommand early — it shells out to eval harness and does
+    // not require booting core/runtime services.
+    if let Some(Commands::Eval { action }) = &cli.command {
+        return eval::handle_eval(action.clone(), cli.config.as_deref());
+    }
 
     match dotenvy::dotenv_override() {
         Ok(path) => eprintln!("Loaded .env from {}", path.display()),
@@ -630,11 +646,18 @@ async fn main() -> anyhow::Result<()> {
     // Initialize database
     let db_path = config.db_path()?;
     let conn = db::init_db(&db_path)?;
-    let memory = Arc::new(MemoryStore::new(
+    let memory = Arc::new(MemoryStore::new_with_hnsw(
         conn,
         config.memory.recency_half_life_days,
         config.memory.dedup_threshold,
         config.memory.retrieval_cache_capacity,
+        HnswIndexConfig {
+            enabled: config.memory.hnsw_enabled,
+            min_index_size: config.memory.hnsw_min_index_size,
+            m: config.memory.hnsw_m,
+            ef_construction: config.memory.hnsw_ef_construction,
+            ef_search: config.memory.hnsw_ef_search,
+        },
     ));
 
     let needs_cli_embedder = matches!(cli.command, Some(Commands::Memory { .. }));
@@ -811,6 +834,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Kpi { action }) => handle_kpi(action, &config).await?,
         Some(Commands::Dashboard { .. }) => unreachable!(), // handled above
+        Some(Commands::Eval { .. }) => unreachable!(),      // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
@@ -7543,9 +7567,13 @@ mod tests {
                 description: "read-only".to_string(),
                 tools: vec!["file_read".to_string()],
                 mounts: Vec::new(),
+                role: crate::config::GhostRole::Worker,
                 strategy: "react".to_string(),
                 soul_file: None,
+                skill_file: None,
+                skill_files: Vec::new(),
                 soul: None,
+                skill: None,
                 image: None,
             },
             crate::config::GhostConfig {
@@ -7553,9 +7581,13 @@ mod tests {
                 description: "code strategist".to_string(),
                 tools: vec!["shell".to_string()],
                 mounts: Vec::new(),
+                role: crate::config::GhostRole::Worker,
                 strategy: "code".to_string(),
                 soul_file: None,
+                skill_file: None,
+                skill_files: Vec::new(),
                 soul: None,
+                skill: None,
                 image: None,
             },
         ];

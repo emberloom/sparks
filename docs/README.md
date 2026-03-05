@@ -47,6 +47,7 @@ Documentation index for the Athena multi-agent orchestration system.
 | [maintainability-baseline.json](maintainability-baseline.json) | Maintainability baseline (machine-generated) |
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
 | [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
+| [openai-compatible-api.md](openai-compatible-api.md) | OpenAI-compatible API setup, supported fields, and documented deviations |
 | [lane-test-note.md](lane-test-note.md) | Notes on KPI lane test coverage |
 | [parsing-hardening-plan.md](parsing-hardening-plan.md) | Plan for hardening LLM-output parsing |
 

@@ -204,6 +204,7 @@ pub fn evaluate_ghost_policy(
                 return GhostPolicyDecision {
                     action: GhostPolicyAction::KeepDefault,
                     selected_ghost: fallback_default.clone(),
+                    baseline_ghost: fallback_default.clone(),
                     explanation: GhostPolicyExplanation {
                         policy_version: POLICY_VERSION.to_string(),
                         decided_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -397,7 +398,10 @@ fn build_candidate_stats(
     }
 
     if thresholds.stability_window > 0 {
-        let required_recent = (thresholds.min_samples.min(thresholds.stability_window as u64)).max(1);
+        let required_recent = (thresholds
+            .min_samples
+            .min(thresholds.stability_window as u64))
+        .max(1);
         match (overall.as_ref(), recent.as_ref()) {
             (Some(ov), Some(rec)) => {
                 if rec.tasks_started < required_recent {
@@ -503,7 +507,7 @@ mod tests {
             None,
             thresholds(),
             &[
-                metrics("coder", 4, 2, 4, 3, 0),
+                metrics("coder", 4, 1, 4, 2, 0),
                 metrics("architect", 4, 3, 4, 4, 1),
                 metrics("scout", 4, 3, 4, 4, 1),
             ],
@@ -527,17 +531,19 @@ mod tests {
             "coder",
             None,
             thresholds(),
-            &[metrics("coder", 5, 3, 5, 4, 0), metrics("scout", 2, 2, 2, 2, 0)],
+            &[
+                metrics("coder", 5, 3, 5, 4, 0),
+                metrics("scout", 2, 2, 2, 2, 0),
+            ],
             &[],
         );
 
         assert_eq!(decision.action, GhostPolicyAction::KeepDefault);
         assert_eq!(decision.selected_ghost, "coder");
-        assert!(decision
-            .explanation
-            .candidate_stats
+        assert!(decision.explanation.candidate_stats.iter().any(|c| c
+            .rejection_reasons
             .iter()
-            .any(|c| c.rejection_reasons.iter().any(|r| r == "insufficient_samples")));
+            .any(|r| r == "insufficient_samples")));
     }
 
     #[test]
@@ -551,17 +557,19 @@ mod tests {
             "coder",
             None,
             noisy_thresholds,
-            &[metrics("coder", 5, 4, 5, 4, 0), metrics("scout", 5, 5, 5, 5, 0)],
+            &[
+                metrics("coder", 5, 4, 5, 4, 0),
+                metrics("scout", 5, 5, 5, 5, 0),
+            ],
             &[metrics("scout", 1, 1, 1, 1, 0)],
         );
 
         assert_eq!(decision.action, GhostPolicyAction::KeepDefault);
         assert_eq!(decision.selected_ghost, "coder");
-        assert!(decision
-            .explanation
-            .candidate_stats
+        assert!(decision.explanation.candidate_stats.iter().any(|c| c
+            .rejection_reasons
             .iter()
-            .any(|c| c.rejection_reasons.iter().any(|r| r == "insufficient_recent_samples")));
+            .any(|r| r == "insufficient_recent_samples")));
     }
 
     #[test]
@@ -572,7 +580,10 @@ mod tests {
             "coder",
             Some("scout"),
             thresholds(),
-            &[metrics("coder", 6, 5, 6, 5, 0), metrics("scout", 6, 2, 6, 2, 2)],
+            &[
+                metrics("coder", 6, 5, 6, 5, 0),
+                metrics("scout", 6, 2, 6, 2, 2),
+            ],
             &[],
         );
 
@@ -598,7 +609,10 @@ mod tests {
             "coder",
             None,
             thresholds(),
-            &[metrics("coder", 5, 4, 5, 4, 0), metrics("scout", 5, 5, 5, 5, 0)],
+            &[
+                metrics("coder", 5, 4, 5, 4, 0),
+                metrics("scout", 5, 5, 5, 5, 0),
+            ],
             &[],
         );
 

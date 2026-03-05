@@ -347,7 +347,8 @@ fn lf_truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_text_tool_envelope;
+    use super::{build_system_prompt_native, parse_text_tool_envelope};
+    use crate::strategy::TaskContract;
     use serde_json::json;
 
     #[test]
@@ -371,6 +372,25 @@ mod tests {
         let parsed = parse_text_tool_envelope("{\"tool\": \"grep\", \"params\": }");
         assert!(parsed.is_none());
     }
+
+    #[test]
+    fn build_system_prompt_native_includes_skill_section_when_present() {
+        let contract = TaskContract {
+            context: "ctx".to_string(),
+            goal: "goal".to_string(),
+            constraints: Vec::new(),
+            soul: None,
+            skill: Some("Always check boundary conditions first.".to_string()),
+            tools_doc: None,
+            cli_tool_preference: None,
+            cli_tool_routing_order: Vec::new(),
+            test_generation: false,
+            memory: None,
+        };
+        let prompt = build_system_prompt_native(&contract);
+        assert!(prompt.contains("PROCEDURAL SKILLS:"));
+        assert!(prompt.contains("boundary conditions"));
+    }
 }
 
 /// System prompt for native function calling — no embedded tool descriptions needed.
@@ -390,9 +410,13 @@ fn build_system_prompt_native(contract: &TaskContract) -> String {
         Some(soul) => format!("{}\n\n", soul),
         None => String::new(),
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     format!(
-        r#"{}You are an autonomous agent executing a task inside a Docker container.
+        r#"{}{}You are an autonomous agent executing a task inside a Docker container.
 
 CONTEXT: {}
 
@@ -406,7 +430,7 @@ INSTRUCTIONS:
 - Be concise and efficient. Minimize the number of tool calls.
 - If a tool call fails, try a different approach.
 - CRITICAL: You are an EXECUTOR, not a planner. Do NOT describe what you would do — actually DO it using your tools."#,
-        soul_section, contract.context, constraints,
+        soul_section, skill_section, contract.context, constraints,
     )
 }
 
@@ -427,6 +451,10 @@ fn build_system_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String 
         Some(soul) => format!("{}\n\n", soul),
         None => String::new(),
     };
+    let skill_section = match &contract.skill {
+        Some(skill) => format!("PROCEDURAL SKILLS:\n{}\n\n", skill),
+        None => String::new(),
+    };
 
     let tools_section = match &contract.tools_doc {
         Some(doc) => format!("\n\nTOOL REFERENCE:\n{}", doc),
@@ -434,7 +462,7 @@ fn build_system_prompt(contract: &TaskContract, tools: &ToolRegistry) -> String 
     };
 
     format!(
-        r#"{}You are an autonomous agent executing a task inside a Docker container.
+        r#"{}{}You are an autonomous agent executing a task inside a Docker container.
 
 CONTEXT: {}
 
@@ -453,6 +481,7 @@ INSTRUCTIONS:
 - If a tool call fails, try a different approach.
 - CRITICAL: You are an EXECUTOR, not a planner. Do NOT describe what you would do — actually DO it using your tools."#,
         soul_section,
+        skill_section,
         contract.context,
         tools.descriptions(),
         tools_section,
