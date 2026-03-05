@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/athena-banner.jpg" alt="Athena" width="680" />
+<img src="docs/athena-banner.png" alt="Athena" width="680" />
 
 **Self-hosted multi-agent orchestrator with a hardened execution sandbox,<br>
 semantic memory, and deep observability — built in Rust.**
