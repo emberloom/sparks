@@ -39,6 +39,8 @@ mod session_review;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+#[cfg(feature = "telephony")]
+mod telephony;
 mod ticket_intake;
 mod tool_usage;
 mod tools;
@@ -95,6 +97,9 @@ enum Commands {
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
+    /// Run telephony server for phone calls via Twilio (requires --features telephony)
+    #[cfg(feature = "telephony")]
+    Telephony,
     /// Authenticate with OpenAI subscription (OAuth flow)
     #[command(alias = "ouath")]
     Openai {
@@ -732,6 +737,44 @@ async fn main() -> anyhow::Result<()> {
             };
             let handle = AthenaCore::start(telegram_config.clone(), memory).await?;
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
+        }
+        #[cfg(feature = "telephony")]
+        Some(Commands::Telephony) => {
+            let mut telephony_config = config.clone();
+            let telephony_provider = telephony_config
+                .telephony
+                .provider
+                .clone()
+                .unwrap_or_else(|| "openai".into());
+            telephony_config.llm.provider = telephony_provider.clone();
+            let openai_cfg = telephony_config.openai.clone().unwrap_or_default();
+
+            let system_info = telephony::SystemInfo {
+                provider: telephony_provider.clone(),
+                temperature: match telephony_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.temperature,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.temperature)
+                        .unwrap_or(0.3),
+                    "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    _ => config.ollama.temperature,
+                },
+                max_tokens: match telephony_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.max_tokens,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.max_tokens)
+                        .unwrap_or(4096),
+                    "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    _ => config.ollama.max_tokens,
+                },
+                started_at: tokio::time::Instant::now(),
+            };
+            let handle = AthenaCore::start(telephony_config.clone(), memory).await?;
+            telephony::run_telephony(handle, telephony_config.telephony, system_info).await?;
         }
         Some(Commands::Openai { action }) => {
             let openai_config = config.openai.clone().unwrap_or_default();

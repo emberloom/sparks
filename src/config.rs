@@ -40,6 +40,8 @@ pub struct Config {
     #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
+    pub telephony: TelephonyConfig,
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -428,6 +430,118 @@ fn default_planning_auto() -> bool {
 
 fn default_planning_timeout() -> u64 {
     900
+}
+
+// ── Telephony (Twilio phone calls) ──────────────────────────────────
+
+fn default_telephony_listen_port() -> u16 {
+    8089
+}
+fn default_telephony_listen_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_vad_silence_ms() -> u64 {
+    800
+}
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+fn default_telephony_sample_rate() -> u32 {
+    8000
+}
+fn default_greeting() -> String {
+    "Hello, this is Athena. How can I help you?".into()
+}
+
+#[derive(Deserialize, Clone)]
+pub struct TelephonyConfig {
+    /// Twilio Account SID (or ATHENA_TWILIO_ACCOUNT_SID env var)
+    pub twilio_account_sid: Option<String>,
+    /// Twilio Auth Token (or ATHENA_TWILIO_AUTH_TOKEN env var)
+    pub twilio_auth_token: Option<String>,
+    /// Optional LLM provider override (default: "openai")
+    pub provider: Option<String>,
+    /// HTTP listen host for incoming Twilio webhooks + Media Streams
+    #[serde(default = "default_telephony_listen_host")]
+    pub listen_host: String,
+    /// HTTP listen port
+    #[serde(default = "default_telephony_listen_port")]
+    pub listen_port: u16,
+    /// Public URL that Twilio can reach (e.g. ngrok). Required.
+    pub public_url: Option<String>,
+    /// Whisper-compatible STT URL (e.g. http://localhost:8787/v1/audio/transcriptions)
+    pub stt_url: Option<String>,
+    /// STT API key (or ATHENA_STT_API_KEY env var)
+    pub stt_api_key: Option<String>,
+    /// STT model name (default: whisper-large-v3)
+    pub stt_model: Option<String>,
+    /// TTS API URL (e.g. http://localhost:8880/v1/audio/speech)
+    pub tts_url: Option<String>,
+    /// TTS API key (or ATHENA_TTS_API_KEY env var)
+    pub tts_api_key: Option<String>,
+    /// TTS model (default: tts-1)
+    pub tts_model: Option<String>,
+    /// TTS voice (default: alloy)
+    pub tts_voice: Option<String>,
+    /// Greeting message played when a call connects
+    #[serde(default = "default_greeting")]
+    pub greeting: String,
+    /// VAD silence duration in milliseconds before considering speech done
+    #[serde(default = "default_vad_silence_ms")]
+    pub vad_silence_ms: u64,
+    /// VAD speech probability threshold (0.0 - 1.0)
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,
+    /// Path to Silero VAD ONNX model file
+    pub vad_model_path: Option<String>,
+    /// Audio sample rate (Twilio sends 8000 Hz mulaw)
+    #[serde(default = "default_telephony_sample_rate")]
+    pub sample_rate: u32,
+}
+
+impl std::fmt::Debug for TelephonyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelephonyConfig")
+            .field("twilio_account_sid", &self.twilio_account_sid.as_ref().map(|_| "[REDACTED]"))
+            .field("twilio_auth_token", &"[REDACTED]")
+            .field("provider", &self.provider)
+            .field("listen_host", &self.listen_host)
+            .field("listen_port", &self.listen_port)
+            .field("public_url", &self.public_url)
+            .field("stt_url", &self.stt_url)
+            .field("tts_url", &self.tts_url)
+            .field("greeting", &self.greeting)
+            .field("vad_silence_ms", &self.vad_silence_ms)
+            .field("vad_threshold", &self.vad_threshold)
+            .field("vad_model_path", &self.vad_model_path)
+            .field("sample_rate", &self.sample_rate)
+            .finish()
+    }
+}
+
+impl Default for TelephonyConfig {
+    fn default() -> Self {
+        Self {
+            twilio_account_sid: None,
+            twilio_auth_token: None,
+            provider: None,
+            listen_host: default_telephony_listen_host(),
+            listen_port: default_telephony_listen_port(),
+            public_url: None,
+            stt_url: None,
+            stt_api_key: None,
+            stt_model: None,
+            tts_url: None,
+            tts_api_key: None,
+            tts_model: None,
+            tts_voice: None,
+            greeting: default_greeting(),
+            vad_silence_ms: default_vad_silence_ms(),
+            vad_threshold: default_vad_threshold(),
+            vad_model_path: None,
+            sample_rate: default_telephony_sample_rate(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1217,6 +1331,7 @@ impl Default for Config {
             ghosts: default_ghosts(),
             persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
+            telephony: TelephonyConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
             heartbeat: HeartbeatConfig::default(),

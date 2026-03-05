@@ -218,6 +218,47 @@ planning_enabled = true
 planning_auto = true
 planning_timeout_secs = 900
 
+# ── Telephony (phone calls via Twilio) ─────────────────────────────
+# Requires: --features telephony
+# Run: athena telephony
+[telephony]
+# provider = "openai"                           # LLM provider override (default: openai)
+# twilio_account_sid = "AC..."                  # or ATHENA_TWILIO_ACCOUNT_SID env var
+# twilio_auth_token = "..."                     # or ATHENA_TWILIO_AUTH_TOKEN env var
+listen_host = "0.0.0.0"
+listen_port = 8089
+# public_url = "https://your-domain.ngrok.io"   # Required — URL Twilio can reach
+
+# STT: use any Whisper-compatible API (FREE options below)
+# Option 1: faster-whisper-server (self-hosted, free)
+#   pip install faster-whisper-server && faster-whisper-server --model Systran/faster-whisper-large-v3
+# Option 2: whisper.cpp server (self-hosted, free)
+#   ./server -m models/ggml-large-v3.bin --port 8787
+# Option 3: Groq (free tier, cloud)
+#   stt_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+#   stt_api_key = "gsk_..." (or ATHENA_STT_API_KEY env var)
+stt_url = "http://localhost:8787/v1/audio/transcriptions"
+# stt_api_key = "..."                           # only needed for cloud STT
+stt_model = "whisper-large-v3"
+
+# TTS: use any OpenAI-compatible TTS API
+# Option 1: Piper TTS (self-hosted, free) — pip install piper-tts
+# Option 2: Kokoro TTS (self-hosted, free) — pip install kokoro
+# Option 3: OpenAI TTS ($0.015/1K chars, cloud)
+tts_url = "http://localhost:8880/v1/audio/speech"
+# tts_api_key = "..."
+tts_model = "tts-1"
+tts_voice = "alloy"
+
+# Greeting played when call connects
+greeting = "Hello, this is Athena. How can I help you?"
+
+# Voice Activity Detection (Silero VAD — free, local, ONNX)
+# Download model: curl -L -o ~/.athena/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+# vad_model_path = "~/.athena/silero_vad.onnx"  # auto-detected if omitted
+vad_silence_ms = 800                             # ms of silence before end-of-speech
+vad_threshold = 0.5                              # speech probability threshold (0.0 - 1.0)
+
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `athena secrets set github.token`
 
