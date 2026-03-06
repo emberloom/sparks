@@ -66,3 +66,4 @@ Documentation index for the Athena multi-agent orchestration system.
 | [autonomous-agents-epic-comparison.md](autonomous-agents-epic-comparison.md) | Comparison of autonomous agent frameworks considered during design |
 | [conductor-athena-gap-analysis.md](conductor-athena-gap-analysis.md) | Gap analysis: Conductor vs Athena capability comparison |
 | [telegram-planning-spec.md](telegram-planning-spec.md) | Telegram front-end feature specification |
+| [telephony-setup.md](telephony-setup.md) | Telephony (phone calls) setup guide, architecture, and PR testing checklist |
