@@ -7,11 +7,13 @@
 //! STT: any Whisper-compatible endpoint (faster-whisper, whisper.cpp, etc.) — free & open-source.
 //! TTS: any OpenAI-compatible TTS endpoint (Piper, Coqui, Kokoro, etc.) — configurable.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -32,6 +34,11 @@ const MULAW_CHUNK_SAMPLES: usize = 160;
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 8000 * 60;
 /// Minimum speech samples before we bother sending to STT (0.5s).
 const MIN_SPEECH_SAMPLES: usize = 4000;
+/// Maximum base64 payload size from a single Twilio media event (~32KB).
+/// Twilio normally sends ~214 bytes; anything much larger is suspicious.
+const MAX_MEDIA_PAYLOAD_BYTES: usize = 32_768;
+/// Maximum LLM response chars to accumulate before truncation.
+const MAX_RESPONSE_CHARS: usize = 2_000;
 
 // ── Silero VAD ───────────────────────────────────────────────────────
 
@@ -424,6 +431,58 @@ fn wav_to_f32_mono(wav_bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, Strin
     Ok(samples)
 }
 
+// ── Twilio Signature Validation ──────────────────────────────────────
+
+/// Validate an incoming Twilio webhook request using HMAC-SHA1.
+///
+/// Returns `true` if:
+///   - No auth token is configured (validation disabled), or
+///   - The X-Twilio-Signature header matches the HMAC-SHA1 of (url + sorted POST params).
+///
+/// See: https://www.twilio.com/docs/usage/security#validating-requests
+fn validate_twilio_signature(
+    auth_token: Option<&str>,
+    signature: Option<&str>,
+    url: &str,
+    params: &[(String, String)],
+) -> bool {
+    let token = match auth_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return true, // No token configured — skip validation
+    };
+    let sig = match signature {
+        Some(s) => s,
+        None => {
+            warn!("Twilio request missing X-Twilio-Signature header");
+            return false;
+        }
+    };
+
+    // Build the data to sign: URL + sorted POST params
+    let mut data = url.to_string();
+    let mut sorted_params = params.to_vec();
+    sorted_params.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, value) in &sorted_params {
+        data.push_str(key);
+        data.push_str(value);
+    }
+
+    use hmac::{Hmac, Mac};
+    type HmacSha1 = Hmac<sha1::Sha1>;
+
+    let mut mac =
+        HmacSha1::new_from_slice(token.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(data.as_bytes());
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+    if expected == sig {
+        true
+    } else {
+        warn!("Twilio signature mismatch (possible spoofed request)");
+        false
+    }
+}
+
 // ── Shared App State ─────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -435,12 +494,41 @@ struct AppState {
 // ── HTTP Handlers ────────────────────────────────────────────────────
 
 /// TwiML response — tells Twilio to connect a Media Stream WebSocket.
-async fn handle_voice(State(state): State<AppState>) -> impl IntoResponse {
+/// Validates the Twilio signature if an auth token is configured.
+async fn handle_voice(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Resolve auth token (config or env var)
+    let auth_token_string = state
+        .config
+        .twilio_auth_token
+        .clone()
+        .or_else(|| std::env::var("ATHENA_TWILIO_AUTH_TOKEN").ok());
+    let auth_token = auth_token_string.as_deref();
+
+    let signature = headers
+        .get("X-Twilio-Signature")
+        .and_then(|v| v.to_str().ok());
+
     let public_url = state
         .config
         .public_url
         .as_deref()
         .unwrap_or("http://localhost:8089");
+    let voice_url = format!("{}/voice", public_url);
+
+    // Twilio POST webhooks: params come in the body; for GET there are none.
+    // We pass an empty param set here — for <Stream> based setups the signature
+    // is computed over the URL alone since Twilio sends no body to /voice.
+    if !validate_twilio_signature(auth_token, signature, &voice_url, &[]) {
+        return axum::response::Response::builder()
+            .status(403)
+            .body(axum::body::Body::from("Forbidden"))
+            .unwrap_or_else(|_| {
+                axum::response::Response::new(axum::body::Body::from("Forbidden"))
+            });
+    }
 
     let ws_url = public_url
         .replace("https://", "wss://")
@@ -459,7 +547,11 @@ async fn handle_voice(State(state): State<AppState>) -> impl IntoResponse {
     axum::response::Response::builder()
         .header("Content-Type", "application/xml")
         .body(axum::body::Body::from(twiml))
-        .unwrap()
+        .unwrap_or_else(|_| {
+            axum::response::Response::new(axum::body::Body::from(
+                "<Response><Say>Internal error</Say></Response>",
+            ))
+        })
 }
 
 /// WebSocket upgrade handler for Twilio Media Streams.
@@ -471,6 +563,10 @@ async fn handle_media_stream(
 }
 
 /// Main WebSocket handler — processes Twilio Media Stream events.
+///
+/// Barge-in: when the user starts speaking while TTS is playing, we set a
+/// cancellation flag so `send_tts_response` stops sending audio mid-stream,
+/// and we send a Twilio `clear` message to flush the audio queue.
 async fn handle_ws(socket: WebSocket, state: AppState) {
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
@@ -481,6 +577,17 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let mut audio_buffer: Vec<f32> = Vec::new();
     let mut in_speech = false;
     let mut silence_frames: u32 = 0;
+    let mut greeting_sent = false;
+
+    // Barge-in cancellation: shared flag that send_tts_response checks.
+    let tts_cancel = Arc::new(AtomicBool::new(false));
+    // Track whether TTS is currently playing so we know when to barge-in.
+    let tts_playing = Arc::new(AtomicBool::new(false));
+
+    // Serialized utterance processing: use a channel so only one
+    // process_utterance runs at a time (prevents interleaved audio).
+    let (utterance_tx, mut utterance_rx) =
+        tokio::sync::mpsc::channel::<Vec<f32>>(4);
 
     // How many 20ms frames must be silent before we consider speech done.
     // Minimum 1 to avoid triggering on every non-speech frame.
@@ -512,164 +619,217 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     }
 
-    let greeting_sender = sender.clone();
-    let greeting_config = state.config.clone();
-    let greeting_text = state.config.greeting.clone();
-
     info!("Twilio Media Stream connected");
 
-    while let Some(Ok(msg)) = receiver.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => {
-                info!("Twilio Media Stream closed");
-                break;
+    // Spawn the serialized utterance processor.
+    {
+        let sender_clone = sender.clone();
+        let core_clone = state.core.clone();
+        let config_clone = state.config.clone();
+        let tts_cancel_clone = tts_cancel.clone();
+        let tts_playing_clone = tts_playing.clone();
+        // call_sid isn't known yet — we'll capture it via a shared reference.
+        let call_sid_holder: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let call_sid_for_processor = call_sid_holder.clone();
+        let sid_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sid_for_processor = sid_holder.clone();
+
+        // Share these with the main loop so it can update them.
+        let call_sid_holder_main = call_sid_holder.clone();
+        let sid_holder_main = sid_holder.clone();
+
+        tokio::spawn(async move {
+            while let Some(buffer) = utterance_rx.recv().await {
+                let csid = call_sid_for_processor.lock().await.clone();
+                let sid = sid_for_processor.lock().await.clone();
+                process_utterance(
+                    buffer,
+                    &sender_clone,
+                    &core_clone,
+                    &config_clone,
+                    sid.as_deref(),
+                    &csid,
+                    &tts_cancel_clone,
+                    &tts_playing_clone,
+                )
+                .await;
             }
-            _ => continue,
-        };
+        });
 
-        let event: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        // We need access to these holders in the main loop below.
+        // Redefine them as local variables the loop can use.
+        let mut _call_sid_holder = call_sid_holder_main;
+        let mut _sid_holder = sid_holder_main;
 
-        let event_type = event["event"].as_str().unwrap_or("");
+        // The main event loop follows. To avoid a deeply nested block we use
+        // a trick: move everything into a flat loop using the holders.
+        // Actually, let's restructure to keep it clean:
 
-        match event_type {
-            "connected" => {
-                info!("Twilio Media Stream: connected event");
-            }
-            "start" => {
-                stream_sid = event["start"]["streamSid"].as_str().map(String::from);
-                call_sid = event["start"]["callSid"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
-                info!(
-                    "Call started: call_sid={}, stream_sid={:?}",
-                    call_sid, stream_sid
-                );
+        while let Some(Ok(msg)) = receiver.next().await {
+            let text = match msg {
+                Message::Text(t) => t,
+                Message::Close(_) => {
+                    info!("Twilio Media Stream closed");
+                    break;
+                }
+                _ => continue,
+            };
 
-                let sid = stream_sid.clone();
-                let sender_clone = greeting_sender.clone();
-                let config_clone = greeting_config.clone();
-                let greeting = greeting_text.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        send_tts_response(&sender_clone, &config_clone, sid.as_deref(), &greeting)
-                            .await
-                    {
-                        error!("Failed to send greeting: {}", e);
-                    }
-                });
-            }
-            "media" => {
-                let payload = match event["media"]["payload"].as_str() {
-                    Some(p) => p,
-                    None => continue,
-                };
+            let event: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
-                let mulaw_bytes =
-                    match base64::engine::general_purpose::STANDARD.decode(payload) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
+            let event_type = event["event"].as_str().unwrap_or("");
 
-                let pcm = mulaw_to_f32(&mulaw_bytes);
+            match event_type {
+                "connected" => {
+                    info!("Twilio Media Stream: connected event");
+                }
+                "start" => {
+                    stream_sid = event["start"]["streamSid"].as_str().map(String::from);
+                    call_sid = event["start"]["callSid"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    info!(
+                        "Call started: call_sid={}, stream_sid={:?}",
+                        call_sid, stream_sid
+                    );
 
-                let is_speech = if let Some(ref mut v) = vad {
-                    v.is_speech(&pcm)
-                } else {
-                    let energy: f32 =
-                        pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32;
-                    energy > 0.001
-                };
+                    // Update shared holders for the utterance processor.
+                    *_call_sid_holder.lock().await = call_sid.clone();
+                    *_sid_holder.lock().await = stream_sid.clone();
 
-                if is_speech {
-                    if !in_speech {
-                        debug!("Speech started");
-                        in_speech = true;
-                    }
-                    silence_frames = 0;
-                    audio_buffer.extend_from_slice(&pcm);
-
-                    if audio_buffer.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                        warn!("Audio buffer overflow, flushing");
-                        let buffer = std::mem::take(&mut audio_buffer);
-                        in_speech = false;
-                        silence_frames = 0;
-                        if let Some(ref mut v) = vad {
-                            v.reset();
-                        }
-                        let sender_clone = sender.clone();
-                        let core_clone = state.core.clone();
-                        let config_clone = state.config.clone();
+                    // Send greeting (only once per connection).
+                    if !greeting_sent {
+                        greeting_sent = true;
                         let sid = stream_sid.clone();
-                        let csid = call_sid.clone();
+                        let sender_clone = sender.clone();
+                        let config_clone = state.config.clone();
+                        let greeting = state.config.greeting.clone();
+                        let playing = tts_playing.clone();
+                        let cancel = tts_cancel.clone();
                         tokio::spawn(async move {
-                            process_utterance(
-                                buffer,
+                            if let Err(e) = send_tts_response(
                                 &sender_clone,
-                                &core_clone,
                                 &config_clone,
                                 sid.as_deref(),
-                                &csid,
+                                &greeting,
+                                &cancel,
+                                &playing,
                             )
-                            .await;
+                            .await
+                            {
+                                error!("Failed to send greeting: {}", e);
+                            }
                         });
                     }
-                } else if in_speech {
-                    audio_buffer.extend_from_slice(&pcm);
-                    silence_frames += 1;
+                }
+                "media" => {
+                    let payload = match event["media"]["payload"].as_str() {
+                        Some(p) if p.len() <= MAX_MEDIA_PAYLOAD_BYTES => p,
+                        Some(p) => {
+                            warn!("Oversized media payload ({} bytes), dropping", p.len());
+                            continue;
+                        }
+                        None => continue,
+                    };
 
-                    if silence_frames >= silence_threshold {
-                        debug!(
-                            "End of speech detected ({} samples buffered)",
-                            audio_buffer.len()
-                        );
-                        in_speech = false;
-                        silence_frames = 0;
-                        if let Some(ref mut v) = vad {
-                            v.reset();
+                    let mulaw_bytes =
+                        match base64::engine::general_purpose::STANDARD.decode(payload) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+
+                    let pcm = mulaw_to_f32(&mulaw_bytes);
+
+                    let is_speech = if let Some(ref mut v) = vad {
+                        v.is_speech(&pcm)
+                    } else {
+                        let energy: f32 =
+                            pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32;
+                        energy > 0.001
+                    };
+
+                    if is_speech {
+                        // Barge-in: if TTS is playing and user starts speaking, cancel it.
+                        if !in_speech && tts_playing.load(Ordering::Relaxed) {
+                            info!("Barge-in detected — cancelling TTS playback");
+                            tts_cancel.store(true, Ordering::Relaxed);
+                            // Send Twilio clear message to flush queued audio.
+                            if let Some(ref sid) = stream_sid {
+                                let clear_msg = serde_json::json!({
+                                    "event": "clear",
+                                    "streamSid": sid,
+                                });
+                                let _ = sender
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(clear_msg.to_string()))
+                                    .await;
+                            }
                         }
 
-                        if audio_buffer.len() >= MIN_SPEECH_SAMPLES {
+                        if !in_speech {
+                            debug!("Speech started");
+                            in_speech = true;
+                        }
+                        silence_frames = 0;
+                        audio_buffer.extend_from_slice(&pcm);
+
+                        if audio_buffer.len() > MAX_AUDIO_BUFFER_SAMPLES {
+                            warn!("Audio buffer overflow, flushing");
                             let buffer = std::mem::take(&mut audio_buffer);
-                            let sender_clone = sender.clone();
-                            let core_clone = state.core.clone();
-                            let config_clone = state.config.clone();
-                            let sid = stream_sid.clone();
-                            let csid = call_sid.clone();
-                            tokio::spawn(async move {
-                                process_utterance(
-                                    buffer,
-                                    &sender_clone,
-                                    &core_clone,
-                                    &config_clone,
-                                    sid.as_deref(),
-                                    &csid,
-                                )
-                                .await;
-                            });
-                        } else {
+                            in_speech = false;
+                            silence_frames = 0;
+                            if let Some(ref mut v) = vad {
+                                v.reset();
+                            }
+                            let _ = utterance_tx.send(buffer).await;
+                        }
+                    } else if in_speech {
+                        audio_buffer.extend_from_slice(&pcm);
+                        silence_frames += 1;
+
+                        if silence_frames >= silence_threshold {
                             debug!(
-                                "Discarding short utterance ({} samples)",
+                                "End of speech detected ({} samples buffered)",
                                 audio_buffer.len()
                             );
-                            audio_buffer.clear();
+                            in_speech = false;
+                            silence_frames = 0;
+                            if let Some(ref mut v) = vad {
+                                v.reset();
+                            }
+
+                            if audio_buffer.len() >= MIN_SPEECH_SAMPLES {
+                                let buffer = std::mem::take(&mut audio_buffer);
+                                let _ = utterance_tx.send(buffer).await;
+                            } else {
+                                debug!(
+                                    "Discarding short utterance ({} samples)",
+                                    audio_buffer.len()
+                                );
+                                audio_buffer.clear();
+                            }
                         }
                     }
                 }
-            }
-            "stop" => {
-                info!("Twilio Media Stream stopped (call_sid={})", call_sid);
-                break;
-            }
-            "mark" => {
-                debug!("Mark event: {:?}", event["mark"]);
-            }
-            _ => {
-                debug!("Unknown Twilio event: {}", event_type);
+                "stop" => {
+                    info!("Twilio Media Stream stopped (call_sid={})", call_sid);
+                    break;
+                }
+                "mark" => {
+                    // When TTS playback finishes, Twilio sends back our mark.
+                    if event["mark"]["name"].as_str() == Some("response_end") {
+                        tts_playing.store(false, Ordering::Relaxed);
+                    }
+                    debug!("Mark event: {:?}", event["mark"]);
+                }
+                _ => {
+                    debug!("Unknown Twilio event: {}", event_type);
+                }
             }
         }
     }
@@ -685,6 +845,8 @@ async fn process_utterance(
     config: &TelephonyConfig,
     stream_sid: Option<&str>,
     call_sid: &str,
+    tts_cancel: &AtomicBool,
+    tts_playing: &AtomicBool,
 ) {
     info!(
         "Processing utterance: {} samples ({:.1}s)",
@@ -698,6 +860,16 @@ async fn process_utterance(
         Ok(t) => t,
         Err(e) => {
             error!("STT failed: {}", e);
+            // Tell the caller instead of going silent
+            let _ = send_tts_response(
+                sender,
+                config,
+                stream_sid,
+                "I'm sorry, I couldn't hear that clearly. Could you please repeat?",
+                tts_cancel,
+                tts_playing,
+            )
+            .await;
             return;
         }
     };
@@ -726,6 +898,8 @@ async fn process_utterance(
                 config,
                 stream_sid,
                 "I'm sorry, I encountered an error. Please try again.",
+                tts_cancel,
+                tts_playing,
             )
             .await;
             return;
@@ -737,6 +911,11 @@ async fn process_utterance(
         match event {
             CoreEvent::StreamChunk(chunk) => {
                 full_response.push_str(&chunk);
+                // Cap accumulated response to prevent unbounded memory growth.
+                if full_response.len() > MAX_RESPONSE_CHARS {
+                    debug!("Response exceeded {} chars, stopping accumulation", MAX_RESPONSE_CHARS);
+                    break;
+                }
             }
             CoreEvent::Response(resp) => {
                 full_response = resp;
@@ -749,6 +928,8 @@ async fn process_utterance(
                     config,
                     stream_sid,
                     "I'm sorry, something went wrong.",
+                    tts_cancel,
+                    tts_playing,
                 )
                 .await;
                 return;
@@ -779,19 +960,31 @@ async fn process_utterance(
         &voice_response[..voice_response.len().min(80)]
     );
 
-    if let Err(e) = send_tts_response(sender, config, stream_sid, &voice_response).await {
+    if let Err(e) =
+        send_tts_response(sender, config, stream_sid, &voice_response, tts_cancel, tts_playing)
+            .await
+    {
         error!("Failed to send TTS response: {}", e);
     }
 }
 
 /// Synthesize text and send as Twilio Media Stream audio.
+///
+/// Checks `cancel` between chunks to support barge-in. If cancelled, stops
+/// sending and returns early. Sets `playing` to true while sending.
 async fn send_tts_response(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     config: &TelephonyConfig,
     stream_sid: Option<&str>,
     text: &str,
+    cancel: &AtomicBool,
+    playing: &AtomicBool,
 ) -> Result<(), String> {
     let stream_sid = stream_sid.ok_or("No stream SID")?;
+
+    // Clear any previous cancellation before we start.
+    cancel.store(false, Ordering::Relaxed);
+    playing.store(true, Ordering::Relaxed);
 
     let wav_bytes = synthesize_speech(text, config).await?;
     let pcm = wav_to_f32_mono(&wav_bytes, config.sample_rate)?;
@@ -799,8 +992,16 @@ async fn send_tts_response(
 
     let chunk_size = MULAW_CHUNK_SAMPLES;
     let mut sender_guard = sender.lock().await;
+    let mut sent = 0usize;
 
     for chunk in mulaw.chunks(chunk_size) {
+        // Barge-in check: stop sending if the user started speaking.
+        if cancel.load(Ordering::Relaxed) {
+            info!("TTS playback cancelled by barge-in after {} bytes", sent);
+            playing.store(false, Ordering::Relaxed);
+            return Ok(());
+        }
+
         let payload = base64::engine::general_purpose::STANDARD.encode(chunk);
         let media_msg = serde_json::json!({
             "event": "media",
@@ -814,8 +1015,10 @@ async fn send_tts_response(
             .send(Message::Text(media_msg.to_string()))
             .await
         {
+            playing.store(false, Ordering::Relaxed);
             return Err(format!("WebSocket send error: {}", e));
         }
+        sent += chunk.len();
     }
 
     // Mark event so we know when playback finishes
@@ -833,6 +1036,10 @@ async fn send_tts_response(
         mulaw.len(),
         mulaw.len() as f32 / config.sample_rate as f32
     );
+
+    // playing will be set to false when the "mark" event comes back from Twilio.
+    // But if the mark never arrives, we should eventually time out — handled by
+    // the next speech event's barge-in logic.
 
     Ok(())
 }
@@ -1101,5 +1308,88 @@ mod tests {
             short.clone()
         };
         assert_eq!(voice_response, short);
+    }
+
+    // ── Twilio signature validation ──────────────────────────────────
+
+    /// No auth token configured = always pass (validation disabled).
+    #[test]
+    fn twilio_sig_no_token_passes() {
+        assert!(validate_twilio_signature(None, None, "https://example.com/voice", &[]));
+        assert!(validate_twilio_signature(Some(""), None, "https://example.com/voice", &[]));
+    }
+
+    /// Missing signature header with a configured token must fail.
+    #[test]
+    fn twilio_sig_missing_header_fails() {
+        assert!(!validate_twilio_signature(
+            Some("secret"),
+            None,
+            "https://example.com/voice",
+            &[]
+        ));
+    }
+
+    /// Correct HMAC-SHA1 signature must pass.
+    #[test]
+    fn twilio_sig_valid() {
+        // Compute expected signature manually
+        use hmac::{Hmac, Mac};
+        type HmacSha1 = Hmac<sha1::Sha1>;
+
+        let token = "test_token_12345";
+        let url = "https://myapp.ngrok.io/voice";
+        let params = vec![
+            ("CallSid".to_string(), "CA123".to_string()),
+            ("From".to_string(), "+15551234567".to_string()),
+        ];
+
+        // Build data: url + sorted params
+        let mut data = url.to_string();
+        let mut sorted = params.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (k, v) in &sorted {
+            data.push_str(k);
+            data.push_str(v);
+        }
+
+        let mut mac = HmacSha1::new_from_slice(token.as_bytes()).unwrap();
+        mac.update(data.as_bytes());
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        assert!(validate_twilio_signature(
+            Some(token),
+            Some(&sig),
+            url,
+            &params
+        ));
+    }
+
+    /// Wrong signature must fail.
+    #[test]
+    fn twilio_sig_wrong_fails() {
+        assert!(!validate_twilio_signature(
+            Some("real_token"),
+            Some("dGhpc2lzd3Jvbmc="),
+            "https://example.com/voice",
+            &[]
+        ));
+    }
+
+    // ── payload size limit ───────────────────────────────────────────
+
+    #[test]
+    fn media_payload_limit_constant() {
+        // Twilio sends ~214 bytes per 20ms chunk. Our limit is generous but bounded.
+        assert!(MAX_MEDIA_PAYLOAD_BYTES >= 1000);
+        assert!(MAX_MEDIA_PAYLOAD_BYTES <= 64_000);
+    }
+
+    // ── response cap ─────────────────────────────────────────────────
+
+    #[test]
+    fn response_cap_constant() {
+        assert!(MAX_RESPONSE_CHARS >= 500);
+        assert!(MAX_RESPONSE_CHARS <= 10_000);
     }
 }
