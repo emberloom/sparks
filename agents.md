@@ -87,6 +87,39 @@ Review expectations:
 - Database migrations are append-only and must be forward compatible.
 - Keep risk tier defaults conservative.
 
+## CodeQL Security Rules (enforced by CI — `cargo-audit` + CodeQL workflow)
+
+These patterns trigger GitHub code-scanning alerts. Avoid them:
+
+### No hard-coded cryptographic values — even in tests
+Do **not** use string or byte literals as HMAC/crypto keys in test code:
+```rust
+// BAD — triggers rust/hard-coded-cryptographic-value
+let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
+
+// GOOD — generate a random key at test time
+use rand::RngCore;
+let mut key = [0u8; 32];
+rand::thread_rng().fill_bytes(&mut key);
+let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+```
+
+### Always use HTTPS for external API calls that carry credentials
+When constructing HTTP clients that send API keys, tokens, or Basic Auth credentials, validate that the target URL is HTTPS. Warn (or reject) if the URL uses plain HTTP:
+```rust
+// GOOD — guard against cleartext credential transmission
+if !base_url.starts_with("https://") {
+    tracing::warn!(url = %base_url, "URL is not HTTPS; credentials will be sent in cleartext");
+}
+```
+This applies to any client that calls `.basic_auth()`, `.bearer_auth()`, or sets `Authorization` headers.
+
+### Do not log credential-adjacent values
+Avoid passing values derived from auth tokens, account IDs, or API keys into `tracing::info!`, `tracing::debug!`, `eprintln!`, or `println!` in library/daemon code. CLI status output that the user explicitly requested (e.g. `athena openai status`) is the exception; document it with a comment.
+
+### Dismissing false-positive CodeQL alerts
+If CodeQL flags a false positive (e.g. provider names mistaken for credentials due to taint-flow through LLM provider objects), dismiss it via the GitHub API with `dismissed_reason=false positive` and a clear comment explaining why it is not a real issue. Do **not** add `#[allow(...)]` suppressors or restructure production code solely to silence the scanner.
+
 ## Wiring Invariants
 When extending the system, these invariants must hold (enforced by `scripts/wiring_check.py` on every CI run):
 

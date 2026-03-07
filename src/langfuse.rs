@@ -18,11 +18,18 @@ pub struct LangfuseClient {
 
 impl LangfuseClient {
     pub fn new(public_key: String, secret_key: String, base_url: Option<String>) -> Self {
+        let base_url = base_url.unwrap_or_else(|| "https://cloud.langfuse.com".to_string());
+        if !base_url.starts_with("https://") {
+            tracing::warn!(
+                url = %base_url,
+                "Langfuse base_url does not use HTTPS; API credentials will be sent in cleartext"
+            );
+        }
         Self {
             client: reqwest::Client::new(),
             public_key,
             secret_key,
-            base_url: base_url.unwrap_or_else(|| "https://cloud.langfuse.com".to_string()),
+            base_url,
         }
     }
 

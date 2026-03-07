@@ -930,17 +930,19 @@ mod tests {
     #[test]
     fn verify_github_hmac_accepts_correct_signature() {
         use hmac::Mac;
+        use rand::RngCore;
 
-        let secret = "test_secret";
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
         let body = b"hello world";
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         mac.update(body);
         let raw_bytes = mac.finalize().into_bytes();
         let sig = format!("sha256={}", hex::encode(raw_bytes));
 
         // Verify that our constant-time path accepts the correct signature.
         let ok_bytes = hex::decode(sig.strip_prefix("sha256=").unwrap()).unwrap();
-        let mut mac2 = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        let mut mac2 = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         mac2.update(body);
         assert!(mac2.verify_slice(&ok_bytes).is_ok());
     }
@@ -948,12 +950,15 @@ mod tests {
     #[test]
     fn verify_github_hmac_rejects_wrong_signature() {
         use hmac::Mac;
+        use rand::RngCore;
 
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
         let body = b"hello world";
         let bad_sig =
             hex::decode("deadbeef00000000000000000000000000000000000000000000000000000000")
                 .unwrap();
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         mac.update(body);
         assert!(mac.verify_slice(&bad_sig).is_err());
     }
