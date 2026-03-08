@@ -40,6 +40,8 @@ pub struct Config {
     #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
+    pub slack: SlackConfig,
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -392,6 +394,97 @@ impl Default for TelegramConfig {
             stt_model: None,
         }
     }
+}
+
+// ── Slack config ─────────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone)]
+pub struct SlackConfig {
+    /// Bot token (xoxb-...) or set ATHENA_SLACK_BOT_TOKEN env var
+    pub bot_token: Option<String>,
+    /// App-level token (xapp-...) for Socket Mode, or set ATHENA_SLACK_APP_TOKEN env var
+    pub app_token: Option<String>,
+    /// Signing secret for Events API verification, or set ATHENA_SLACK_SIGNING_SECRET env var
+    pub signing_secret: Option<String>,
+    /// Connection mode: "socket" (default) or "events_api"
+    #[serde(default = "default_slack_mode")]
+    pub mode: String,
+    /// Bind address for Events API HTTP server (only used when mode = "events_api")
+    #[serde(default = "default_slack_events_bind")]
+    pub events_api_bind: String,
+    /// Optional LLM provider override for Slack (default: "openai")
+    pub provider: Option<String>,
+    /// Allowed channel IDs (empty = deny all unless allow_all = true)
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    /// Allow all channels (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all: bool,
+    /// Confirmation timeout in seconds
+    #[serde(default = "default_confirm_timeout")]
+    pub confirm_timeout_secs: u64,
+    /// Always reply in threads (default: true)
+    #[serde(default = "default_slack_thread_replies")]
+    pub thread_replies: bool,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview for planning-like messages
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackConfig")
+            .field("bot_token", &"[REDACTED]")
+            .field("app_token", &"[REDACTED]")
+            .field("signing_secret", &"[REDACTED]")
+            .field("mode", &self.mode)
+            .field("events_api_bind", &self.events_api_bind)
+            .field("provider", &self.provider)
+            .field("allowed_channels", &self.allowed_channels)
+            .field("allow_all", &self.allow_all)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("thread_replies", &self.thread_replies)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
+            .finish()
+    }
+}
+
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: None,
+            app_token: None,
+            signing_secret: None,
+            mode: default_slack_mode(),
+            events_api_bind: default_slack_events_bind(),
+            provider: None,
+            allowed_channels: vec![],
+            allow_all: false,
+            confirm_timeout_secs: default_confirm_timeout(),
+            thread_replies: default_slack_thread_replies(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
+        }
+    }
+}
+
+fn default_slack_mode() -> String {
+    "socket".into()
+}
+fn default_slack_events_bind() -> String {
+    "127.0.0.1:3000".into()
+}
+fn default_slack_thread_replies() -> bool {
+    true
 }
 
 fn default_confirm_timeout() -> u64 {
@@ -1197,6 +1290,7 @@ impl Default for Config {
             ghosts: default_ghosts(),
             persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
+            slack: SlackConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
             heartbeat: HeartbeatConfig::default(),

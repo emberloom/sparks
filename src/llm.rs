@@ -312,7 +312,7 @@ pub trait LlmProvider: Send + Sync {
     }
 
     /// Query account credits (total, used). Used by the telegram feature.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     async fn credits(&self) -> Result<Option<(f64, f64)>> {
         Ok(None)
     }
@@ -1944,7 +1944,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         Ok(models)
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     async fn credits(&self) -> Result<Option<(f64, f64)>> {
         // Only supported for OpenRouter (URL contains openrouter.ai)
         if !self.config.url.contains("openrouter.ai") {

@@ -7,6 +7,7 @@ description = "Secure autonomous multi-agent system"
 [features]
 default = []
 telegram = ["teloxide"]
+slack = ["slack-morphism"]
 webhook = ["tower", "hmac"]
 
 [dependencies]
@@ -51,3 +52,4 @@ dotenvy = "0.15"
 keyring = "3"
 rpassword = "7"
 hnsw_rs = "0.3.2"
+slack-morphism = { version = "2.18", features = ["hyper"], optional = true }

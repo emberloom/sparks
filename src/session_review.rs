@@ -4,9 +4,9 @@ use rusqlite::Connection;
 
 use crate::error::{AthenaError, Result};
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 use crate::llm::{ChatRole, LlmProvider, Message};
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 use serde::Serialize;
 
 // ── Event types for the activity log ────────────────────────────────
@@ -37,7 +37,7 @@ impl ActivityEventType {
 
 // ── Stored activity entry ───────────────────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivityEntry {
     pub id: i64,
@@ -57,7 +57,7 @@ pub struct ActivityEntry {
 
 // ── Alert rules ─────────────────────────────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertRule {
     pub id: i64,
@@ -69,7 +69,7 @@ pub struct AlertRule {
     pub chat_id: Option<String>,
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertMatch {
     pub rule: AlertRule,
@@ -78,7 +78,7 @@ pub struct AlertMatch {
 
 // ── Detail levels for review rendering ──────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewDetail {
     /// One-paragraph executive summary.
@@ -89,7 +89,7 @@ pub enum ReviewDetail {
     Detailed,
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 impl ReviewDetail {
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().trim() {
@@ -113,7 +113,7 @@ fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Conne
 }
 
 /// Helper to build an ActivityEntry from a row that selects all 13 columns.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
     Ok(ActivityEntry {
         id: row.get(0)?,
@@ -132,7 +132,7 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
     })
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 const SELECT_COLS: &str =
     "id, session_key, event_type, summary, detail, ghost, tool_name, task_id, \
      duration_ms, tool_input, tool_output, parent_id, created_at";
@@ -211,7 +211,7 @@ impl ActivityLogStore {
     }
 
     /// Get recent activity entries for a session, newest first.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn recent(&self, session_key: &str, limit: usize) -> Result<Vec<ActivityEntry>> {
         let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(&format!(
@@ -231,7 +231,7 @@ impl ActivityLogStore {
     }
 
     /// Search across all sessions for entries matching a text pattern.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn search(
         &self,
         query: &str,
@@ -262,7 +262,7 @@ impl ActivityLogStore {
 
     // ── Alert rule management ───────────────────────────────────────
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn add_alert_rule(
         &self,
         name: &str,
@@ -280,7 +280,7 @@ impl ActivityLogStore {
         Ok(conn.last_insert_rowid())
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>> {
         let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
@@ -302,7 +302,7 @@ impl ActivityLogStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn remove_alert_rule(&self, rule_id: i64) -> Result<bool> {
         let conn = lock_conn(&self.conn)?;
         let deleted = conn.execute(
@@ -312,7 +312,7 @@ impl ActivityLogStore {
         Ok(deleted > 0)
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn toggle_alert_rule(&self, rule_id: i64, enabled: bool) -> Result<bool> {
         let conn = lock_conn(&self.conn)?;
         let updated = conn.execute(
@@ -323,7 +323,7 @@ impl ActivityLogStore {
     }
 
     /// Check a new entry against all enabled alert rules.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn check_alerts(&self, entry: &ActivityEntry) -> Result<Vec<AlertMatch>> {
         let rules = self.list_alert_rules()?;
         let mut matches = Vec::new();
@@ -373,7 +373,7 @@ impl ActivityLogStore {
 // ── Review rendering ────────────────────────────────────────────────
 
 /// Render a structured review of session activity (no LLM needed).
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 pub fn render_review(entries: &[ActivityEntry], detail: ReviewDetail) -> String {
     if entries.is_empty() {
         return "No activity recorded for this session yet.".to_string();
@@ -386,7 +386,7 @@ pub fn render_review(entries: &[ActivityEntry], detail: ReviewDetail) -> String 
     }
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn render_summary(entries: &[ActivityEntry]) -> String {
     let chat_in = entries.iter().filter(|e| e.event_type == "chat_in").count();
     let chat_out = entries.iter().filter(|e| e.event_type == "chat_out").count();
@@ -462,7 +462,7 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn render_standard(entries: &[ActivityEntry]) -> String {
     let mut out = render_summary(entries);
     out.push_str("\n<b>📜 Timeline</b>\n");
@@ -496,7 +496,7 @@ fn render_standard(entries: &[ActivityEntry]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn render_detailed(entries: &[ActivityEntry]) -> String {
     let mut out = render_summary(entries);
     out.push_str("\n<b>📜 Detailed Log</b>\n\n");
@@ -537,7 +537,7 @@ fn render_detailed(entries: &[ActivityEntry]) -> String {
 }
 
 /// Render search results.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
     if entries.is_empty() {
         return format!("No results found for \"{}\".", escape_html(query));
@@ -570,7 +570,7 @@ pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
 }
 
 /// Render alert rules list.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 pub fn render_alert_rules(rules: &[AlertRule]) -> String {
     if rules.is_empty() {
         return "<b>🔔 Alert Rules</b>\n\nNo alert rules configured.\n\nUsage:\n<code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n<code>/alerts remove &lt;id&gt;</code>".to_string();
@@ -590,7 +590,7 @@ pub fn render_alert_rules(rules: &[AlertRule]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn type_emoji(event_type: &str) -> &'static str {
     match event_type {
         "chat_in" => "💬",
@@ -604,14 +604,14 @@ fn type_emoji(event_type: &str) -> &'static str {
 }
 
 /// Escape HTML special characters for safe embedding in Telegram HTML messages.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -627,7 +627,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 // ── LLM-powered conceptual explanation ──────────────────────────────
 
 /// Generate a conceptual explanation of recent activity using LLM.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 pub async fn generate_explanation(
     entries: &[ActivityEntry],
     llm: &dyn LlmProvider,
@@ -648,7 +648,7 @@ pub async fn generate_explanation(
     Ok(response)
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> String {
     let activity_dump = build_activity_dump(entries);
     match detail {
@@ -689,7 +689,7 @@ fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> 
     }
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack"))]
 fn build_activity_dump(entries: &[ActivityEntry]) -> String {
     entries
         .iter()
@@ -720,7 +720,7 @@ fn build_activity_dump(entries: &[ActivityEntry]) -> String {
         .join("\n")
 }
 
-#[cfg(all(test, feature = "telegram"))]
+#[cfg(all(test, any(feature = "telegram", feature = "slack")))]
 mod tests {
     use super::*;
 

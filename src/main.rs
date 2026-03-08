@@ -39,6 +39,8 @@ mod session_review;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+#[cfg(feature = "slack")]
+mod slack;
 mod ticket_intake;
 mod tool_usage;
 mod tools;
@@ -95,6 +97,9 @@ enum Commands {
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
+    /// Run as a Slack bot (requires --features slack)
+    #[cfg(feature = "slack")]
+    Slack,
     /// Authenticate with OpenAI subscription (OAuth flow)
     #[command(alias = "ouath")]
     Openai {
@@ -732,6 +737,44 @@ async fn main() -> anyhow::Result<()> {
             };
             let handle = AthenaCore::start(telegram_config.clone(), memory).await?;
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
+        }
+        #[cfg(feature = "slack")]
+        Some(Commands::Slack) => {
+            let mut slack_config = config.clone();
+            let slack_provider = slack_config
+                .slack
+                .provider
+                .clone()
+                .unwrap_or_else(|| "openai".into());
+            slack_config.llm.provider = slack_provider.clone();
+            let openai_cfg = slack_config.openai.clone().unwrap_or_default();
+
+            let system_info = slack::SystemInfo {
+                provider: slack_provider.clone(),
+                temperature: match slack_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.temperature,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.temperature)
+                        .unwrap_or(0.3),
+                    "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    _ => config.ollama.temperature,
+                },
+                max_tokens: match slack_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.max_tokens,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.max_tokens)
+                        .unwrap_or(4096),
+                    "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    _ => config.ollama.max_tokens,
+                },
+                started_at: tokio::time::Instant::now(),
+            };
+            let handle = AthenaCore::start(slack_config.clone(), memory).await?;
+            slack::run_slack(handle, slack_config.slack, system_info).await?;
         }
         Some(Commands::Openai { action }) => {
             let openai_config = config.openai.clone().unwrap_or_default();

@@ -218,6 +218,21 @@ planning_enabled = true
 planning_auto = true
 planning_timeout_secs = 900
 
+[slack]
+# mode = "socket"                      # "socket" (default, no public URL) or "events_api"
+# bot_token = "xoxb-..."               # discouraged; use ATHENA_SLACK_BOT_TOKEN env var, .env, or `athena secrets set slack.bot_token`
+# app_token = "xapp-..."               # required for Socket Mode; use ATHENA_SLACK_APP_TOKEN env var
+# signing_secret = ""                   # required for Events API; use ATHENA_SLACK_SIGNING_SECRET env var
+# events_api_bind = "127.0.0.1:3000"   # HTTP bind for Events API mode
+# provider = "openai"                   # optional LLM provider override
+# allowed_channels = ["C0123456789"]    # list of allowed Slack channel IDs
+# allow_all = false
+# confirm_timeout_secs = 300
+# thread_replies = true                 # always reply in threads (default)
+# planning_enabled = true
+# planning_auto = true
+# planning_timeout_secs = 900
+
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `athena secrets set github.token`
 
