@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+## [0.1.2] - 2026-03-09
+
+### Fixed
+
+- Release workflow: replace `softprops/action-gh-release` with `gh` CLI to prevent `target_commitish` validation errors on re-runs against an already-published release.
+- Release workflow: add `tag` input to `workflow_dispatch` so releases can be re-triggered from `main` for any tag.
+
 ## [0.1.1] - 2026-03-08
 
 ### Added
