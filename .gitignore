@@ -37,3 +37,4 @@ docs/lane-test-note.md
 scripts/athena-with-vaultwarden.sh
 docs/secrets-vaultwarden.md
 .env.vaultwarden.example
+dist/
