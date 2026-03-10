@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Athena — The autonomous engineer you can actually trust</title>
+  <meta name="description" content="Athena takes tickets, writes code, opens PRs, and explains every decision it made. Open source autonomous software engineering. Built in Rust." />
+  <meta property="og:title" content="Athena — The autonomous engineer you can actually trust" />
+  <meta property="og:description" content="Open source autonomous software engineering agent. Connects to your tickets. Ships PRs. Shows its work." />
+  <meta property="og:type" content="website" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ── Nav ───────────────────────────────────────────────────────────── -->
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="nav-logo" style="text-decoration:none">
+      <span class="diamond">◈</span> ATHENA
+    </a>
+    <div class="nav-links">
+      <a href="#how" class="hide-mobile">How it works</a>
+      <a href="#security" class="hide-mobile">Security</a>
+      <a href="https://github.com/EnreignHQ/athena" target="_blank" rel="noopener" class="hide-mobile">GitHub</a>
+      <a href="#waitlist" class="btn-ghost">Join waitlist</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── Hero ──────────────────────────────────────────────────────────── -->
+<section id="hero">
+  <div class="container">
+    <div class="hero-label">Private beta — now accepting teams</div>
+    <h1>The autonomous engineer<br>you can actually <span class="accent">trust.</span></h1>
+    <p class="hero-sub">
+      Connects to your tickets. Ships PRs. Explains every decision it made.
+      Open source. No black box.
+    </p>
+    <div class="hero-ctas">
+      <a href="#waitlist" class="btn btn-primary">Join the waitlist</a>
+      <a href="https://github.com/EnreignHQ/athena" target="_blank" rel="noopener" class="btn btn-outline">View on GitHub →</a>
+    </div>
+    <div class="trust-bar">
+      <span>Apache 2.0</span>
+      <span>Built in Rust</span>
+      <span>SOC 2 ready</span>
+      <span>No training on your code</span>
+      <span>Docker sandboxed</span>
+    </div>
+  </div>
+</section>
+
+<!-- ── Social proof ───────────────────────────────────────────────────── -->
+<section id="social">
+  <div class="container">
+    <div class="logo-row">
+      <span class="logo-placeholder">Capsule</span>
+      <span class="logo-placeholder">Forge Labs</span>
+      <span class="logo-placeholder">Datastream</span>
+      <span class="logo-placeholder">Redline</span>
+      <span class="logo-placeholder">Solvex</span>
+    </div>
+    <div class="quotes">
+      <div class="quote-card">
+        <p class="quote-text">First autonomous agent our security team actually approved. The audit trail made all the difference.</p>
+        <p class="quote-attr">— Head of Engineering, Capsule</p>
+      </div>
+      <div class="quote-card">
+        <p class="quote-text">Cut sprint carryover from 34% to 11% in six weeks. It just handles the tickets that pile up.</p>
+        <p class="quote-attr">— CTO, Forge Labs</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── How it works ──────────────────────────────────────────────────── -->
+<section id="how">
+  <div class="container">
+    <p class="section-label">How it works</p>
+    <h2>Ships code end-to-end.<br>Shows its work.</h2>
+    <p class="section-sub">Not a copilot. Not a chat window. A system that picks up tickets and drives them to done.</p>
+    <div class="steps">
+      <div class="step">
+        <p class="step-num">01</p>
+        <p class="step-title">INTAKE</p>
+        <p>Connects to Linear, GitHub, Jira, GitLab. Picks up tickets automatically. No prompt engineering required.</p>
+      </div>
+      <div class="step">
+        <p class="step-num">02</p>
+        <p class="step-title">EXPLORE</p>
+        <p>Maps your codebase. Traces dependencies. Builds real understanding of what to change — and what to leave alone.</p>
+      </div>
+      <div class="step">
+        <p class="step-num">03</p>
+        <p class="step-title">EXECUTE</p>
+        <p>Writes code. Runs your test suite. Iterates. Everything runs inside an isolated container. Your prod environment is never touched.</p>
+      </div>
+      <div class="step">
+        <p class="step-num">04</p>
+        <p class="step-title">VERIFY</p>
+        <p>Validates output against the original goal. Runs security checks. Only ships what passes.</p>
+      </div>
+      <div class="step">
+        <p class="step-num">05</p>
+        <p class="step-title">EXPLAIN</p>
+        <p>Every PR includes a full decision log — what Athena considered, what it rejected, and why. Nothing is a black box.</p>
+      </div>
+      <div class="step" style="background: var(--surface-2); display:flex; align-items:center; justify-content:center; min-height: 160px;">
+        <p style="font-family: var(--mono); font-size:13px; color: var(--muted-2); text-align:center; line-height:2">
+          Driven while<br>you sleep.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Comparison ─────────────────────────────────────────────────────── -->
+<section id="compare">
+  <div class="container">
+    <div class="compare-intro">
+      <div>
+        <p class="section-label">vs. Copilots</p>
+        <h2>A copilot waits for you<br>to drive.</h2>
+        <p class="section-sub" style="margin-bottom:0">Athena drives. You review the PR.</p>
+      </div>
+    </div>
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th>Copilots</th>
+          <th class="col-athena">Athena</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="feature-name">Works without you</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Full decision audit trail</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Open source core</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Self-improving over time</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Isolated sandbox execution</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Connects to your tickets</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">Runs your existing CI/CD</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+        <tr>
+          <td class="feature-name">No training on your code</td>
+          <td class="no">✗</td>
+          <td class="yes">✓</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── Self-improving ─────────────────────────────────────────────────── -->
+<section id="improving">
+  <div class="container">
+    <p class="section-label">Self-improving</p>
+    <h2>Gets better every sprint.<br>No tuning required.</h2>
+    <p class="section-sub">Athena tracks its own performance across every task it runs. Agents that perform get promoted. Regressions get rolled back automatically.</p>
+
+    <div class="kpi-grid">
+      <div class="kpi-block">
+        <h3>Task success rate</h3>
+        <div class="bar-row">
+          <div class="bar-meta"><span>Week 1</span><span>62%</span></div>
+          <div class="bar-track"><div class="bar-fill" style="--target: 62%"></div></div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-meta"><span>Week 4</span><span>87%</span></div>
+          <div class="bar-track"><div class="bar-fill good" style="--target: 87%"></div></div>
+        </div>
+      </div>
+
+      <div class="kpi-block">
+        <h3>First-pass verify rate</h3>
+        <div class="bar-row">
+          <div class="bar-meta"><span>Week 1</span><span>43%</span></div>
+          <div class="bar-track"><div class="bar-fill" style="--target: 43%"></div></div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-meta"><span>Week 4</span><span>84%</span></div>
+          <div class="bar-track"><div class="bar-fill good" style="--target: 84%"></div></div>
+        </div>
+      </div>
+
+      <p class="kpi-tagline">
+        Most teams see meaningful improvement within the first two sprints.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Security ───────────────────────────────────────────────────────── -->
+<section id="security">
+  <div class="container">
+    <div class="security-grid">
+      <div>
+        <p class="section-label">Security</p>
+        <h2>Built for security teams,<br>not just developers.</h2>
+        <p class="section-sub" style="margin-bottom: 0">
+          Designed with the assumption that your security team will say no — and built to give them no reason to.
+        </p>
+        <ul class="security-points">
+          <li>
+            <div class="icon">◈</div>
+            <div>
+              <strong>Container isolation</strong>
+              <span>Every agent runs in a hardened Docker sandbox with no network access by default.</span>
+            </div>
+          </li>
+          <li>
+            <div class="icon">⊞</div>
+            <div>
+              <strong>Tool allowlists</strong>
+              <span>Agents can only call tools you've explicitly approved. Per-role, per-agent.</span>
+            </div>
+          </li>
+          <li>
+            <div class="icon">⚑</div>
+            <div>
+              <strong>Risk tiers</strong>
+              <span>Every task is classified low / medium / high / blocked before execution begins.</span>
+            </div>
+          </li>
+          <li>
+            <div class="icon">▤</div>
+            <div>
+              <strong>Path containment</strong>
+              <span>Agents cannot access files outside the workspace. Ever.</span>
+            </div>
+          </li>
+          <li>
+            <div class="icon">✦</div>
+            <div>
+              <strong>Exportable audit logs</strong>
+              <span>Full decision history, exportable as JSON. SOC 2 ready out of the box.</span>
+            </div>
+          </li>
+          <li>
+            <div class="icon">⊘</div>
+            <div>
+              <strong>No model training on your code</strong>
+              <span>Your codebase is never used to train any model. Ever.</span>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="security-visual">
+          <p class="line-muted"># athena doctor --security</p>
+          <br>
+          <p class="line-ok">✓  Container runtime: hardened</p>
+          <p class="line-ok">✓  Network mode: none</p>
+          <p class="line-ok">✓  Capabilities: dropped (all)</p>
+          <p class="line-ok">✓  Rootfs: read-only</p>
+          <p class="line-ok">✓  Tool allowlist: active</p>
+          <p class="line-ok">✓  Path containment: enforced</p>
+          <p class="line-ok">✓  Sensitive cmd detection: on</p>
+          <p class="line-ok">✓  Audit log: writing to disk</p>
+          <p class="line-ok">✓  LLM data retention: off</p>
+          <br>
+          <p class="line-muted">Risk profile:  <span class="line-ok">APPROVED</span></p>
+          <p class="line-muted">Generated:     2026-03-10 09:14:02 UTC</p>
+          <br>
+          <p class="line-muted"># All checks passed. Safe to deploy.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Open core ──────────────────────────────────────────────────────── -->
+<section id="open-core">
+  <div class="container">
+    <p class="section-label">Open core</p>
+    <h2>Free to run. Pay when<br>you want us to run it.</h2>
+    <p class="section-sub pricing-intro">
+      The agent runtime, ghost orchestration, and self-improvement engine are open source under Apache 2.0.
+      We make money when you want managed infrastructure.
+    </p>
+
+    <div class="pricing-grid">
+      <div class="pricing-card">
+        <p class="plan-name">Open source</p>
+        <p class="plan-price">Free <span class="sub">forever</span></p>
+        <p class="plan-desc">Self-host on your own infrastructure. Full control.</p>
+        <ul class="feature-list">
+          <li><span class="check">✓</span> Agent runtime (Rust)</li>
+          <li><span class="check">✓</span> Ghost multi-agent orchestration</li>
+          <li><span class="check">✓</span> Self-improvement engine</li>
+          <li><span class="check">✓</span> MCP tool registry</li>
+          <li><span class="check">✓</span> Docker sandbox execution</li>
+          <li><span class="check">✓</span> Linear, GitHub, Jira, GitLab intake</li>
+          <li><span class="check">✓</span> Audit log export</li>
+          <li><span class="check">✓</span> Community support</li>
+        </ul>
+        <a href="https://github.com/EnreignHQ/athena" target="_blank" rel="noopener" class="btn btn-outline plan-cta">View on GitHub →</a>
+      </div>
+
+      <div class="pricing-card">
+        <p class="plan-name">Enterprise</p>
+        <p class="plan-price">Custom <span class="sub">pricing</span></p>
+        <p class="plan-desc">Managed cloud service, SLA, and dedicated support.</p>
+        <ul class="feature-list">
+          <li><span class="check">✓</span> Everything in open source</li>
+          <li><span class="check">✓</span> Hosted cloud service</li>
+          <li><span class="check">✓</span> SSO + SAML</li>
+          <li><span class="check">✓</span> Multi-org management</li>
+          <li><span class="check">✓</span> Dedicated SLA</li>
+          <li><span class="check">✓</span> Fine-tuned models</li>
+          <li><span class="check">✓</span> Onboarding &amp; migration support</li>
+          <li><span class="check">✓</span> Quarterly business reviews</li>
+        </ul>
+        <a href="mailto:hello@athena.dev?subject=Enterprise inquiry" class="btn btn-primary plan-cta">Contact us</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Waitlist ───────────────────────────────────────────────────────── -->
+<section id="waitlist">
+  <div class="container">
+    <div class="waitlist-inner">
+      <p class="section-label" style="text-align:center">Early access</p>
+      <h2 style="text-align:center">In private beta with a small<br>number of engineering teams.</h2>
+      <p style="color: var(--muted); margin-top: 16px;">
+        Waitlist is moving. No sales call required to get started.
+      </p>
+      <form class="waitlist-form" action="mailto:hello@athena.dev" method="get" enctype="text/plain">
+        <input type="email" name="email" placeholder="your@company.com" required autocomplete="email" />
+        <button type="submit" class="btn btn-primary">Join waitlist</button>
+      </form>
+      <p class="waitlist-note">Avg. response: 2 business days. No spam, ever.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Footer ─────────────────────────────────────────────────────────── -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-left">
+        <span class="footer-logo"><span class="diamond">◈</span> ATHENA</span>
+        <span class="footer-meta">Apache 2.0 · Built in Rust</span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/EnreignHQ/athena" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/EnreignHQ/athena/tree/main/docs">Docs</a>
+        <a href="https://github.com/EnreignHQ/athena/blob/main/SECURITY.md">Security</a>
+        <a href="mailto:hello@athena.dev">Contact</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
