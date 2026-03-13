@@ -4,7 +4,7 @@ use tracing::Instrument;
 use crate::confirm::Confirmer;
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{
@@ -57,7 +57,7 @@ const CODING_TOOLS: &[&str] = &["claude_code", "codex", "opencode"];
 const MAX_EXPLORE_STEPS: usize = 5;
 const MAX_VERIFY_STEPS: usize = 5;
 const MAX_SELF_HEAL_ATTEMPTS: usize = 2;
-const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
+const CLI_CONTRACT_PREFIX: &str = "[sparks_cli_contract]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliFailurePolicy {
@@ -761,7 +761,7 @@ impl CodeStrategy {
             &available,
         );
         if candidates.is_empty() {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "No coding CLI tool available (need claude_code, codex, or opencode)".into(),
             ));
         }
@@ -805,7 +805,7 @@ impl CodeStrategy {
             if result.success {
                 tracing::info!(tool = tool_name, "EXECUTE: coding tool succeeded");
                 return Ok(format!(
-                    "{}\n\n[athena_cli_tool_used:{}]",
+                    "{}\n\n[sparks_cli_tool_used:{}]",
                     result.output, tool_name
                 ));
             }
@@ -827,7 +827,7 @@ impl CodeStrategy {
                 match tool.execute(docker, &params).await {
                     Ok(retry_once) if retry_once.success => {
                         return Ok(format!(
-                            "{}\n\n[athena_cli_tool_used:{}]",
+                            "{}\n\n[sparks_cli_tool_used:{}]",
                             retry_once.output, tool_name
                         ))
                     }
@@ -840,8 +840,8 @@ impl CodeStrategy {
                             lf_truncate(&retry_once.output, 250)
                         ));
                         if !retry_policy.fallback {
-                            return Err(AthenaError::Tool(format!(
-                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
+                            return Err(SparksError::Tool(format!(
+                                "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[sparks_cli_tool_used:{}]",
                                 tool_name,
                                 retry_policy.code,
                                 failures
@@ -858,8 +858,8 @@ impl CodeStrategy {
             }
 
             if !policy.fallback {
-                return Err(AthenaError::Tool(format!(
-                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[athena_cli_tool_used:{}]",
+                return Err(SparksError::Tool(format!(
+                    "Coding tool '{}' failed with non-fallback policy code '{}'.\n{}\n[sparks_cli_tool_used:{}]",
                     tool_name,
                     policy.code,
                     failures
@@ -886,15 +886,15 @@ impl CodeStrategy {
                 .await?
                 {
                     return Ok(format!(
-                        "{}\n\n[athena_cli_tool_used:{}]",
+                        "{}\n\n[sparks_cli_tool_used:{}]",
                         output, tool_name
                     ));
                 }
             }
         }
 
-        Err(AthenaError::Tool(format!(
-            "All coding CLI tools failed.\n{}\n[athena_cli_tool_used:{}]",
+        Err(SparksError::Tool(format!(
+            "All coding CLI tools failed.\n{}\n[sparks_cli_tool_used:{}]",
             failures
                 .iter()
                 .map(|f| format!("- {}", f))
@@ -1464,7 +1464,7 @@ mod tests {
     #[test]
     fn parse_cli_failure_policy_reads_contract_fields_marker_first_line() {
         let policy = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true\nstderr noise",
+            "[sparks_cli_contract] tool=codex code=transient_upstream retry_same=true fallback=true\nstderr noise",
         );
         assert_eq!(policy.code, "transient_upstream");
         assert!(policy.retry_same);
@@ -1474,7 +1474,7 @@ mod tests {
     #[test]
     fn parse_cli_failure_policy_reads_contract_fields_marker_middle_line() {
         let policy = parse_cli_failure_policy(
-            "warning: something\nstderr: [athena_cli_contract] tool=codex code=rate_limit retry_same=false fallback=false\nmore noise",
+            "warning: something\nstderr: [sparks_cli_contract] tool=codex code=rate_limit retry_same=false fallback=false\nmore noise",
         );
         assert_eq!(policy.code, "rate_limit");
         assert!(!policy.retry_same);
@@ -1484,7 +1484,7 @@ mod tests {
     #[test]
     fn parse_cli_failure_policy_ignores_malformed_tokens() {
         let policy = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=invalid_request retry_same=maybe fallback=TRUEE",
+            "[sparks_cli_contract] tool=codex code=invalid_request retry_same=maybe fallback=TRUEE",
         );
         assert_eq!(policy.code, "invalid_request");
         assert!(!policy.retry_same);
@@ -1494,10 +1494,10 @@ mod tests {
     #[test]
     fn parse_cli_failure_policy_non_fallback_is_deterministic() {
         let a = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
+            "[sparks_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
         );
         let b = parse_cli_failure_policy(
-            "[athena_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
+            "[sparks_cli_contract] tool=codex code=invalid_request retry_same=false fallback=false",
         );
         assert_eq!(a, b);
         assert_eq!(a.code, "invalid_request");

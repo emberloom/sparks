@@ -69,7 +69,7 @@ impl ExternalTicket {
     pub fn ghost_hint(&self) -> Option<String> {
         for label in &self.labels {
             let lower = label.to_lowercase();
-            if let Some(rest) = lower.strip_prefix("athena:") {
+            if let Some(rest) = lower.strip_prefix("sparks:") {
                 let trimmed = rest.trim();
                 if !trimmed.is_empty() {
                     return Some(trimmed.to_string());

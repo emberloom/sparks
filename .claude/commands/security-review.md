@@ -1,4 +1,4 @@
-Perform a security review of the Athena codebase. Focus on these areas:
+Perform a security review of the Sparks codebase. Focus on these areas:
 
 1. **Secrets handling**: API keys in config, env vars, logging — are secrets ever leaked to logs/output? Check all structs that derive Debug and contain sensitive fields.
 2. **Input validation**: User input from Telegram, LLM responses parsed as JSON, tool parameters

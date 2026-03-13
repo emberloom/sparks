@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 const MIGRATIONS: &[&str] = &[
     // v1: memories table + schema version tracking
@@ -179,7 +179,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| AthenaError::Config(format!("Failed to create db directory: {}", e)))?;
+            .map_err(|e| SparksError::Config(format!("Failed to create db directory: {}", e)))?;
     }
 
     let conn = Connection::open(path)?;

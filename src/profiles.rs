@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::config::{Config, GhostConfig, GhostRole, MountConfig};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
-/// A profile file loaded from ~/.athena/ghosts/*.toml
+/// A profile file loaded from ~/.sparks/ghosts/*.toml
 #[derive(Debug, serde::Deserialize)]
 struct GhostProfile {
     name: String,
@@ -54,7 +54,7 @@ fn normalize_profile_image(image: Option<String>, fallback_image: &str) -> Optio
 }
 
 fn home_profile_loading_disabled() -> bool {
-    std::env::var("ATHENA_DISABLE_HOME_PROFILES")
+    std::env::var("SPARKS_DISABLE_HOME_PROFILES")
         .ok()
         .map(|raw| {
             matches!(
@@ -65,19 +65,19 @@ fn home_profile_loading_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Load ghosts from config + ~/.athena/ghosts/*.toml profile directory.
+/// Load ghosts from config + ~/.sparks/ghosts/*.toml profile directory.
 /// Profile ghosts override config ghosts with the same name.
 pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let mut ghosts: Vec<GhostConfig> = config.ghosts.clone();
     let mut skill_cache: HashMap<String, Option<String>> = HashMap::new();
 
     if home_profile_loading_disabled() {
-        tracing::info!("Home ghost profiles disabled via ATHENA_DISABLE_HOME_PROFILES");
+        tracing::info!("Home ghost profiles disabled via SPARKS_DISABLE_HOME_PROFILES");
         return Ok(ghosts);
     }
 
     let profile_dir = match dirs::home_dir() {
-        Some(h) => h.join(".athena").join("ghosts"),
+        Some(h) => h.join(".sparks").join("ghosts"),
         None => return Ok(ghosts),
     };
 
@@ -223,10 +223,10 @@ fn build_ghost_from_profile(
 
 fn load_profile(path: &PathBuf) -> Result<GhostProfile> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| AthenaError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
+        .map_err(|e| SparksError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
     let profile: GhostProfile = toml::from_str(&contents)
-        .map_err(|e| AthenaError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
+        .map_err(|e| SparksError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
 
     Ok(profile)
 }

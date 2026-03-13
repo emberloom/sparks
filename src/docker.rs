@@ -12,7 +12,7 @@ use std::process::Command as StdCommand;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, DockerConfig, GhostConfig};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::reason_codes;
 
 pub const CONTAINER_MODE: &str = "docker";
@@ -30,7 +30,7 @@ const CRATES_INDEX_HASH_PRIMARY: &str = "index.crates.io-1949cf8c6b5b557f";
 const CRATES_INDEX_HASH_ALT: &str = "index.crates.io-6f17d22bba15001f";
 const LINUX_TARGET_X86_64: &str = "x86_64-unknown-linux-gnu";
 const LINUX_TARGET_AARCH64: &str = "aarch64-unknown-linux-gnu";
-const HOST_WORKSPACE_ALIAS: &str = "/tmp/athena-workspace";
+const HOST_WORKSPACE_ALIAS: &str = "/tmp/sparks-workspace";
 static WARMED_WORKSPACES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn exec_env() -> Vec<String> {
@@ -108,8 +108,8 @@ fn host_exec_shell_prelude(workdir: &Path) -> String {
     let tag = reason_codes::reason_tag(reason_codes::REASON_GHOST_TOOL_UNAVAILABLE);
     let workdir_q = shell_single_quote(workdir.to_string_lossy().as_ref());
     format!(
-        "ATHENA_HOST_WORKSPACE={workdir}; ATHENA_WORKSPACE_ALIAS={alias}; \
-mkdir -p /tmp; ln -sfn \"$ATHENA_HOST_WORKSPACE\" \"$ATHENA_WORKSPACE_ALIAS\"; \
+        "SPARKS_HOST_WORKSPACE={workdir}; SPARKS_WORKSPACE_ALIAS={alias}; \
+mkdir -p /tmp; ln -sfn \"$SPARKS_HOST_WORKSPACE\" \"$SPARKS_WORKSPACE_ALIAS\"; \
 if ! command -v rg >/dev/null 2>&1; then \
 rg() {{ \
 if [ \"$1\" = \"--files\" ]; then \
@@ -210,7 +210,7 @@ fn cargo_fetch_locked(workspace: &Path, target: &str) -> Result<()> {
         .current_dir(workspace)
         .status()
         .map_err(|e| {
-            AthenaError::Tool(format!(
+            SparksError::Tool(format!(
                 "Failed to execute cargo fetch for target {} in {}: {}",
                 target,
                 workspace.display(),
@@ -221,7 +221,7 @@ fn cargo_fetch_locked(workspace: &Path, target: &str) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(AthenaError::Tool(format!(
+        Err(SparksError::Tool(format!(
             "cargo fetch failed for target {} in {} with status {}",
             target,
             workspace.display(),
@@ -266,7 +266,7 @@ async fn warm_host_cargo_cache(ghost: &GhostConfig) {
         if success {
             Ok(())
         } else {
-            Err(AthenaError::Tool(format!(
+            Err(SparksError::Tool(format!(
                 "Unable to warm cargo registry for linux targets in {}",
                 workspace_for_fetch.display()
             )))
@@ -424,7 +424,7 @@ impl DockerSession {
             ..Default::default()
         };
 
-        let container_name = format!("athena-{}-{}", ghost.name, uuid::Uuid::new_v4().simple());
+        let container_name = format!("sparks-{}-{}", ghost.name, uuid::Uuid::new_v4().simple());
 
         let image = ghost.image.as_deref().unwrap_or(&docker_config.image);
 
@@ -507,7 +507,7 @@ impl DockerSession {
                     self.collect_exec_output(docker, &exec.id),
                 )
                 .await
-                .map_err(|_| AthenaError::Timeout(self.timeout_secs))??;
+                .map_err(|_| SparksError::Timeout(self.timeout_secs))??;
 
                 Ok(output)
             }
@@ -553,8 +553,8 @@ impl DockerSession {
             command.output(),
         )
         .await
-        .map_err(|_| AthenaError::Timeout(self.timeout_secs))?
-        .map_err(|e| AthenaError::Tool(format!("host execution failed: {}", e)))?;
+        .map_err(|_| SparksError::Timeout(self.timeout_secs))?
+        .map_err(|e| SparksError::Tool(format!("host execution failed: {}", e)))?;
 
         let mut combined = String::new();
         combined.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -680,7 +680,7 @@ mod tests {
                 dir.file_name()
                     .map(|name| name.to_string_lossy().to_string())
             })
-            .unwrap_or_else(|| "athena".to_string());
+            .unwrap_or_else(|| "sparks".to_string());
         let ghost = make_ghost(".");
         let trusted = vec![workspace.to_ascii_lowercase()];
         let resolved = resolve_trusted_host_workspace(&ghost, &trusted);

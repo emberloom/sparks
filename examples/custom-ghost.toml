@@ -2,7 +2,7 @@
 #
 # Minimal ghost customization snippet.
 # Append or merge this into your config.toml [[ghosts]] section,
-# or place it at ~/.athena/ghosts/reviewer.toml for user-local override.
+# or place it at ~/.sparks/ghosts/reviewer.toml for user-local override.
 #
 # Usage:
 #   cat examples/custom-ghost.toml >> config.toml
@@ -27,7 +27,7 @@ strategy = "react"
 
 # Optional path to a soul file (freeform markdown injected as system-prompt prefix).
 # Relative paths resolve from the repo root; ~ paths expand to home directory.
-# soul_file = "~/.athena/souls/reviewer.md"
+# soul_file = "~/.sparks/souls/reviewer.md"
 
 # Maximum tool-call steps before the ghost concludes.
 # Overrides [manager].max_steps for this ghost.

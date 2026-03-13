@@ -90,7 +90,7 @@ fn default_verify_profile() -> String {
 const FEATURE_TEMPLATE_LINEAR: &str = r#"feature_id = "__FEATURE_ID__"
 lane = "delivery"
 risk = "medium"
-repo = "athena"
+repo = "sparks"
 
 [[acceptance_criteria]]
 id = "AC-1"
@@ -139,7 +139,7 @@ mapped_acceptance = ["AC-3"]
 const FEATURE_TEMPLATE_FANOUT_FANIN: &str = r#"feature_id = "__FEATURE_ID__"
 lane = "delivery"
 risk = "medium"
-repo = "athena"
+repo = "sparks"
 
 [[acceptance_criteria]]
 id = "AC-1"

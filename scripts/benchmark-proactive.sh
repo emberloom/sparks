@@ -8,13 +8,13 @@ set -euo pipefail
 
 DURATION_MIN="${1:-10}"
 DURATION_SEC=$((DURATION_MIN * 60))
-SOCKET="${ATHENA_OBSERVER_SOCK:-$HOME/.athena/observer.sock}"
-TMPFILE=$(mktemp /tmp/athena-bench.XXXXXX)
+SOCKET="${SPARKS_OBSERVER_SOCK:-$HOME/.sparks/observer.sock}"
+TMPFILE=$(mktemp /tmp/sparks-bench.XXXXXX)
 trap 'rm -f "$TMPFILE"' EXIT
 
 if [ ! -S "$SOCKET" ]; then
   echo "Error: observer socket not found at $SOCKET"
-  echo "Make sure Athena is running with 'athena observe' or set ATHENA_OBSERVER_SOCK."
+  echo "Make sure Sparks is running with 'sparks observe' or set SPARKS_OBSERVER_SOCK."
   exit 1
 fi
 
@@ -37,7 +37,7 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════════"
-echo "  Athena Proactive Benchmark — ${DURATION_MIN}m collection"
+echo "  Sparks Proactive Benchmark — ${DURATION_MIN}m collection"
 echo "═══════════════════════════════════════════════════"
 echo ""
 

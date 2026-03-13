@@ -148,7 +148,7 @@ impl CoreHandle {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         task.task_id = Some(task_id.clone());
         self.auto_tx.send(task).await.map_err(|_| {
-            crate::error::AthenaError::Tool("Autonomous task queue full or shut down".into())
+            crate::error::SparksError::Tool("Autonomous task queue full or shut down".into())
         })?;
         Ok(task_id)
     }
@@ -170,7 +170,7 @@ impl CoreHandle {
         self.tx
             .send(req)
             .await
-            .map_err(|_| crate::error::AthenaError::Tool("Core task has shut down".into()))?;
+            .map_err(|_| crate::error::SparksError::Tool("Core task has shut down".into()))?;
         Ok(event_rx)
     }
 
@@ -192,7 +192,7 @@ impl CoreHandle {
 }
 
 /// The core engine. Owns Manager and Memory, runs as a tokio task.
-pub struct AthenaCore;
+pub struct SparksCore;
 
 struct CoreRuntimeHandles {
     observer: ObserverHandle,
@@ -211,7 +211,7 @@ struct CoreRuntimeHandles {
     activity_log: Arc<ActivityLogStore>,
 }
 
-impl AthenaCore {
+impl SparksCore {
     pub async fn start(config: Config, memory: Arc<MemoryStore>) -> Result<CoreHandle> {
         let (llm, orchestrator, embedder) = init_llm_stack(&config).await?;
 
@@ -434,7 +434,7 @@ fn build_core_handle(
 async fn maybe_spawn_openai_api(config: &Config, handle: &CoreHandle) -> Result<()> {
     crate::openai_api::spawn_openai_api(config.openai_api.clone(), handle.clone())
         .await
-        .map_err(|e| crate::error::AthenaError::Tool(e.to_string()))
+        .map_err(|e| crate::error::SparksError::Tool(e.to_string()))
 }
 
 async fn init_llm_stack(
@@ -581,7 +581,7 @@ fn init_observer() -> ObserverHandle {
     crate::observer::spawn_uds_listener(observer.clone());
     observer.log(
         ObserverCategory::Startup,
-        "Athena core started, observer active",
+        "Sparks core started, observer active",
     );
     observer
 }
@@ -978,7 +978,7 @@ fn scan_autonomous_task_input(
     task_id: &str,
     prompt_scanner: &PromptScanner,
     observer: &ObserverHandle,
-) -> std::result::Result<(), crate::error::AthenaError> {
+) -> std::result::Result<(), crate::error::SparksError> {
     let scan_metadata = scan_metadata_for_task(task, task_id);
     let scan_input = format!("{}\n\n{}", task.goal, task.context);
     let scan_report =
@@ -996,7 +996,7 @@ fn scan_autonomous_task_input(
         &scan_metadata,
     );
     if scan_report.decision == ScanDecision::Block {
-        return Err(crate::error::AthenaError::Tool(format!(
+        return Err(crate::error::SparksError::Tool(format!(
             "Prompt scanner blocked task intake (rules: {})",
             scan_report.finding_ids_csv()
         )));
@@ -1606,7 +1606,7 @@ fn fail_autonomous_task(
     task_id: &str,
     ghost_label: &str,
     goal_summary: &str,
-    err: &crate::error::AthenaError,
+    err: &crate::error::SparksError,
     verification_total_on_fail: u64,
     rolled_back_on_fail: bool,
     observer: &ObserverHandle,
@@ -1863,7 +1863,7 @@ fn handle_autonomous_task_failure(
     task_id: &str,
     ghost_label: &str,
     goal_summary: &str,
-    err: &crate::error::AthenaError,
+    err: &crate::error::SparksError,
     verification_total: u64,
     rolled_back: bool,
     observer: &ObserverHandle,
@@ -2001,13 +2001,13 @@ fn extract_pull_request_url(text: &str) -> Option<String> {
 }
 
 fn extract_cli_tool_used_marker(text: &str) -> Option<String> {
-    let re = regex::Regex::new(r"\[athena_cli_tool_used:([a-zA-Z0-9_]+)\]").ok()?;
+    let re = regex::Regex::new(r"\[sparks_cli_tool_used:([a-zA-Z0-9_]+)\]").ok()?;
     let captures = re.captures(text)?;
     captures.get(1).map(|m| m.as_str().to_string())
 }
 
 fn strip_cli_tool_used_marker(text: &str) -> String {
-    let re = match regex::Regex::new(r"\s*\[athena_cli_tool_used:[a-zA-Z0-9_]+\]") {
+    let re = match regex::Regex::new(r"\s*\[sparks_cli_tool_used:[a-zA-Z0-9_]+\]") {
         Ok(re) => re,
         Err(_) => return text.to_string(),
     };
@@ -2088,7 +2088,7 @@ fn failure_category(goal_summary: &str) -> &'static str {
 async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, String)> {
     let mut llm: Option<Arc<dyn LlmProvider>> = None;
     let mut selected_provider = config.llm.provider.clone();
-    let mut last_err: Option<crate::error::AthenaError> = None;
+    let mut last_err: Option<crate::error::SparksError> = None;
     let skip_health = llm_health_check_disabled();
 
     for provider_name in config.provider_candidates() {
@@ -2107,7 +2107,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
 
         if skip_health {
             eprintln!(
-                "Skipping LLM health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+                "Skipping LLM health check for {} (SPARKS_SKIP_LLM_HEALTHCHECK=1)",
                 candidate.provider_name()
             );
             selected_provider = provider_name;
@@ -2137,7 +2137,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
 
     let llm = llm.ok_or_else(|| {
         last_err.unwrap_or_else(|| {
-            crate::error::AthenaError::Config("No reachable LLM provider candidates".into())
+            crate::error::SparksError::Config("No reachable LLM provider candidates".into())
         })
     })?;
 
@@ -2156,7 +2156,7 @@ async fn connect_orchestrator(
 
     if llm_health_check_disabled() {
         eprintln!(
-            "Skipping orchestrator health check for {} (ATHENA_SKIP_LLM_HEALTHCHECK=1)",
+            "Skipping orchestrator health check for {} (SPARKS_SKIP_LLM_HEALTHCHECK=1)",
             orchestrator.provider_name()
         );
         return Ok(orchestrator);
@@ -2181,7 +2181,7 @@ async fn connect_orchestrator(
 
 fn llm_health_check_disabled() -> bool {
     matches!(
-        std::env::var("ATHENA_SKIP_LLM_HEALTHCHECK")
+        std::env::var("SPARKS_SKIP_LLM_HEALTHCHECK")
             .unwrap_or_default()
             .to_lowercase()
             .as_str(),
@@ -2302,7 +2302,7 @@ fn spawn_mood_drift_loop(
 
 fn create_usage_store(config: &Config) -> Result<Arc<ToolUsageStore>> {
     let db_path = config.db_path().map_err(|e| {
-        crate::error::AthenaError::Config(format!(
+        crate::error::SparksError::Config(format!(
             "Failed to resolve DB path for usage store: {}",
             e
         ))
@@ -2314,7 +2314,7 @@ fn create_usage_store(config: &Config) -> Result<Arc<ToolUsageStore>> {
 
 fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
     let db_path = config.db_path().map_err(|e| {
-        crate::error::AthenaError::Config(format!(
+        crate::error::SparksError::Config(format!(
             "Failed to resolve DB path for task outcome store: {}",
             e
         ))
@@ -2326,7 +2326,7 @@ fn create_task_outcome_store(config: &Config) -> Result<Arc<TaskOutcomeStore>> {
 
 fn create_activity_log_store(config: &Config) -> Result<Arc<ActivityLogStore>> {
     let db_path = config.db_path().map_err(|e| {
-        crate::error::AthenaError::Config(format!(
+        crate::error::SparksError::Config(format!(
             "Failed to resolve DB path for activity log store: {}",
             e
         ))
@@ -2338,7 +2338,7 @@ fn create_activity_log_store(config: &Config) -> Result<Arc<ActivityLogStore>> {
 
 fn create_ticket_intake_store(config: &Config) -> Result<Arc<TicketIntakeStore>> {
     let db_path = config.db_path().map_err(|e| {
-        crate::error::AthenaError::Config(format!(
+        crate::error::SparksError::Config(format!(
             "Failed to resolve DB path for ticket intake store: {}",
             e
         ))
@@ -2389,7 +2389,7 @@ fn build_ticket_intake_providers(
             .filter_label
             .clone()
             .filter(|l| !l.trim().is_empty())
-            .unwrap_or_else(|| "athena".to_string());
+            .unwrap_or_else(|| "sparks".to_string());
 
         match provider.as_str() {
             "github" => {

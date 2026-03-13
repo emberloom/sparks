@@ -10,7 +10,7 @@ use crate::config::{DockerConfig, GhostConfig, LoopGuardConfig};
 use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
@@ -381,7 +381,7 @@ impl Executor {
 
         let tool = tools
             .get(tool_name)
-            .ok_or_else(|| AthenaError::Tool(format!("Unknown tool: {}", tool_name)))?;
+            .ok_or_else(|| SparksError::Tool(format!("Unknown tool: {}", tool_name)))?;
 
         if let Some(loop_obs) = self
             .loop_guard
@@ -412,7 +412,7 @@ impl Executor {
             {
                 tracing::warn!("Failed to record loop guard usage: {}", e);
             }
-            return Err(AthenaError::Tool(loop_message));
+            return Err(SparksError::Tool(loop_message));
         }
 
         // Confirmation check
@@ -538,7 +538,7 @@ impl Executor {
                     format!("[tool error]\n{}", r.output)
                 };
                 if !r.success {
-                    let synth_err = AthenaError::Tool(r.output.clone());
+                    let synth_err = SparksError::Tool(r.output.clone());
                     if let Some(fix) = self_heal::attempt_fix(&synth_err, tool_name, &params) {
                         Ok(format!(
                             "{}\n\n[self-heal hint]\nGoal: {}\nContext: {}\nConstraints: {}",

@@ -211,25 +211,25 @@ struct CompileRuntimeProbe {
 const COMPILE_RUNTIME_PROBE_CMD: &str = r#"
 for bin in sh cargo; do
   if ! command -v "$bin" >/dev/null 2>&1; then
-    echo "__ATHENA_MISSING_BIN__:$bin"
+    echo "__SPARKS_MISSING_BIN__:$bin"
   fi
 done
 if command -v cargo >/dev/null 2>&1; then
-  cargo --version 2>/dev/null | sed 's/^/__ATHENA_CARGO_VERSION__:/'
+  cargo --version 2>/dev/null | sed 's/^/__SPARKS_CARGO_VERSION__:/'
 fi
 if command -v rg >/dev/null 2>&1; then
-  echo "__ATHENA_RG__:1"
+  echo "__SPARKS_RG__:1"
 else
-  echo "__ATHENA_RG__:0"
+  echo "__SPARKS_RG__:0"
 fi
 for dir in "${TMPDIR:-/tmp}" "${CARGO_HOME:-/tmp/cargo-home}" "${RUSTUP_HOME:-/tmp/rustup-home}" "${RUSTUP_HOME:-/tmp/rustup-home}/tmp"; do
   if ! mkdir -p "$dir" 2>/dev/null; then
-    echo "__ATHENA_WRITE_FAIL__:$dir"
+    echo "__SPARKS_WRITE_FAIL__:$dir"
     continue
   fi
-  probe="$dir/.athena-write-probe.$$"
+  probe="$dir/.sparks-write-probe.$$"
   if ! ( : > "$probe" ) 2>/dev/null; then
-    echo "__ATHENA_WRITE_FAIL__:$dir"
+    echo "__SPARKS_WRITE_FAIL__:$dir"
     continue
   fi
   rm -f "$probe" 2>/dev/null || true
@@ -434,7 +434,7 @@ fn credentials_hygiene_check(snap: &DoctorSnapshot) -> CheckItem {
         detail,
         fix: (!snap.inline_secret_labels.is_empty() || !snap.keyring_missing.is_empty())
             .then(|| {
-                "Move secrets into env vars, a .env file (gitignored), or use `athena secrets set <key>`."
+                "Move secrets into env vars, a .env file (gitignored), or use `sparks secrets set <key>`."
                     .to_string()
             }),
     }
@@ -662,7 +662,7 @@ fn index_artifacts_check(snap: &DoctorSnapshot) -> CheckItem {
         },
         detail: format!("code_structure memories={}", snap.counts.code_structure),
         fix: (snap.counts.code_structure == 0).then(|| {
-            "Run Athena with self-dev enabled long enough for the code indexer interval to elapse."
+            "Run Sparks with self-dev enabled long enough for the code indexer interval to elapse."
                 .to_string()
         }),
     }
@@ -1102,7 +1102,7 @@ fn local_only_storage_paths_check(config: &Config) -> CheckItem {
             config.db.path, config.embedding.model_dir
         ),
         fix: (!paths_ok).then(|| {
-            "Use filesystem paths (for example `~/.athena/athena.db` and `~/.athena/models/all-MiniLM-L6-v2`)."
+            "Use filesystem paths (for example `~/.sparks/sparks.db` and `~/.sparks/models/all-MiniLM-L6-v2`)."
                 .to_string()
         }),
     }
@@ -1295,7 +1295,7 @@ fn self_dev_trusted_repo_allowlist_check(config: &Config) -> CheckItem {
             format!("trusted repos: {}", repos.join(", "))
         },
         fix: repos.is_empty().then(|| {
-            "Set `[self_dev].trusted_repos = [\"athena\"]` (or your trusted repo names)."
+            "Set `[self_dev].trusted_repos = [\"sparks\"]` (or your trusted repo names)."
                 .to_string()
         }),
     }
@@ -1398,26 +1398,26 @@ fn parse_compile_runtime_probe(output: &str) -> CompileRuntimeProbe {
     let mut probe = CompileRuntimeProbe::default();
 
     for line in output.lines().map(str::trim) {
-        if let Some(bin) = line.strip_prefix("__ATHENA_MISSING_BIN__:") {
+        if let Some(bin) = line.strip_prefix("__SPARKS_MISSING_BIN__:") {
             if !bin.is_empty() {
                 probe.missing_bins.push(bin.to_string());
             }
             continue;
         }
-        if let Some(path) = line.strip_prefix("__ATHENA_WRITE_FAIL__:") {
+        if let Some(path) = line.strip_prefix("__SPARKS_WRITE_FAIL__:") {
             if !path.is_empty() {
                 probe.write_fail_paths.push(path.to_string());
             }
             continue;
         }
-        if let Some(version) = line.strip_prefix("__ATHENA_CARGO_VERSION__:") {
+        if let Some(version) = line.strip_prefix("__SPARKS_CARGO_VERSION__:") {
             let trimmed = version.trim();
             if !trimmed.is_empty() {
                 probe.cargo_version = Some(trimmed.to_string());
             }
             continue;
         }
-        if let Some(flag) = line.strip_prefix("__ATHENA_RG__:") {
+        if let Some(flag) = line.strip_prefix("__SPARKS_RG__:") {
             probe.rg_available = flag.trim() == "1";
         }
     }
@@ -1516,7 +1516,7 @@ pub async fn run_ghost_compile_preflight(
             reason_code: Some(reason_codes::REASON_GHOST_RUNTIME_CAPABILITY_MISMATCH),
             detail: format!("compile runtime probe failed: {}", e),
             remediation: Some(
-                "Fix ghost runtime startup/exec settings and rerun `athena doctor --ci`."
+                "Fix ghost runtime startup/exec settings and rerun `sparks doctor --ci`."
                     .to_string(),
             ),
             rg_available: false,
@@ -1829,7 +1829,7 @@ fn build_security_attestation_report(config: &Config) -> SecurityAttestationRepo
 }
 
 fn print_security_attestation_report(report: &SecurityAttestationReport) {
-    println!("Athena Security Attestation");
+    println!("Sparks Security Attestation");
     println!("Schema: {}", report.schema_version);
     println!("Generated: {}", report.generated_at);
     println!(
@@ -1937,7 +1937,7 @@ fn print_report(
     warn_count: usize,
     fixes: &[String],
 ) {
-    println!("Athena Funnel Health");
+    println!("Sparks Funnel Health");
     println!("Database: {}", db_path.display());
     println!(
         "Overall: {} (fails={}, warns={})",
@@ -2115,10 +2115,10 @@ mod tests {
     #[test]
     fn parse_compile_runtime_probe_reads_capability_markers() {
         let out = "\
-__ATHENA_CARGO_VERSION__:cargo 1.88.0\n\
-__ATHENA_RG__:0\n\
-__ATHENA_WRITE_FAIL__:/tmp/cargo-home\n\
-__ATHENA_MISSING_BIN__:cargo\n";
+__SPARKS_CARGO_VERSION__:cargo 1.88.0\n\
+__SPARKS_RG__:0\n\
+__SPARKS_WRITE_FAIL__:/tmp/cargo-home\n\
+__SPARKS_MISSING_BIN__:cargo\n";
         let probe = parse_compile_runtime_probe(out);
         assert_eq!(probe.cargo_version.as_deref(), Some("cargo 1.88.0"));
         assert!(!probe.rg_available);
@@ -2219,7 +2219,7 @@ __ATHENA_MISSING_BIN__:cargo\n";
     fn local_only_storage_paths_reject_urls() {
         let mut config = Config::default();
         config.runtime.profile = config::RuntimeProfile::LocalOnly;
-        config.db.path = "https://example.com/athena.db".to_string();
+        config.db.path = "https://example.com/sparks.db".to_string();
 
         let check = local_only_storage_paths_check(&config);
         assert_eq!(check.status, CheckStatus::Fail);
@@ -2263,7 +2263,7 @@ __ATHENA_MISSING_BIN__:cargo\n";
         let mut config = Config::default();
         config.runtime.profile = config::RuntimeProfile::SelfDevTrusted;
         config.self_dev.enabled = true;
-        config.self_dev.trusted_repos = vec!["athena".to_string()];
+        config.self_dev.trusted_repos = vec!["sparks".to_string()];
         config.docker.timeout_secs = 120;
         config.manager.max_steps = 10;
 

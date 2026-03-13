@@ -23,7 +23,7 @@ EOF
 chmod +x "$RUN_SCRIPT"
 
 if command -v screen >/dev/null 2>&1; then
-  SESSION="athena_soak_${SOAK_NAME}_${START_TS}"
+  SESSION="sparks_soak_${SOAK_NAME}_${START_TS}"
   screen -dmS "$SESSION" "$RUN_SCRIPT"
 
   {

@@ -1,7 +1,7 @@
 # LLM provider: "openai" (default), "ollama", "openrouter", or "zen"
 # Inline secrets in config.toml are blocked by default. Use env vars, a .env file (gitignored),
-# or `athena secrets set <key>` to store credentials in the OS keyring.
-# Set ATHENA_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
+# or `sparks secrets set <key>` to store credentials in the OS keyring.
+# Set SPARKS_ALLOW_INLINE_SECRETS=1 only if you must run with inline secrets.
 [runtime]
 # Runtime security/deployment profile:
 # - "container_strict" (default, Docker-isolated execution)
@@ -13,20 +13,20 @@ profile = "container_strict"
 provider = "openai"
 
 # OpenAI-compatible API server (for IDE/client integrations).
-# Disabled by default; when enabled, Athena exposes:
+# Disabled by default; when enabled, Sparks exposes:
 # - GET  /v1/models
 # - POST /v1/chat/completions
 [openai_api]
 enabled = false
 bind = "127.0.0.1:8787"
 # Set a bearer key in env (recommended):
-# export ATHENA_OPENAI_API_KEY="change-me"
-api_key_env = "ATHENA_OPENAI_API_KEY"
+# export SPARKS_OPENAI_API_KEY="change-me"
+api_key_env = "SPARKS_OPENAI_API_KEY"
 principal = "self"
 requests_per_minute = 120
 burst = 30
-# Optional explicit model IDs to advertise (defaults include "athena", current model, and ghost IDs).
-# advertised_models = ["athena", "athena/coder", "athena/scout"]
+# Optional explicit model IDs to advertise (defaults include "sparks", current model, and ghost IDs).
+# advertised_models = ["sparks", "sparks/coder", "sparks/scout"]
 
 # Fully local profile (copy into your active config):
 # [runtime]
@@ -38,10 +38,10 @@ burst = 30
 # model = "qwen2.5:7b"
 # classifier_model = "qwen2.5:3b"
 # [db]
-# path = "~/.athena/athena.db"
+# path = "~/.sparks/sparks.db"
 # [embedding]
 # enabled = true
-# model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+# model_dir = "~/.sparks/models/all-MiniLM-L6-v2"
 # [ticket_intake]
 # enabled = false
 # sources = []
@@ -51,13 +51,13 @@ burst = 30
 # enabled = false
 
 # OpenAI subscription via OAuth (used by Telegram by default).
-# Run `athena openai login` to store tokens in auth_file (default: ~/.athena/openai.json).
+# Run `sparks openai login` to store tokens in auth_file (default: ~/.sparks/openai.json).
 # [openai]
 # url = "https://chatgpt.com/backend-api/codex"
 # api_style = "responses"             # or "chat_completions"
 # model = "gpt-5.3-codex"
 # classifier_model = "gpt-5.3-codex"  # optional, defaults to model
-# auth_file = "~/.athena/openai.json"
+# auth_file = "~/.sparks/openai.json"
 # redirect_uri = "http://localhost:1455/auth/callback"
 # reasoning_effort = "medium"
 # reasoning_summary = "auto"
@@ -77,7 +77,7 @@ max_tokens = 4096
 # model = "google/gemini-2.5-flash"                # ghost/ReAct loop
 # classifier_model = "google/gemini-2.5-flash-lite" # routing decisions (optional, defaults to model)
 # url = "https://openrouter.ai/api/v1"
-# api_key = ""  # discouraged; use OPENROUTER_API_KEY env var, .env, or `athena secrets set openrouter.api_key`
+# api_key = ""  # discouraged; use OPENROUTER_API_KEY env var, .env, or `sparks secrets set openrouter.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
@@ -86,7 +86,7 @@ max_tokens = 4096
 # model = "zen-v1"
 # classifier_model = "zen-v1-mini"  # optional, defaults to model
 # url = "https://opencode.ai/zen/v1"
-# api_key = ""  # discouraged; use OPENCODE_API_KEY env var, .env, or `athena secrets set zen.api_key`
+# api_key = ""  # discouraged; use OPENCODE_API_KEY env var, .env, or `sparks secrets set zen.api_key`
 # temperature = 0.3
 # max_tokens = 4096
 
@@ -102,7 +102,7 @@ cpu_quota = 50000
 timeout_secs = 600
 
 [db]
-path = "~/.athena/athena.db"
+path = "~/.sparks/sparks.db"
 
 [manager]
 max_steps = 15
@@ -122,7 +122,7 @@ repeat_threshold = 2
 [self_dev]
 enabled = false
 # Only used when runtime.profile = "self_dev_trusted"
-# trusted_repos = ["athena"]
+# trusted_repos = ["sparks"]
 # For trusted self-dev workloads, also ensure:
 # [docker]
 # timeout_secs = 600
@@ -145,23 +145,23 @@ discovery_ttl_secs = 60
 # requires_confirmation = true
 # allowed_tools = ["search_documents", "get_issue", "mcp:linear:search_documents"]
 
-# Athena's persona — soul file is a freeform markdown identity document
+# Sparks's persona — soul file is a freeform markdown identity document
 # loaded at startup and injected as the first section of the manager's system prompt.
 [persona]
-# soul_file = "~/.athena/souls/athena.md"
+# soul_file = "~/.sparks/souls/sparks.md"
 
 # Ghosts are sub-agents that execute tasks inside Docker containers.
 # Each ghost can have its own soul file for personality/identity.
-# For deterministic CI/local runs, set ATHENA_DISABLE_HOME_PROFILES=1 to ignore ~/.athena/ghosts overrides.
+# For deterministic CI/local runs, set SPARKS_DISABLE_HOME_PROFILES=1 to ignore ~/.sparks/ghosts overrides.
 [[ghosts]]
 name = "coder"
 description = "Complex multi-file coding tasks: refactoring, new features, bug fixes across files."
 tools = ["file_read", "file_write", "shell", "git", "gh"]
 role = "coder"
 strategy = "code"
-# soul_file = "~/.athena/souls/coder.md"
-# skill_file = "~/.athena/skills/coder.md"
-# skill_files = ["~/.athena/skills/rust-core.md", "~/.athena/skills/secure-coding.md"]
+# soul_file = "~/.sparks/souls/coder.md"
+# skill_file = "~/.sparks/skills/coder.md"
+# skill_files = ["~/.sparks/skills/rust-core.md", "~/.sparks/skills/secure-coding.md"]
 # Multiple skill files are merged in order (legacy `skill_file` is still supported).
 # To reuse a skill between ghosts, point both ghosts at the same file path.
 
@@ -176,9 +176,9 @@ description = "Explores files and runs read-only commands. Cannot modify anythin
 tools = ["file_read", "shell"]
 role = "worker"
 strategy = "react"
-# soul_file = "~/.athena/souls/scout.md"
-# skill_file = "~/.athena/skills/scout.md"
-# skill_files = ["~/.athena/skills/rust-core.md"]
+# soul_file = "~/.sparks/souls/scout.md"
+# skill_file = "~/.sparks/skills/scout.md"
+# skill_files = ["~/.sparks/skills/rust-core.md"]
 
 [[ghosts.mounts]]
 host_path = "."
@@ -187,7 +187,7 @@ read_only = true
 
 [embedding]
 enabled = true
-# model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+# model_dir = "~/.sparks/models/all-MiniLM-L6-v2"
 
 [memory]
 # Half-life for recency decay in days. Memories older than this get 50% weight.
@@ -208,7 +208,7 @@ enabled = true
 # hnsw_ef_search = 64
 
 [telegram]
-# token = "your-bot-token"   # discouraged; use ATHENA_TELEGRAM_TOKEN env var, .env, or `athena secrets set telegram.token`
+# token = "your-bot-token"   # discouraged; use SPARKS_TELEGRAM_TOKEN env var, .env, or `sparks secrets set telegram.token`
 # provider = "openai"         # optional, defaults to "openai" ("ouath" alias still works)
 allowed_chats = [374512753]    # list of allowed chat IDs
 allow_all = false              # must be true to allow all chats (bot refuses to start otherwise)
@@ -219,7 +219,7 @@ planning_auto = true
 planning_timeout_secs = 900
 
 [github]
-# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `athena secrets set github.token`
+# token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `sparks secrets set github.token`
 
 [ticket_intake]
 enabled = false
@@ -240,29 +240,29 @@ timeout_secs = 1200
 # [[ticket_intake.sources]]
 # provider = "github"
 # repo = "myorg/myrepo"
-# filter_label = "athena"
-# token_env = "GH_TOKEN"  # or use `athena secrets set github.token`
+# filter_label = "sparks"
+# token_env = "GH_TOKEN"  # or use `sparks secrets set github.token`
 
 # [[ticket_intake.sources]]
 # provider = "gitlab"
 # repo = "mygroup/myproject"
-# filter_label = "athena"
+# filter_label = "sparks"
 # api_base = "https://gitlab.example.com/api/v4"
-# token_env = "GITLAB_TOKEN"  # or use `athena secrets set gitlab.token`
+# token_env = "GITLAB_TOKEN"  # or use `sparks secrets set gitlab.token`
 
 # [[ticket_intake.sources]]
 # provider = "linear"
 # repo = "ENG"
-# filter_label = "athena"
+# filter_label = "sparks"
 # api_base = "https://api.linear.app/graphql"
-# token_env = "LINEAR_API_KEY"  # or use `athena secrets set linear.api_key`
+# token_env = "LINEAR_API_KEY"  # or use `sparks secrets set linear.api_key`
 
 # [[ticket_intake.sources]]
 # provider = "jira"
 # repo = "PROJ"
 # api_base = "https://mycompany.atlassian.net"
-# filter_label = "athena"
-# token_env = "JIRA_API_TOKEN"  # or use `athena secrets set jira.api_token`
+# filter_label = "sparks"
+# token_env = "JIRA_API_TOKEN"  # or use `sparks secrets set jira.api_token`
 # email_env = "JIRA_EMAIL"
 
 # [ticket_intake.webhook]
@@ -302,6 +302,6 @@ downgrade_block_to_flag = true
 # Get keys at https://cloud.langfuse.com (free tier) or self-host with Docker
 [langfuse]
 enabled = true  # set to false to disable
-# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `athena secrets set langfuse.public_key`
-# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `athena secrets set langfuse.secret_key`
+# public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `sparks secrets set langfuse.public_key`
+# secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `sparks secrets set langfuse.secret_key`
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud

@@ -1,6 +1,6 @@
-# Athena Documentation
+# Sparks Documentation
 
-Documentation index for the Athena multi-agent orchestration system.
+Documentation index for the Sparks multi-agent orchestration system.
 
 ---
 
@@ -46,7 +46,7 @@ Documentation index for the Athena multi-agent orchestration system.
 | [hygiene-baseline.json](hygiene-baseline.json) | Hygiene check baseline (machine-generated, updated by `hygiene_check.py`) |
 | [maintainability-baseline.json](maintainability-baseline.json) | Maintainability baseline (machine-generated) |
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
-| [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
+| [security-attestation.md](security-attestation.md) | `sparks doctor --security` attestation schema, samples, and CI interpretation guide |
 | [openai-compatible-api.md](openai-compatible-api.md) | OpenAI-compatible API setup, supported fields, and documented deviations |
 | [mcp-integration.md](mcp-integration.md) | MCP server/tool configuration, namespacing, allowlists, and troubleshooting |
 | [session-review-explainability.md](session-review-explainability.md) | Session activity log, explainability workflow, and Telegram activity commands |
@@ -64,5 +64,5 @@ Documentation index for the Athena multi-agent orchestration system.
 | [self-improvement-roadmap.md](self-improvement-roadmap.md) | Phased self-improvement roadmap with acceptance criteria per phase |
 | [self-build-supervised-batch.md](self-build-supervised-batch.md) | Supervised self-build batch execution design |
 | [autonomous-agents-epic-comparison.md](autonomous-agents-epic-comparison.md) | Comparison of autonomous agent frameworks considered during design |
-| [conductor-athena-gap-analysis.md](conductor-athena-gap-analysis.md) | Gap analysis: Conductor vs Athena capability comparison |
+| [conductor-sparks-gap-analysis.md](conductor-sparks-gap-analysis.md) | Gap analysis: Conductor vs Sparks capability comparison |
 | [telegram-planning-spec.md](telegram-planning-spec.md) | Telegram front-end feature specification |

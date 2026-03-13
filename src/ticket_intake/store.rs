@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 pub struct TicketIntakeStore {
     conn: Mutex<Connection>,
@@ -33,7 +33,7 @@ impl TicketIntakeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM ticket_intake_log WHERE dedup_key = ?1",
             rusqlite::params![dedup_key],
@@ -53,7 +53,7 @@ impl TicketIntakeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
         conn.execute(
             "INSERT OR IGNORE INTO ticket_intake_log (dedup_key, provider, external_id, issue_number, title)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -66,7 +66,7 @@ impl TicketIntakeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
         let mut stmt = conn.prepare(
             "SELECT t.dedup_key,
                     t.provider,
@@ -112,7 +112,7 @@ impl TicketIntakeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock ticket intake store: {}", e)))?;
         conn.execute(
             "UPDATE ticket_intake_log SET status = ?2 WHERE dedup_key = ?1",
             params![dedup_key, status],

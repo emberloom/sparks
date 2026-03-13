@@ -1,6 +1,6 @@
-# Athena Examples
+# Emberloom Sparks Examples
 
-Runnable examples demonstrating common Athena workflows.
+Runnable examples demonstrating common Sparks workflows.
 
 | File | Description |
 |---|---|
@@ -44,8 +44,8 @@ See [docs/feature-contract-workflow.md](../docs/feature-contract-workflow.md) fo
 ```bash
 cp examples/feature-contract.toml my-feature.toml
 # Edit my-feature.toml to describe your feature
-athena feature validate --file my-feature.toml
-athena feature plan --file my-feature.toml
+sparks feature validate --file my-feature.toml
+sparks feature plan --file my-feature.toml
 ```
 
 ---
@@ -53,7 +53,7 @@ athena feature plan --file my-feature.toml
 ## Customising a Ghost
 
 Place your custom ghost config fragment into `config.toml` under a `[[ghosts]]` section
-(or in `~/.athena/ghosts/<name>.toml` for user-local overrides):
+(or in `~/.sparks/ghosts/<name>.toml` for user-local overrides):
 
 ```bash
 # Append the custom ghost snippet to your config

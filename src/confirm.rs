@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::io::{self, Write};
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 /// Frontend-agnostic confirmation trait.
 /// CLI reads from stdin, Telegram sends inline keyboards, etc.
@@ -28,22 +28,22 @@ impl Confirmer for CliConfirmer {
             eprint!("\n⚠  Action: {}\n   Approve? [y/N] ", action);
             io::stderr()
                 .flush()
-                .map_err(|e| AthenaError::Tool(format!("Failed to flush prompt: {}", e)))?;
+                .map_err(|e| SparksError::Tool(format!("Failed to flush prompt: {}", e)))?;
 
             let mut input = String::new();
             io::stdin()
                 .read_line(&mut input)
-                .map_err(|e| AthenaError::Tool(format!("Failed to read input: {}", e)))?;
+                .map_err(|e| SparksError::Tool(format!("Failed to read input: {}", e)))?;
 
             let answer = input.trim().to_lowercase();
             if answer == "y" || answer == "yes" {
                 Ok(true)
             } else {
-                Err(AthenaError::Cancelled)
+                Err(SparksError::Cancelled)
             }
         })
         .await
-        .map_err(|e| AthenaError::Tool(format!("Confirmation task failed: {}", e)))?
+        .map_err(|e| SparksError::Tool(format!("Confirmation task failed: {}", e)))?
     }
 }
 

@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::config::{OllamaConfig, OpenAiConfig};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::openai_auth::{OpenAiAuth, OpenAiTokens};
 
 // ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ impl OpenAiClient {
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "OpenAI", %status, "LLM error");
             crate::introspect::record_error();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "OpenAI returned {}: {}",
                 status, body
             )));
@@ -521,7 +521,7 @@ impl OpenAiClient {
         });
 
         let Some(choice) = chat_resp.choices.into_iter().next() else {
-            return Err(AthenaError::Llm("OpenAI returned empty choices".into()));
+            return Err(SparksError::Llm("OpenAI returned empty choices".into()));
         };
 
         if let Some(tool_calls) = choice.message.tool_calls {
@@ -631,7 +631,7 @@ impl OpenAiClient {
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "OpenAI", %status, "LLM error");
             crate::introspect::record_error();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "OpenAI returned {}: {}",
                 status, body
             )));
@@ -853,7 +853,7 @@ impl OpenAiClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "OpenAI", %status, "LLM stream error");
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "OpenAI returned {}: {}",
                 status, body
             )));
@@ -1070,7 +1070,7 @@ impl OpenAiClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "OpenAI", %status, "LLM stream error");
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "OpenAI returned {}: {}",
                 status, body
             )));
@@ -1230,7 +1230,7 @@ async fn send_openai_request<T: Serialize + ?Sized>(
     if let Some(account_id) = &tokens.chatgpt_account_id {
         builder = builder.header("chatgpt-account-id", account_id);
     } else if require_account_id {
-        return Err(AthenaError::Config(
+        return Err(SparksError::Config(
             "OpenAI tokens missing chatgpt_account_id. Re-authenticate.".into(),
         ));
     }
@@ -1622,7 +1622,7 @@ impl LlmProvider for OllamaClient {
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = "Ollama", %status, "LLM error");
             crate::introspect::record_error();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "Ollama returned {}: {}",
                 status, body
             )));
@@ -1648,13 +1648,13 @@ impl LlmProvider for OllamaClient {
             .send()
             .await
             .map_err(|e| {
-                AthenaError::Llm(format!("Cannot reach Ollama at {}: {}", self.config.url, e))
+                SparksError::Llm(format!("Cannot reach Ollama at {}: {}", self.config.url, e))
             })?;
 
         let body: Value = resp.json().await?;
         let models = body["models"]
             .as_array()
-            .ok_or_else(|| AthenaError::Llm("Unexpected Ollama response".into()))?;
+            .ok_or_else(|| SparksError::Llm("Unexpected Ollama response".into()))?;
 
         let available = models.iter().any(|m| {
             m["name"]
@@ -1665,7 +1665,7 @@ impl LlmProvider for OllamaClient {
 
         if !available {
             let names: Vec<&str> = models.iter().filter_map(|m| m["name"].as_str()).collect();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "Model '{}' not found. Available: {:?}",
                 self.config.model, names
             )));
@@ -1833,7 +1833,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = %self.name, %status, "LLM error");
             crate::introspect::record_error();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "{} returned {}: {}",
                 self.name, status, body
             )));
@@ -1861,7 +1861,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .into_iter()
             .next()
             .map(|c| c.message.content)
-            .ok_or_else(|| AthenaError::Llm(format!("{} returned empty choices", self.name)))?;
+            .ok_or_else(|| SparksError::Llm(format!("{} returned empty choices", self.name)))?;
         Ok(content)
     }
 
@@ -1873,7 +1873,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .send()
             .await
             .map_err(|e| {
-                AthenaError::Llm(format!(
+                SparksError::Llm(format!(
                     "Cannot reach {} at {}: {}",
                     self.name, self.config.url, e
                 ))
@@ -1882,7 +1882,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "{} health check failed ({}): {}",
                 self.name, status, body
             )));
@@ -1925,7 +1925,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "{} /models returned {}: {}",
                 self.name, status, body
             )));
@@ -2036,7 +2036,7 @@ impl LlmProvider for OpenAiCompatibleClient {
 
             tracing::error!(provider = %self.name, %status, "LLM error (tools)");
             crate::introspect::record_error();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "{} returned {}: {}",
                 self.name, status, body
             )));
@@ -2055,7 +2055,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| AthenaError::Llm(format!("{} returned empty choices", self.name)))?;
+            .ok_or_else(|| SparksError::Llm(format!("{} returned empty choices", self.name)))?;
 
         let n_tool_calls = choice
             .message
@@ -2160,7 +2160,7 @@ impl LlmProvider for OpenAiCompatibleClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             tracing::error!(provider = %self.name, %status, "LLM stream error");
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "{} returned {}: {}",
                 self.name, status, body
             )));

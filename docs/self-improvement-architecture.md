@@ -1,4 +1,4 @@
-# Athena Self-Improvement Architecture
+# Sparks Self-Improvement Architecture
 
 > Systems that think, adapt, and act with bounded autonomy.
 
@@ -6,7 +6,7 @@
 
 ## Target Operating Model (Spec-Driven)
 
-Athena's long-horizon engineering loop should follow one explicit contract stack:
+Sparks's long-horizon engineering loop should follow one explicit contract stack:
 
 1. `Feature Contract` defines user outcome, scope, constraints, and acceptance criteria.
 2. `Task Contracts` decompose a feature into a DAG of atomic tasks with dependencies.
@@ -47,7 +47,7 @@ flowchart LR
 
 ```mermaid
 graph TB
-    subgraph "SENSE — What Athena Knows About Herself"
+    subgraph "SENSE — What Sparks Knows About Herself"
         LLM_CALLS["LLM Providers<br/>(3 call sites)"]
         LLM_CALLS -->|record_llm_latency| ATOMICS["Global Atomics<br/>latency_avg / call_count"]
 
@@ -68,7 +68,7 @@ graph TB
         COLLECTOR -->|SelfMetrics event| OBSERVER["Observer Bus<br/>(UDS socket)"]
     end
 
-    subgraph "THINK — How Athena Understands Patterns"
+    subgraph "THINK — How Sparks Understands Patterns"
         METRICS -->|injected when self_dev=on| CLASSIFY["Manager::classify()<br/>task routing prompt"]
 
         MEM_SCANNER["spawn_memory_scanner<br/>⏱ every 1h"] -->|"last 50 memories → LLM"| PATTERNS["Memories: category='pattern'"]
@@ -81,7 +81,7 @@ graph TB
         REFACTOR_SCAN -->|"code_structure → LLM analysis"| REFACTOR_MEM["Memories: category='refactoring_opportunity'"]
     end
 
-    subgraph "ACT — How Athena Improves Herself"
+    subgraph "ACT — How Sparks Improves Herself"
         REFACTOR_SCAN -->|"30% × spontaneity gate"| AUTO_TX["auto_tx channel"]
         AUTO_TX --> AUTO_LOOP["Autonomous Task Consumer<br/>(core.rs event loop)"]
         AUTO_LOOP -->|"manager.execute_task()"| EXECUTOR["Executor → CodeStrategy"]
@@ -185,7 +185,7 @@ graph LR
 
 ### Funnel 1: Health Monitor → Diagnose → Auto-Fix
 
-**Purpose**: Athena notices something is wrong with herself and fixes it.
+**Purpose**: Sparks notices something is wrong with herself and fixes it.
 
 ```mermaid
 flowchart TD
@@ -232,7 +232,7 @@ flowchart TD
 
 ### Funnel 2: Index → Analyze → Propose → Refactor
 
-**Purpose**: Athena builds understanding of her own codebase and improves it structurally.
+**Purpose**: Sparks builds understanding of her own codebase and improves it structurally.
 
 ```mermaid
 flowchart TD
@@ -289,7 +289,7 @@ flowchart TD
 
 ### Funnel 3: Interact → Learn → Evolve
 
-**Purpose**: Athena learns from conversations and proactively suggests or makes improvements.
+**Purpose**: Sparks learns from conversations and proactively suggests or makes improvements.
 
 ```mermaid
 flowchart TD
@@ -352,7 +352,7 @@ flowchart TD
 
 ### Funnel 4: Execute → Verify → Self-Heal → Learn
 
-**Purpose**: Every code change Athena makes feeds back into her understanding.
+**Purpose**: Every code change Sparks makes feeds back into her understanding.
 
 ```mermaid
 flowchart TD
@@ -479,7 +479,7 @@ graph TB
 
 ## Bounded Autonomy Ladder
 
-Athena's self-improvement operates at 5 levels of autonomy, each with different gates:
+Sparks's self-improvement operates at 5 levels of autonomy, each with different gates:
 
 ```
 Level 5: AUTONOMOUS REFACTORING

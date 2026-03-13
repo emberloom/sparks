@@ -20,7 +20,7 @@ pub struct SystemMetrics {
     pub total_memory_bytes: u64,
     /// Process CPU usage as a percentage (0.0–100.0).
     pub cpu_percent: f32,
-    /// Number of active Docker containers (Athena-managed).
+    /// Number of active Docker containers (Sparks-managed).
     pub active_containers: u64,
     /// Number of active autonomous tasks in flight.
     pub active_tasks: u64,
@@ -431,7 +431,7 @@ pub fn spawn_metrics_collector(
     });
 }
 
-/// Count active Athena containers via bollard.
+/// Count active Sparks containers via bollard.
 async fn count_containers() -> u64 {
     let docker = match bollard::Docker::connect_with_local_defaults() {
         Ok(d) => d,
@@ -439,7 +439,7 @@ async fn count_containers() -> u64 {
     };
 
     let mut filters = std::collections::HashMap::new();
-    filters.insert("label", vec!["managed_by=athena"]);
+    filters.insert("label", vec!["managed_by=sparks"]);
 
     let opts = bollard::container::ListContainersOptions {
         filters,

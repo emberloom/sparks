@@ -48,10 +48,10 @@ class CandidateResult:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run Athena optimizer tournament.")
+    p = argparse.ArgumentParser(description="Run Sparks optimizer tournament.")
     p.add_argument("--suite", default="eval/benchmark-real-gate.json")
     p.add_argument("--config", default="config.toml")
-    p.add_argument("--athena-bin", default="target/debug/athena")
+    p.add_argument("--sparks-bin", default="target/debug/sparks")
     p.add_argument("--output-dir", default="eval/results")
     p.add_argument("--history-file", default="eval/results/history.jsonl")
     p.add_argument("--cli-tool", default="codex")
@@ -431,8 +431,8 @@ def build_eval_cmd(repo: Path, args: argparse.Namespace, candidate: CandidateSpe
         args.suite,
         "--config",
         args.config,
-        "--athena-bin",
-        args.athena_bin,
+        "--sparks-bin",
+        args.sparks_bin,
         "--output-dir",
         args.output_dir,
         "--history-file",
@@ -764,7 +764,7 @@ def generate_specialized_ghost_profiles(
 
 def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
-        "# Athena Optimizer Tournament",
+        "# Sparks Optimizer Tournament",
         "",
         f"- timestamp_utc: `{payload['timestamp_utc']}`",
         f"- suite: `{payload['suite']}`",

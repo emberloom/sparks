@@ -1,6 +1,6 @@
 # Prompt Scanner
 
-Athena applies an input-layer prompt scanner before LLM/classifier execution for chat and autonomous task intake.
+Sparks applies an input-layer prompt scanner before LLM/classifier execution for chat and autonomous task intake.
 
 ## Enforcement Points
 

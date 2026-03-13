@@ -16,11 +16,11 @@ from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run Athena eval harness matrix across coding CLIs.")
+    p = argparse.ArgumentParser(description="Run Sparks eval harness matrix across coding CLIs.")
     p.add_argument("--tools", default="claude_code,codex,opencode")
     p.add_argument("--suite", default="eval/benchmark-cli-smoke.json")
     p.add_argument("--config", default="config.toml")
-    p.add_argument("--athena-bin", default="target/debug/athena")
+    p.add_argument("--sparks-bin", default="target/debug/sparks")
     p.add_argument("--output-dir", default="eval/results")
     p.add_argument("--history-file", default="eval/results/history.jsonl")
     p.add_argument("--dispatch-context", default="[benchmark_fast_cli]")
@@ -48,8 +48,8 @@ def run_harness_for_tool(args: argparse.Namespace, tool: str) -> dict[str, Any]:
         args.suite,
         "--config",
         args.config,
-        "--athena-bin",
-        args.athena_bin,
+        "--sparks-bin",
+        args.sparks_bin,
         "--output-dir",
         args.output_dir,
         "--history-file",
@@ -107,7 +107,7 @@ def write_summary(output_dir: Path, results: list[dict[str, Any]]) -> tuple[Path
     out_json.write_text(json.dumps({"timestamp_utc": ts, "results": results}, indent=2))
 
     lines = [
-        "# Athena CLI Matrix",
+        "# Sparks CLI Matrix",
         "",
         f"- timestamp_utc: {ts}",
         "",

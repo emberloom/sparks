@@ -1,6 +1,6 @@
 # Session Review & Explainability
 
-Athena records chat/tool/task activity and exposes review and explainability workflows in Telegram.
+Sparks records chat/tool/task activity and exposes review and explainability workflows in Telegram.
 
 ## Scope
 

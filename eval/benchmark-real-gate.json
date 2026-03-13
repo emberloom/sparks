@@ -1,5 +1,5 @@
 {
-  "name": "athena-core-v2-real",
+  "name": "sparks-core-v2-real",
   "description": "Real-task benchmark suite for delivery quality gates (non-smoke).",
   "pass_threshold": 0.7,
   "gate_requirements": {
@@ -16,7 +16,7 @@
     "ghost": "coder",
     "lane": "delivery",
     "risk": "low",
-    "repo": "athena",
+    "repo": "sparks",
     "wait_secs": 300,
     "timeout_secs": 600,
     "outcome_wait_secs": 360,
@@ -58,7 +58,7 @@
       "id": "delivery_cli_contract_guard",
       "lane": "delivery",
       "risk": "low",
-      "goal": "Audit and, if needed, fix coding CLI contract and deterministic fallback policy in src/tools.rs and src/strategy/code.rs. Failure outputs should include [athena_cli_contract] with code/retry_same/fallback fields. Run tests and summarize outcomes.",
+      "goal": "Audit and, if needed, fix coding CLI contract and deterministic fallback policy in src/tools.rs and src/strategy/code.rs. Failure outputs should include [sparks_cli_contract] with code/retry_same/fallback fields. Run tests and summarize outcomes.",
       "test_command": "cargo test -q cli_failure_policy && cargo test -q test_cli_error_policy_classification",
       "expect": {
         "max_changed_files": 4,
@@ -69,7 +69,7 @@
         "must_contain": [
           {
             "file": "src/tools.rs",
-            "text": "[athena_cli_contract]"
+            "text": "[sparks_cli_contract]"
           },
           {
             "file": "src/strategy/code.rs",

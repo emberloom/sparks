@@ -1,6 +1,6 @@
 # MCP Integration
 
-Athena can discover and expose Model Context Protocol (MCP) tools through a config-driven registry.
+Sparks can discover and expose Model Context Protocol (MCP) tools through a config-driven registry.
 
 ## Status
 
@@ -58,5 +58,5 @@ Common setup errors:
 ## Recommended Validation
 
 - start with one server and one explicit tool in `allowed_tools`
-- run `athena ghosts` and a controlled task that calls the MCP tool
+- run `sparks ghosts` and a controlled task that calls the MCP tool
 - monitor observer logs for MCP discovery and execution errors

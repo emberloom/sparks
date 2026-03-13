@@ -1,4 +1,4 @@
-name: Athena Doctor
+name: Sparks Doctor
 
 on:
   workflow_dispatch:
@@ -17,12 +17,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build athena
-        run: cargo build --quiet --bin athena
+      - name: Build sparks
+        run: cargo build --quiet --bin sparks
 
       - name: Run doctor guard
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --skip-llm --ci
 
       - name: Write local-only smoke config
@@ -40,11 +40,11 @@ jobs:
           classifier_model = "qwen2.5:3b"
 
           [db]
-          path = "~/.athena/athena.db"
+          path = "~/.sparks/sparks.db"
 
           [embedding]
           enabled = true
-          model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+          model_dir = "~/.sparks/models/all-MiniLM-L6-v2"
 
           [ticket_intake]
           enabled = false
@@ -59,12 +59,12 @@ jobs:
 
       - name: Local-only doctor smoke (config invariants)
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- --config /tmp/local-only-smoke.toml doctor --skip-llm --ci --fail-on-warn
 
       - name: Local-only negative drift example (langfuse enabled should fail)
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: |
           cat > /tmp/local-only-drift.toml <<'EOF'
           [runtime]
@@ -79,11 +79,11 @@ jobs:
           classifier_model = "qwen2.5:3b"
 
           [db]
-          path = "~/.athena/athena.db"
+          path = "~/.sparks/sparks.db"
 
           [embedding]
           enabled = true
-          model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+          model_dir = "~/.sparks/models/all-MiniLM-L6-v2"
 
           [ticket_intake]
           enabled = false
@@ -108,7 +108,7 @@ jobs:
 
       - name: Generate security attestation (JSON)
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --security --json --skip-llm > security-attestation.json
 
       - name: Enforce security attestation gate

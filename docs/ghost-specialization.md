@@ -1,6 +1,6 @@
 # Ghost Specialization Policy
 
-Athena can auto-select autonomous task ghosts using KPI history instead of a static default.
+Sparks can auto-select autonomous task ghosts using KPI history instead of a static default.
 
 ## Scope
 

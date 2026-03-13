@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::GhostConfig;
 use crate::docker::DockerSession;
 use crate::dynamic_tools;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::knobs::SharedKnobs;
 use crate::llm::ToolSchema;
 use crate::mcp::{DiscoveredMcpTool, McpRegistry};
@@ -183,7 +183,7 @@ impl Tool for ShellTool {
         let cmd = params
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("shell: missing 'command' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("shell: missing 'command' param".into()))?;
 
         let output = session.exec(cmd).await?;
         Ok(ToolResult {
@@ -223,7 +223,7 @@ impl Tool for FileReadTool {
         let path = params
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_read: missing 'path' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_read: missing 'path' param".into()))?;
 
         if let Err(reason) = validate_path(path) {
             return Ok(ToolResult {
@@ -272,11 +272,11 @@ impl Tool for FileWriteTool {
         let path = params
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_write: missing 'path' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_write: missing 'path' param".into()))?;
         let content = params
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_write: missing 'content' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_write: missing 'content' param".into()))?;
 
         if let Err(reason) = validate_path(path) {
             return Ok(ToolResult {
@@ -327,15 +327,15 @@ impl Tool for FileEditTool {
         let path = params
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_edit: missing 'path' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_edit: missing 'path' param".into()))?;
         let old_string = params
             .get("old_string")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_edit: missing 'old_string' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_edit: missing 'old_string' param".into()))?;
         let new_string = params
             .get("new_string")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("file_edit: missing 'new_string' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("file_edit: missing 'new_string' param".into()))?;
 
         if let Err(reason) = validate_path(path) {
             return Ok(ToolResult {
@@ -415,7 +415,7 @@ impl Tool for GrepTool {
         let pattern = params
             .get("pattern")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("grep: missing 'pattern' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("grep: missing 'pattern' param".into()))?;
         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let include = params.get("include").and_then(|v| v.as_str());
 
@@ -493,7 +493,7 @@ impl Tool for GlobTool {
         let pattern = params
             .get("pattern")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("glob: missing 'pattern' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("glob: missing 'pattern' param".into()))?;
         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         // Validate search path
@@ -601,7 +601,7 @@ impl WebFetchTool {
     fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .user_agent("Athena/0.1")
+            .user_agent("Sparks/0.1")
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -640,7 +640,7 @@ impl Tool for WebFetchTool {
         let url = params
             .get("url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("web_fetch: missing 'url' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("web_fetch: missing 'url' param".into()))?;
 
         if let Err(reason) = validate_url(url) {
             return Ok(ToolResult {
@@ -654,7 +654,7 @@ impl Tool for WebFetchTool {
             .get(url)
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("web_fetch: request failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("web_fetch: request failed: {}", e)))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -668,7 +668,7 @@ impl Tool for WebFetchTool {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| AthenaError::Tool(format!("web_fetch: read failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("web_fetch: read failed: {}", e)))?;
 
         if bytes.len() > 1_048_576 {
             return Ok(ToolResult {
@@ -697,7 +697,7 @@ impl WebSearchTool {
     fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
-            .user_agent("Athena/0.1")
+            .user_agent("Sparks/0.1")
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -737,7 +737,7 @@ impl Tool for WebSearchTool {
         let query = params
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("web_search: missing 'query' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("web_search: missing 'query' param".into()))?;
         let num_results = params
             .get("num_results")
             .and_then(|v| v.as_u64())
@@ -750,7 +750,7 @@ impl Tool for WebSearchTool {
             .query(&[("q", query)])
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("web_search: request failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("web_search: request failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Ok(ToolResult {
@@ -762,7 +762,7 @@ impl Tool for WebSearchTool {
         let body = response
             .text()
             .await
-            .map_err(|e| AthenaError::Tool(format!("web_search: read failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("web_search: read failed: {}", e)))?;
 
         // Parse results from DuckDuckGo HTML
         let re_result =
@@ -1224,10 +1224,10 @@ impl Tool for DiffTool {
 
 const CLI_OUTPUT_LEN: usize = 16_000;
 const CLI_TIMEOUT_SECS_DEFAULT: u64 = 3600; // 1 hour
-const CLI_CONTRACT_PREFIX: &str = "[athena_cli_contract]";
+const CLI_CONTRACT_PREFIX: &str = "[sparks_cli_contract]";
 
 fn cli_timeout_secs() -> u64 {
-    std::env::var("ATHENA_CLI_TIMEOUT_SECS")
+    std::env::var("SPARKS_CLI_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
@@ -1386,11 +1386,11 @@ async fn run_cli_tool(
 /// Build an enriched prompt for CLI coding tools.
 /// Prepends optional context the ghost provides (files it read, constraints, etc.)
 /// so the coding agent starts with full awareness.
-fn build_cli_prompt(params: &Value) -> std::result::Result<String, AthenaError> {
+fn build_cli_prompt(params: &Value) -> std::result::Result<String, SparksError> {
     let prompt = params
         .get("prompt")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| AthenaError::Tool("missing 'prompt' param".into()))?;
+        .ok_or_else(|| SparksError::Tool("missing 'prompt' param".into()))?;
 
     let context = params.get("context").and_then(|v| v.as_str());
     let files = params.get("files").and_then(|v| v.as_str()); // optional: key file contents
@@ -1647,7 +1647,7 @@ impl Tool for GhTool {
         let subcommand = params
             .get("subcommand")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("gh: missing 'subcommand' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("gh: missing 'subcommand' param".into()))?;
 
         let parts: Vec<&str> = subcommand.split_whitespace().collect();
         if parts.is_empty() {
@@ -1827,7 +1827,7 @@ impl ManageToolsTool {
         }
 
         let entries = std::fs::read_dir(&self.tools_path)
-            .map_err(|e| AthenaError::Tool(format!("Failed to read tools directory: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to read tools directory: {}", e)))?;
 
         let mut tools = Vec::new();
         for entry in entries {
@@ -1868,11 +1868,11 @@ impl ManageToolsTool {
     }
 
     fn handle_create(&self, name: &str, yaml_content: &str) -> Result<ToolResult> {
-        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+        Self::validate_name(name).map_err(|e| SparksError::Tool(e))?;
 
         // Validate YAML parses as a valid tool definition
         let def: dynamic_tools::DynamicToolDefinition = serde_yaml::from_str(yaml_content)
-            .map_err(|e| AthenaError::Tool(format!("Invalid tool YAML: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Invalid tool YAML: {}", e)))?;
 
         // Name consistency check
         if def.name != name {
@@ -1895,11 +1895,11 @@ impl ManageToolsTool {
 
         // Ensure directory exists
         std::fs::create_dir_all(&self.tools_path)
-            .map_err(|e| AthenaError::Tool(format!("Failed to create tools directory: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to create tools directory: {}", e)))?;
 
         let file_path = self.tools_path.join(format!("{}.yml", name));
         std::fs::write(&file_path, yaml_content)
-            .map_err(|e| AthenaError::Tool(format!("Failed to write tool file: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to write tool file: {}", e)))?;
 
         Ok(ToolResult {
             success: true,
@@ -1908,11 +1908,11 @@ impl ManageToolsTool {
     }
 
     fn handle_edit(&self, name: &str, yaml_content: &str) -> Result<ToolResult> {
-        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+        Self::validate_name(name).map_err(|e| SparksError::Tool(e))?;
 
         // Validate YAML
         let def: dynamic_tools::DynamicToolDefinition = serde_yaml::from_str(yaml_content)
-            .map_err(|e| AthenaError::Tool(format!("Invalid tool YAML: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Invalid tool YAML: {}", e)))?;
 
         if def.name != name {
             return Ok(ToolResult {
@@ -1935,7 +1935,7 @@ impl ManageToolsTool {
         };
 
         std::fs::write(&file_path, yaml_content)
-            .map_err(|e| AthenaError::Tool(format!("Failed to write tool file: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to write tool file: {}", e)))?;
 
         Ok(ToolResult {
             success: true,
@@ -1944,7 +1944,7 @@ impl ManageToolsTool {
     }
 
     fn handle_delete(&self, name: &str) -> Result<ToolResult> {
-        Self::validate_name(name).map_err(|e| AthenaError::Tool(e))?;
+        Self::validate_name(name).map_err(|e| SparksError::Tool(e))?;
 
         let file_path = match self.find_tool_file(name) {
             Some(p) => p,
@@ -1957,7 +1957,7 @@ impl ManageToolsTool {
         };
 
         std::fs::remove_file(&file_path)
-            .map_err(|e| AthenaError::Tool(format!("Failed to delete tool file: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to delete tool file: {}", e)))?;
 
         Ok(ToolResult {
             success: true,
@@ -2012,31 +2012,31 @@ Usage: {"tool": "manage_tools", "params": {"action": "list|create|edit|delete", 
         let action = params
             .get("action")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AthenaError::Tool("manage_tools: missing 'action' param".into()))?;
+            .ok_or_else(|| SparksError::Tool("manage_tools: missing 'action' param".into()))?;
 
         match action {
             "list" => self.handle_list(),
             "create" => {
                 let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AthenaError::Tool("manage_tools: 'create' requires 'name' param".into())
+                    SparksError::Tool("manage_tools: 'create' requires 'name' param".into())
                 })?;
                 let yaml = params.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AthenaError::Tool("manage_tools: 'create' requires 'yaml' param".into())
+                    SparksError::Tool("manage_tools: 'create' requires 'yaml' param".into())
                 })?;
                 self.handle_create(name, yaml)
             }
             "edit" => {
                 let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AthenaError::Tool("manage_tools: 'edit' requires 'name' param".into())
+                    SparksError::Tool("manage_tools: 'edit' requires 'name' param".into())
                 })?;
                 let yaml = params.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AthenaError::Tool("manage_tools: 'edit' requires 'yaml' param".into())
+                    SparksError::Tool("manage_tools: 'edit' requires 'yaml' param".into())
                 })?;
                 self.handle_edit(name, yaml)
             }
             "delete" => {
                 let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-                    AthenaError::Tool("manage_tools: 'delete' requires 'name' param".into())
+                    SparksError::Tool("manage_tools: 'delete' requires 'name' param".into())
                 })?;
                 self.handle_delete(name)
             }
@@ -2784,7 +2784,7 @@ mod tests {
             120,
             "codex: timed out after 120s",
         );
-        assert!(out.contains("[athena_cli_contract]"));
+        assert!(out.contains("[sparks_cli_contract]"));
         assert!(out.contains("tool=codex"));
         assert!(out.contains("code=cli_timeout"));
         assert!(out.contains("fallback=true"));
@@ -2793,7 +2793,7 @@ mod tests {
     #[test]
     fn test_claude_code_session_conflict_contract_marker() {
         let out = claude_code_session_conflict_output();
-        assert!(out.contains("[athena_cli_contract]"));
+        assert!(out.contains("[sparks_cli_contract]"));
         assert!(out.contains("tool=claude_code"));
         assert!(out.contains("code=session_conflict"));
         assert!(out.contains("fallback=true"));
@@ -2813,7 +2813,7 @@ mod tests {
 
     #[test]
     fn test_manage_tools_create_and_list() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_create");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_create");
         let _ = std::fs::remove_dir_all(&dir);
         let tool = ManageToolsTool::new(dir.clone());
 
@@ -2840,7 +2840,7 @@ allowed_commands: ["df"]
 
     #[test]
     fn test_manage_tools_edit() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_edit");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_edit");
         let _ = std::fs::remove_dir_all(&dir);
         let tool = ManageToolsTool::new(dir.clone());
 
@@ -2865,7 +2865,7 @@ command: "echo v2"
 
     #[test]
     fn test_manage_tools_delete() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_delete");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_delete");
         let _ = std::fs::remove_dir_all(&dir);
         let tool = ManageToolsTool::new(dir.clone());
 
@@ -2885,7 +2885,7 @@ command: "echo hi"
 
     #[test]
     fn test_manage_tools_name_mismatch() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_mismatch");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_mismatch");
         let _ = std::fs::remove_dir_all(&dir);
         let tool = ManageToolsTool::new(dir.clone());
 
@@ -2902,7 +2902,7 @@ command: "echo hi"
 
     #[test]
     fn test_manage_tools_invalid_yaml() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_bad_yaml");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_bad_yaml");
         let _ = std::fs::remove_dir_all(&dir);
         let tool = ManageToolsTool::new(dir.clone());
 
@@ -2914,7 +2914,7 @@ command: "echo hi"
 
     #[test]
     fn test_manage_tools_needs_confirmation() {
-        let dir = std::env::temp_dir().join("athena_test_manage_tools_confirm");
+        let dir = std::env::temp_dir().join("sparks_test_manage_tools_confirm");
         let tool = ManageToolsTool::new(dir);
         assert!(
             tool.needs_confirmation(),

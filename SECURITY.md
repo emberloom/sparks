@@ -27,21 +27,21 @@ Include:
 
 ## Local-Only Operation
 
-Athena supports an explicit local runtime profile:
+Sparks supports an explicit local runtime profile:
 
 - set `[runtime].profile = "local_only"`
 - set `[llm].provider = "ollama"` with loopback URL (`localhost`, `127.0.0.1`, or `::1`)
 - disable outbound integrations (`langfuse`, ticket intake sources/webhook)
 
-Use `athena doctor` to verify readiness and detect drift:
+Use `sparks doctor` to verify readiness and detect drift:
 
-- `athena doctor --skip-llm --ci --fail-on-warn` for config/invariant checks
-- `athena doctor --ci --fail-on-warn` for live local Ollama reachability
+- `sparks doctor --skip-llm --ci --fail-on-warn` for config/invariant checks
+- `sparks doctor --ci --fail-on-warn` for live local Ollama reachability
 
 Reference guide: `docs/local-only-deployment.md`
 
 ## Scope and Limits
 
-- `local_only` constrains Athena runtime configuration and integrations.
+- `local_only` constrains Sparks runtime configuration and integrations.
 - Ghost execution is container-hardened by default (`network_mode=none`, dropped capabilities, read-only rootfs).
 - Host-level outbound controls (firewall/egress policy) remain operator responsibility.

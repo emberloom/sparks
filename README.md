@@ -1,16 +1,14 @@
 <div align="center">
 
-<img src="docs/athena-banner.png" alt="Athena" width="838" />
-
-<h1>Athena</h1>
+<h1>Emberloom Sparks</h1>
 
 <p><strong>Self-hosted multi-agent orchestrator with a hardened execution sandbox,<br>
 semantic memory, and deep observability — built in Rust.</strong></p>
 
-[![CI](https://github.com/Enreign/athena/actions/workflows/maintainability.yml/badge.svg)](https://github.com/Enreign/athena/actions/workflows/maintainability.yml)
+[![CI](https://github.com/emberloom/sparks/actions/workflows/maintainability.yml/badge.svg)](https://github.com/emberloom/sparks/actions/workflows/maintainability.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/github/v/tag/Enreign/athena?label=version&color=blue)](https://github.com/Enreign/athena/releases)
+[![Version](https://img.shields.io/github/v/tag/emberloom/sparks?label=version&color=blue)](https://github.com/emberloom/sparks/releases)
 [![Status](https://img.shields.io/badge/status-active%20development-yellow.svg)](CHANGELOG.md)
 
 <br>
@@ -22,20 +20,20 @@ semantic memory, and deep observability — built in Rust.</strong></p>
 
 ---
 
-## What is Athena?
+## What is Sparks?
 
 > [!WARNING]
-> **Early development.** Athena is actively developed and the internals change frequently. Expect rough edges, incomplete features, and breaking changes between versions. Bug reports and PRs are welcome.
+> **Early development.** Sparks is actively developed and the internals change frequently. Expect rough edges, incomplete features, and breaking changes between versions. Bug reports and PRs are welcome.
 
-Athena is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
+Sparks is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
 
 Named sub-agents called **ghosts** run inside hardened Docker containers and execute tasks using configurable tool sets and execution strategies. A classifier model routes tasks to the right ghost, informed by historical KPI outcomes. A persistent memory layer with ONNX embeddings and recency decay accumulates cross-session context. External tools are wired in via an MCP client registry with namespaced tool exposure and allowlist controls. A structured observability stack — event streams, Langfuse traces, KPI snapshots, and a `doctor` diagnostic command — makes system behavior inspectable at every level.
 
 ---
 
-## Why Athena?
+## Why Sparks?
 
-| | Athena | Typical self-hosted agent |
+| | Sparks | Typical self-hosted agent |
 |---|---|---|
 | **Sandbox hardening** | CAP_DROP ALL, read-only rootfs, SSRF/path-traversal blocking, PID+memory limits | Docker run with default caps |
 | **Memory** | ONNX embeddings locally, HNSW index, recency decay, FTS5, deduplication | None, or external embedding API |
@@ -72,7 +70,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
   - [OpenAI-Compatible API](#openai-compatible-api)
   - [Configuration & Runtime Control](#configuration--runtime-control)
   - [Proactive & Personality](#proactive--personality-experimental)
-  - [What Athena Does Not Do (Yet)](#what-athena-does-not-do-yet)
+  - [What Sparks Does Not Do (Yet)](#what-sparks-does-not-do-yet)
 - [Architecture](#architecture)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -87,7 +85,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
 
 ```bash
 # 1. Clone
-git clone https://github.com/Enreign/athena.git && cd athena
+git clone https://github.com/emberloom/sparks.git && cd sparks
 
 # 2. Configure
 cp config.example.toml config.toml
@@ -102,9 +100,9 @@ cargo run --quiet -- doctor --skip-llm
 cargo run -- chat
 ```
 
-> **Deterministic local mode** (no `~/.athena` overrides, no LLM required for listing):
+> **Deterministic local mode** (no `~/.sparks` overrides, no LLM required for listing):
 > ```bash
-> ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- ghosts
+> SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- ghosts
 > ```
 
 Fully local deployment profile + verification: [`docs/local-only-deployment.md`](docs/local-only-deployment.md)
@@ -115,7 +113,7 @@ Fully local deployment profile + verification: [`docs/local-only-deployment.md`]
 
 ### Execution & Sandboxing
 
-Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
+Sparks's Docker sandbox applies layered hardening beyond a typical `docker run`:
 
 - **CAP_DROP ALL** — all Linux capabilities dropped from every ghost container
 - **Read-only root filesystem** — containers cannot modify their own image
@@ -146,7 +144,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 - **Multi-phase pipeline** — EXPLORE → EXECUTE → VERIFY → HEAL phases per task
 - **Async dispatch** — tasks run concurrently via an internal mpsc task queue
 - **Docker isolation** — each ghost execution gets a fresh container; no shared state between runs
-- **Custom profiles** — define new ghost types in `config.toml` or `~/.athena/ghosts/*.toml`
+- **Custom profiles** — define new ghost types in `config.toml` or `~/.sparks/ghosts/*.toml`
 
 ### Planning & Orchestration
 
@@ -196,7 +194,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
   - Sensitive pattern blocklist, auto-approve patterns per ghost
 - **LLM providers** — OpenAI, Ollama (local), OpenRouter, Zen — swap via config with no code changes
 - **Cron scheduling** — POSIX cron, interval-with-jitter, and one-shot scheduling for background tasks
-- **Secret management** — OS keyring via `athena secrets set <key>`; inline secrets in config are blocked by default
+- **Secret management** — OS keyring via `sparks secrets set <key>`; inline secrets in config are blocked by default
 
 ### Proactive & Personality (Experimental)
 
@@ -205,7 +203,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 - **Conversation re-entry** — autonomously resumes threads based on past context
 - **Telegram front-end** — multi-step planning interview with inline keyboards; voice input via Telegram speech-to-text; quiet-hours-aware pulse delivery
 
-### What Athena Does Not Do (Yet)
+### What Sparks Does Not Do (Yet)
 
 - **No IDE integration** — CLI and Telegram only
 - **No git worktree workspace isolation** — parallel agents share the working tree; Docker-based isolation only
@@ -348,7 +346,7 @@ tools       = ["file_read", "file_write", "shell", "git", "gh"]
 strategy    = "code"
 ```
 
-Secrets (API keys, tokens) go in a gitignored `.env` file or the OS keyring (`athena secrets set <key>`).
+Secrets (API keys, tokens) go in a gitignored `.env` file or the OS keyring (`sparks secrets set <key>`).
 Inline credentials in `config.toml` are blocked by default. See [`config.example.toml`](config.example.toml) for all sections.
 
 ---
@@ -399,4 +397,4 @@ Real-gate and nightly optimizer workflows are intentionally self-hosted.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [LICENSE](LICENSE) · [CHANGELOG.md](CHANGELOG.md)
 
-Questions and bug reports → [GitHub Issues](https://github.com/Enreign/athena/issues)
+Questions and bug reports → [GitHub Issues](https://github.com/emberloom/sparks/issues)

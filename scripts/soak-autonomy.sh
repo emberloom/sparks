@@ -31,9 +31,9 @@ echo "$$" > "$PID_FILE"
   echo "LOG_PATH=$LOG_PATH"
 } > "$STATE_FILE"
 
-if [[ ! -x "$ROOT_DIR/target/debug/athena" ]]; then
-  echo "Building athena binary..."
-  cargo build -q --bin athena
+if [[ ! -x "$ROOT_DIR/target/debug/sparks" ]]; then
+  echo "Building sparks binary..."
+  cargo build -q --bin sparks
 fi
 
 pass_count=0
@@ -65,28 +65,28 @@ while (( $(date +%s) < end_epoch )); do
   echo "" | tee -a "$LOG_PATH"
   echo "==== ITERATION $iter @ $iter_ts ====" | tee -a "$LOG_PATH"
 
-  run_step doctor "$ROOT_DIR/target/debug/athena" --config "$ROOT_DIR/config.toml" doctor --skip-llm --ci || true
+  run_step doctor "$ROOT_DIR/target/debug/sparks" --config "$ROOT_DIR/config.toml" doctor --skip-llm --ci || true
 
   run_step eval_cli_matrix \
     python3 "$ROOT_DIR/scripts/eval_cli_matrix.py" \
       --suite "$ROOT_DIR/eval/benchmark-cli-smoke.json" \
       --config "$ROOT_DIR/config.toml" \
-      --athena-bin "$ROOT_DIR/target/debug/athena" \
+      --sparks-bin "$ROOT_DIR/target/debug/sparks" \
       --dispatch-context "[benchmark_fast_cli]" \
       --cli-timeout-secs 120 || true
 
   run_step kpi_self_improvement_low \
-    "$ROOT_DIR/target/debug/athena" --config "$ROOT_DIR/config.toml" \
-      kpi snapshot --lane self_improvement --repo athena --risk low || true
+    "$ROOT_DIR/target/debug/sparks" --config "$ROOT_DIR/config.toml" \
+      kpi snapshot --lane self_improvement --repo sparks --risk low || true
 
   run_step kpi_delivery_low \
-    "$ROOT_DIR/target/debug/athena" --config "$ROOT_DIR/config.toml" \
-      kpi snapshot --lane delivery --repo athena --risk low || true
+    "$ROOT_DIR/target/debug/sparks" --config "$ROOT_DIR/config.toml" \
+      kpi snapshot --lane delivery --repo sparks --risk low || true
 
   run_step eval_dashboard \
     python3 "$ROOT_DIR/scripts/eval_dashboard.py" \
       --config "$ROOT_DIR/config.toml" \
-      --repo athena || true
+      --repo sparks || true
 
   run_step maintainability_current \
     python3 "$ROOT_DIR/scripts/maintainability_check.py" \

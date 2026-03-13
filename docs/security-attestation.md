@@ -1,6 +1,6 @@
-# Security Attestation (`athena doctor --security`)
+# Security Attestation (`sparks doctor --security`)
 
-Athena can emit a falsifiable security posture report for each configured ghost.
+Sparks can emit a falsifiable security posture report for each configured ghost.
 
 ## Commands
 
@@ -14,7 +14,7 @@ Athena can emit a falsifiable security posture report for each configured ghost.
 ## Text Output Example
 
 ```text
-Athena Security Attestation
+Sparks Security Attestation
 Schema: v1
 Generated: 2026-03-03T12:34:56.789Z
 Overall: PASS (ghosts=2, failing_ghosts=0, pass=20, warn=0, fail=0)

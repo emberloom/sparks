@@ -139,53 +139,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "athena"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bollard",
- "chrono",
- "clap",
- "cron",
- "dirs",
- "dotenvy",
- "futures",
- "hex",
- "hmac",
- "hnsw_rs",
- "humantime",
- "keyring",
- "ndarray",
- "notify",
- "ort",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "rpassword",
- "rusqlite",
- "rustyline",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "sysinfo",
- "teloxide",
- "thiserror 2.0.18",
- "tokenizers",
- "tokio",
- "tokio-stream",
- "toml",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3258,6 +3211,53 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "sparks"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bollard",
+ "chrono",
+ "clap",
+ "cron",
+ "dirs",
+ "dotenvy",
+ "futures",
+ "hex",
+ "hmac",
+ "hnsw_rs",
+ "humantime",
+ "keyring",
+ "ndarray",
+ "notify",
+ "ort",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "rpassword",
+ "rusqlite",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sysinfo",
+ "teloxide",
+ "thiserror 2.0.18",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]

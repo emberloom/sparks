@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::confirm::Confirmer;
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{
@@ -258,7 +258,7 @@ impl ReactStrategy {
             }
         }
 
-        Err(AthenaError::StepLimitExceeded(max_steps))
+        Err(SparksError::StepLimitExceeded(max_steps))
     }
 
     /// Text fallback path: existing implementation using `Message` + `chat()` + `extract_json()`.
@@ -314,7 +314,7 @@ impl ReactStrategy {
             history.push(Message::user(&tool_output));
         }
 
-        Err(AthenaError::StepLimitExceeded(max_steps))
+        Err(SparksError::StepLimitExceeded(max_steps))
     }
 }
 

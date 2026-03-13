@@ -1,4 +1,4 @@
-use crate::error::AthenaError;
+use crate::error::SparksError;
 use crate::memory::MemoryStore;
 use crate::strategy::TaskContract;
 use serde_json::Value;
@@ -404,12 +404,12 @@ fn fix_tool_error_env(
 
 /// Analyzes a tool execution error and attempts to generate a self-healing task.
 pub fn attempt_fix(
-    error: &AthenaError,
+    error: &SparksError,
     original_tool_name: &str,
     original_tool_params: &Value,
 ) -> Option<TaskContract> {
     match error {
-        AthenaError::Tool(message) => {
+        SparksError::Tool(message) => {
             let message_lower = message.to_lowercase();
             let params_pretty =
                 serde_json::to_string_pretty(original_tool_params).unwrap_or_default();
@@ -424,7 +424,7 @@ pub fn attempt_fix(
                 fix_tool_error_build(message, &message_lower, original_tool_name, &params_pretty)
             })
         }
-        AthenaError::Timeout(seconds) => {
+        SparksError::Timeout(seconds) => {
             let context = format!(
                 "The operation timed out after {}s while calling tool '{}' with parameters: {}.",
                 seconds,
@@ -446,7 +446,7 @@ pub fn attempt_fix(
                 "You are a senior engineer ghost focused on reliability. Adjust the workflow to avoid timeouts.".to_string(),
             ))
         }
-        AthenaError::Docker(message) => {
+        SparksError::Docker(message) => {
             let context = format!(
                 "A Docker-related error occurred while calling tool '{}' with parameters: {}.\nError message: {}",
                 original_tool_name,

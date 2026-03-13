@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum AthenaError {
+pub enum SparksError {
     #[error("LLM error: {0}")]
     Llm(String),
 
@@ -30,16 +30,16 @@ pub enum AthenaError {
     Internal(String),
 }
 
-impl From<bollard::errors::Error> for AthenaError {
+impl From<bollard::errors::Error> for SparksError {
     fn from(e: bollard::errors::Error) -> Self {
-        AthenaError::Docker(e.to_string())
+        SparksError::Docker(e.to_string())
     }
 }
 
-impl From<reqwest::Error> for AthenaError {
+impl From<reqwest::Error> for SparksError {
     fn from(e: reqwest::Error) -> Self {
-        AthenaError::Llm(e.to_string())
+        SparksError::Llm(e.to_string())
     }
 }
 
-pub type Result<T> = std::result::Result<T, AthenaError>;
+pub type Result<T> = std::result::Result<T, SparksError>;

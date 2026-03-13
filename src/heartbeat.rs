@@ -18,7 +18,7 @@ fn load_heartbeat_items(path: &Option<String>) -> Vec<String> {
             // Default location
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".athena")
+                .join(".sparks")
                 .join("souls")
                 .join("HEARTBEAT.md")
         }

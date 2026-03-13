@@ -1,11 +1,11 @@
 #!/bin/bash
 # Demo wrapper for VHS recording.
-# Passes all commands to the real athena binary EXCEPT `dispatch`,
+# Passes all commands to the real sparks binary EXCEPT `dispatch`,
 # which prints pre-canned output line-by-line with delays.
 #
-# Usage: alias athena='bash scripts/demo-wrapper.sh'
+# Usage: alias sparks='bash scripts/demo-wrapper.sh'
 
-REAL_ATHENA="cargo run --quiet --"
+REAL_SPARKS="cargo run --quiet --"
 
 p() {
   echo "$1"
@@ -45,6 +45,6 @@ case "$1" in
     echo ""
     ;;
   *)
-    $REAL_ATHENA "$@" 2>/dev/null
+    $REAL_SPARKS "$@" 2>/dev/null
     ;;
 esac

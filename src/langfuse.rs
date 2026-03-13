@@ -102,7 +102,7 @@ impl LangfuseClient {
             "name": "mission:kpi_snapshot",
             "timestamp": now_iso(),
             "sessionId": repo,
-            "userId": "athena",
+            "userId": "sparks",
             "tags": ["mission", "kpi", lane, risk_tier],
             "input": {
                 "lane": lane,

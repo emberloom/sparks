@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# basic-dispatch.sh — minimal Athena workflow demo
+# basic-dispatch.sh — minimal Sparks workflow demo
 #
 # 1. Ensures config.toml exists
 # 2. Runs doctor (no LLM required)
@@ -29,13 +29,13 @@ cargo run --quiet -- doctor --skip-llm
 # ── 3. List ghosts ────────────────────────────────────────────────────────────
 echo ""
 echo "── Available ghost agents ──────────────────────────────────────────────"
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run --quiet -- ghosts
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run --quiet -- ghosts
 
 # ── 4. Dispatch task ──────────────────────────────────────────────────────────
 echo ""
 echo "── Dispatching sample task (wait up to 60s) ────────────────────────────"
 cargo run --quiet -- dispatch \
-  --goal "Print the string 'hello from Athena' to stdout using a shell command." \
+  --goal "Print the string 'hello from Sparks' to stdout using a shell command." \
   --ghost coder \
   --wait-secs 60
 

@@ -92,7 +92,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=[],
             ghost_breakdown=[],
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="high",
             ghost_min_samples=3,
@@ -105,10 +105,10 @@ class EvalDashboardTests(unittest.TestCase):
     def test_query_kpi_snapshot_trend_filters_and_orders(self) -> None:
         conn = _setup_conn()
         rows = [
-            ("delivery", "athena", "low", "2026-03-01 01:00:00", 0.50, 0.60, 0.10, 10, 5, 5),
-            ("delivery", "athena", "low", "2026-03-01 03:00:00", 0.70, 0.80, 0.05, 12, 9, 3),
-            ("delivery", "athena", "medium", "2026-03-01 02:00:00", 0.55, 0.65, 0.12, 8, 4, 4),
-            ("self_improvement", "athena", "low", "2026-03-01 02:00:00", 0.90, 0.95, 0.01, 6, 6, 0),
+            ("delivery", "sparks", "low", "2026-03-01 01:00:00", 0.50, 0.60, 0.10, 10, 5, 5),
+            ("delivery", "sparks", "low", "2026-03-01 03:00:00", 0.70, 0.80, 0.05, 12, 9, 3),
+            ("delivery", "sparks", "medium", "2026-03-01 02:00:00", 0.55, 0.65, 0.12, 8, 4, 4),
+            ("self_improvement", "sparks", "low", "2026-03-01 02:00:00", 0.90, 0.95, 0.01, 6, 6, 0),
             ("delivery", "other", "low", "2026-03-01 02:00:00", 0.33, 0.40, 0.25, 3, 1, 2),
         ]
         conn.executemany(
@@ -127,7 +127,7 @@ class EvalDashboardTests(unittest.TestCase):
 
         trend = eval_dashboard.query_kpi_snapshot_trend(
             conn,
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="low",
             limit=20,
@@ -141,7 +141,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=trend,
             ghost_breakdown=[],
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="low",
             ghost_min_samples=3,
@@ -155,7 +155,7 @@ class EvalDashboardTests(unittest.TestCase):
             """
             INSERT INTO autonomous_task_outcomes
             (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, rolled_back)
-            VALUES (?, 'delivery', 'athena', 'low', ?, 'goal', ?, datetime('now','-1 minute'), datetime('now'), ?)
+            VALUES (?, 'delivery', 'sparks', 'low', ?, 'goal', ?, datetime('now','-1 minute'), datetime('now'), ?)
             """,
             [
                 ("t1", "coder", "succeeded", 0),
@@ -167,7 +167,7 @@ class EvalDashboardTests(unittest.TestCase):
 
         ghosts = eval_dashboard.query_ghost_breakdown(
             conn,
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="low",
             min_samples=3,
@@ -181,7 +181,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=[],
             ghost_breakdown=ghosts,
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="low",
             ghost_min_samples=3,
@@ -269,7 +269,7 @@ class EvalDashboardTests(unittest.TestCase):
             INSERT INTO autonomous_task_outcomes (
                 task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at,
                 verification_total, verification_passed, rolled_back, error
-            ) VALUES (?, 'delivery', 'athena', 'low', 'coder', 'goal', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, 'delivery', 'sparks', 'low', 'coder', 'goal', ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 ("o1", "succeeded", "2026-03-01 01:00:00", "2026-03-01 01:05:00", 1, 1, 0, ""),
@@ -313,7 +313,7 @@ class EvalDashboardTests(unittest.TestCase):
             history=[],
             history_source_exists=False,
             kpi_trend=[],
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter="delivery",
             risk_filter="low",
             routing_cohort_split=0.5,
@@ -330,7 +330,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=[],
             ghost_breakdown=[],
-            repo_name="athena",
+            repo_name="sparks",
             observability=observability,
         )
         self.assertIn("Routing Quality Trend (Early vs Late Cohorts)", md)
@@ -343,7 +343,7 @@ class EvalDashboardTests(unittest.TestCase):
             history=[],
             history_source_exists=False,
             kpi_trend=[],
-            repo_name="athena",
+            repo_name="sparks",
             lane_filter=None,
             risk_filter=None,
             routing_cohort_split=0.5,
@@ -353,7 +353,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=[],
             ghost_breakdown=[],
-            repo_name="athena",
+            repo_name="sparks",
             observability=observability,
         )
         self.assertIn("Source Adapter Status", content)
@@ -437,7 +437,7 @@ class EvalDashboardTests(unittest.TestCase):
             kpis=[],
             kpi_trend=[],
             ghost_breakdown=[],
-            repo_name="athena",
+            repo_name="sparks",
             token_cost_rows=[],
             token_cost_summary={
                 "pricing_version_requested": "v1",

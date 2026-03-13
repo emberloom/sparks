@@ -159,7 +159,7 @@ impl ObserverHandle {
 pub fn socket_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".athena")
+        .join(".sparks")
         .join("observer.sock")
 }
 

@@ -1,14 +1,14 @@
-# Athena Mission Contract
+# Sparks Mission Contract
 
 Date: 2026-02-17
 
 ## Mission Statement
 
-Athena autonomously delivers backlog work across products and continuously improves her own capability, while maintaining quality and safety.
+Sparks autonomously delivers backlog work across products and continuously improves her own capability, while maintaining quality and safety.
 
 ## Mission Contract (Measurable)
 
-Athena can autonomously complete at least 70% of low-risk repository tasks with at least 95% verification pass rate, at most 5% rollback rate, and zero critical safety incidents.
+Sparks can autonomously complete at least 70% of low-risk repository tasks with at least 95% verification pass rate, at most 5% rollback rate, and zero critical safety incidents.
 
 This maps to:
 
@@ -20,7 +20,7 @@ This maps to:
 ## Mission Lanes
 
 - `delivery`: product and feature backlog execution across repos/products.
-- `self_improvement`: reliability and capability improvements in Athena itself.
+- `self_improvement`: reliability and capability improvements in Sparks itself.
 
 Both lanes are measured using the same KPI framework.
 
@@ -53,7 +53,7 @@ Both lanes are measured using the same KPI framework.
   - requires real-gate pass and task-level acceptance checks.
 - `high risk` (security, data migration, production-critical):
   - human-led only.
-  - Athena can draft/verify but cannot promote autonomously.
+  - Sparks can draft/verify but cannot promote autonomously.
 
 ## Program Baseline (2026-02-16 to 2026-02-17)
 
@@ -80,7 +80,7 @@ Phase closeout evidence (2026-02-17):
 
 ## Operating Model (Contract Stack)
 
-Athena should execute work using this explicit chain:
+Sparks should execute work using this explicit chain:
 
 1. `Feature Contract` defines user outcome, architecture bounds, and acceptance criteria.
 2. `Task Contracts` decompose the feature into a DAG with explicit dependencies and done criteria.
@@ -128,14 +128,14 @@ Phase 3 (mission-ready):
 
 ## Tracking Current State vs Evolution
 
-Use `athena kpi`:
+Use `sparks kpi`:
 
 - Current state:
-  - `athena kpi status --lane self_improvement --repo athena --risk medium`
+  - `sparks kpi status --lane self_improvement --repo sparks --risk medium`
 - Persist snapshot:
-  - `athena kpi snapshot --lane self_improvement --repo athena --risk medium`
+  - `sparks kpi snapshot --lane self_improvement --repo sparks --risk medium`
 - Snapshot history (evolution):
-  - `athena kpi history --lane self_improvement --repo athena --limit 30`
+  - `sparks kpi history --lane self_improvement --repo sparks --limit 30`
 
 Recommended cadence:
 
@@ -146,7 +146,7 @@ Tagged attribution source:
 
 - KPI values are derived from lane/risk-tagged autonomous task outcomes when available.
 - Dispatch metadata can be set explicitly from CLI:
-  - `athena dispatch --goal "<...>" --lane delivery --risk medium --repo athena`
+  - `sparks dispatch --goal "<...>" --lane delivery --risk medium --repo sparks`
 - Background autonomous loops emit tagged outcomes under `self_improvement` by default.
 
 ## Langfuse Tracking
@@ -154,7 +154,7 @@ Tagged attribution source:
 KPI evolution can be tracked in Langfuse.
 
 - Command:
-  - `athena kpi snapshot --lane self_improvement --repo athena --risk medium --langfuse`
+  - `sparks kpi snapshot --lane self_improvement --repo sparks --risk medium --langfuse`
 - Export shape:
   - trace event `mission:kpi_snapshot`
   - tags include `mission`, `kpi`, lane, risk tier

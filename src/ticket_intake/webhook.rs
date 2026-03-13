@@ -747,7 +747,7 @@ mod tests {
         TicketIntakeSourceConfig {
             provider: provider.to_string(),
             repo: repo.to_string(),
-            filter_label: Some("athena".to_string()),
+            filter_label: Some("sparks".to_string()),
             api_base: None,
             token_env: None,
             email_env: None,
@@ -826,12 +826,12 @@ mod tests {
     #[test]
     fn labels_match_is_case_insensitive() {
         assert!(labels_match(
-            &["Athena".to_string()],
-            &Some("athena".to_string())
+            &["Sparks".to_string()],
+            &Some("sparks".to_string())
         ));
         assert!(labels_match(
-            &["ATHENA".to_string()],
-            &Some("Athena".to_string())
+            &["SPARKS".to_string()],
+            &Some("Sparks".to_string())
         ));
     }
 
@@ -839,7 +839,7 @@ mod tests {
     fn labels_match_returns_false_when_label_absent() {
         assert!(!labels_match(
             &["other".to_string()],
-            &Some("athena".to_string())
+            &Some("sparks".to_string())
         ));
     }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Mock athena binary for CI harness smoke tests.
+"""Mock sparks binary for CI harness smoke tests.
 
 Implements a minimal subset of:
-  athena --config <path> dispatch --goal <...> --lane <...> --risk <...> --repo <...>
+  sparks --config <path> dispatch --goal <...> --lane <...> --risk <...> --repo <...>
 
 It writes a succeeded row into autonomous_task_outcomes and emits task_id=<uuid> on stderr.
 """
@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 def parse_db_path(config_path: pathlib.Path) -> pathlib.Path:
-    default = pathlib.Path("~/.athena/athena.db").expanduser()
+    default = pathlib.Path("~/.sparks/sparks.db").expanduser()
     if not config_path.exists():
         return default
     text = config_path.read_text()
@@ -94,7 +94,7 @@ def main() -> int:
 
     lane = value_after(rest, "--lane", "delivery")
     risk = value_after(rest, "--risk", "low")
-    repo = value_after(rest, "--repo", "athena")
+    repo = value_after(rest, "--repo", "sparks")
     ghost = value_after(rest, "--ghost", "coder")
     goal = value_after(rest, "--goal", "mock goal")
 

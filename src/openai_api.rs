@@ -144,14 +144,14 @@ fn derive_model_ids(config: &OpenAiApiConfig, core: &CoreHandle) -> Vec<String> 
         return dedup_model_ids(config.advertised_models.iter().map(String::as_str));
     }
 
-    let mut ids = vec!["athena".to_string()];
+    let mut ids = vec!["sparks".to_string()];
     let current_model = core.llm.current_model();
     if !current_model.trim().is_empty() {
         ids.push(current_model);
     }
 
     for ghost in core.list_ghosts() {
-        ids.push(format!("athena/{}", ghost.name));
+        ids.push(format!("sparks/{}", ghost.name));
     }
 
     dedup_model_ids(ids.iter().map(String::as_str))
@@ -170,7 +170,7 @@ fn dedup_model_ids<'a>(models: impl Iterator<Item = &'a str>) -> Vec<String> {
         }
     }
     if out.is_empty() {
-        out.push("athena".to_string());
+        out.push("sparks".to_string());
     }
     out
 }
@@ -191,7 +191,7 @@ async fn handle_models(State(state): State<OpenAiApiState>, headers: HeaderMap) 
             id: id.clone(),
             object: "model",
             created: state.started_at,
-            owned_by: "athena",
+            owned_by: "sparks",
             permission: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -237,7 +237,7 @@ async fn handle_chat_completions(
         return openai_error(
             StatusCode::BAD_REQUEST,
             format!(
-                "Unsupported option '{}' for Athena OpenAI-compatible API.",
+                "Unsupported option '{}' for Sparks OpenAI-compatible API.",
                 option
             ),
             "invalid_request_error",
@@ -258,7 +258,7 @@ async fn handle_chat_completions(
         return openai_error(
             StatusCode::BAD_REQUEST,
             format!(
-                "Model '{}' is not available on this Athena instance.",
+                "Model '{}' is not available on this Sparks instance.",
                 requested_model
             ),
             "invalid_request_error",
@@ -268,7 +268,7 @@ async fn handle_chat_completions(
     if req.stream.unwrap_or(false) {
         return openai_error(
             StatusCode::BAD_REQUEST,
-            "stream=true is not supported by Athena's OpenAI-compatible API.",
+            "stream=true is not supported by Sparks' OpenAI-compatible API.",
             "invalid_request_error",
             Some("stream_not_supported"),
         );
@@ -324,7 +324,7 @@ async fn handle_chat_completions(
             );
             return openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to dispatch request to Athena core.",
+                "Failed to dispatch request to Sparks core.",
                 "server_error",
                 Some("dispatch_failed"),
             );
@@ -348,7 +348,7 @@ async fn handle_chat_completions(
             );
             return openai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Athena core failed to complete request: {}", e),
+                format!("Sparks core failed to complete request: {}", e),
                 "server_error",
                 Some("core_error"),
             );
@@ -363,7 +363,7 @@ async fn handle_chat_completions(
             );
             return openai_error(
                 StatusCode::GATEWAY_TIMEOUT,
-                "Athena core timed out while completing the request.",
+                "Sparks core timed out while completing the request.",
                 "server_error",
                 Some("timeout"),
             );
@@ -408,7 +408,7 @@ async fn authorize_and_rate_limit(
     if !state.limiter.allow().await {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
-            "Rate limit exceeded for this Athena instance.",
+            "Rate limit exceeded for this Sparks instance.",
             "rate_limit_error",
             Some("rate_limit_exceeded"),
         ));
@@ -460,7 +460,7 @@ async fn await_final_response(
         }
     }
     Err(anyhow!(
-        "Athena core closed event stream without a final response"
+        "Sparks core closed event stream without a final response"
     ))
 }
 
@@ -756,14 +756,14 @@ mod tests {
 
     #[test]
     fn response_shape_matches_openai_chat_schema() {
-        let response = build_chat_completion_response("athena".to_string(), "done".to_string());
+        let response = build_chat_completion_response("sparks".to_string(), "done".to_string());
         let json = serde_json::to_value(response);
         assert!(json.is_ok());
         let Some(body) = json.ok() else {
             return;
         };
         assert_eq!(body["object"], "chat.completion");
-        assert_eq!(body["model"], "athena");
+        assert_eq!(body["model"], "sparks");
         assert_eq!(body["choices"][0]["message"]["role"], "assistant");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
         assert!(body.get("usage").is_some());
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_tools_option() {
         let req: ChatCompletionsRequest = serde_json::from_value(json!({
-            "model": "athena",
+            "model": "sparks",
             "messages": [{"role":"user","content":"hi"}],
             "tools": [{"type":"function","function":{"name":"x"}}]
         }))
@@ -783,7 +783,7 @@ mod tests {
     #[test]
     fn requested_tool_count_reads_tools_array_length() {
         let req: ChatCompletionsRequest = serde_json::from_value(json!({
-            "model": "athena",
+            "model": "sparks",
             "messages": [{"role":"user","content":"hi"}],
             "tools": [{"type":"function"},{"type":"function"}]
         }))

@@ -3,7 +3,7 @@ use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
 
 #[derive(Clone)]
@@ -79,14 +79,14 @@ impl TicketProvider for GitLabProvider {
             ])
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitLab request failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitLab request failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitLab response error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitLab response error: {}", e)))?;
 
         let issues: Vec<GlIssue> = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitLab parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitLab parse failed: {}", e)))?;
 
         let tickets = issues
             .into_iter()
@@ -109,7 +109,7 @@ impl TicketProvider for GitLabProvider {
 
     async fn post_comment(&self, ticket: &ExternalTicket, message: &str) -> Result<()> {
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "GitLab write-back missing issue number".to_string(),
             ));
         };
@@ -127,9 +127,9 @@ impl TicketProvider for GitLabProvider {
             .json(&json!({ "body": message }))
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitLab comment failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitLab comment failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitLab comment error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitLab comment error: {}", e)))?;
         Ok(())
     }
 
@@ -138,7 +138,7 @@ impl TicketProvider for GitLabProvider {
             return Ok(());
         }
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "GitLab write-back missing issue number".to_string(),
             ));
         };
@@ -156,9 +156,9 @@ impl TicketProvider for GitLabProvider {
             .json(&json!({ "state_event": "close" }))
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitLab status update failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitLab status update failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitLab status update error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitLab status update error: {}", e)))?;
         Ok(())
     }
 

@@ -3,7 +3,7 @@
 
 Flow:
 - Start mock Linear GraphQL server
-- Start Athena with webhook enabled + mock dispatch
+- Start Sparks with webhook enabled + mock dispatch
 - Send Linear webhook payload
 - Wait for writeback (comment + status) to hit mock server ledger
 """
@@ -92,7 +92,7 @@ mock_dispatch = true
 [[ticket_intake.sources]]
 provider = "linear"
 repo = "ENG"
-filter_label = "athena"
+filter_label = "sparks"
 api_base = "{api_base}"
 token_env = "LINEAR_API_KEY"
 
@@ -104,11 +104,11 @@ linear_secret_env = "LINEAR_WEBHOOK_SECRET"
     path.write_text(content)
 
 
-def start_athena(config_path: Path, log_path: Path, athena_bin: str | None) -> subprocess.Popen:
-    if athena_bin:
-        cmd = [athena_bin, "--config", str(config_path), "chat"]
+def start_sparks(config_path: Path, log_path: Path, sparks_bin: str | None) -> subprocess.Popen:
+    if sparks_bin:
+        cmd = [sparks_bin, "--config", str(config_path), "chat"]
     else:
-        local_bin = ROOT / "target" / "debug" / "athena"
+        local_bin = ROOT / "target" / "debug" / "sparks"
         if local_bin.exists():
             cmd = [str(local_bin), "--config", str(config_path), "chat"]
         else:
@@ -126,8 +126,8 @@ def start_athena(config_path: Path, log_path: Path, athena_bin: str | None) -> s
 
     log_file = log_path.open("w", encoding="utf-8")
     env = os.environ.copy()
-    env["ATHENA_DISABLE_HOME_PROFILES"] = "1"
-    env["ATHENA_SKIP_LLM_HEALTHCHECK"] = "1"
+    env["SPARKS_DISABLE_HOME_PROFILES"] = "1"
+    env["SPARKS_SKIP_LLM_HEALTHCHECK"] = "1"
     env["LINEAR_API_KEY"] = "test"
     env["LINEAR_WEBHOOK_SECRET"] = "test-secret"
 
@@ -225,7 +225,7 @@ def terminate(proc: subprocess.Popen, name: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--athena-bin", help="Path to athena binary (optional)")
+    parser.add_argument("--sparks-bin", help="Path to sparks binary (optional)")
     parser.add_argument("--timeout-secs", type=int, default=90)
     parser.add_argument("--sync-timeout-secs", type=int, default=45)
     args = parser.parse_args()
@@ -233,25 +233,25 @@ def main() -> int:
     temp_dir = Path.cwd() / ".context" / "user-flow"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    db_path = temp_dir / "athena.db"
+    db_path = temp_dir / "sparks.db"
     config_path = temp_dir / "config.toml"
     ledger_path = temp_dir / "linear_ledger.jsonl"
-    athena_log = temp_dir / "athena.log"
+    sparks_log = temp_dir / "sparks.log"
 
-    for path in (db_path, ledger_path, athena_log):
+    for path in (db_path, ledger_path, sparks_log):
         if path.exists():
             path.unlink()
 
     webhook_port = find_free_port()
 
     mock_proc = None
-    athena_proc = None
+    sparks_proc = None
 
     try:
         mock_proc, linear_url = start_mock_linear_server(ledger_path, DEFAULT_ISSUE_FIXTURE)
         build_config(config_path, db_path, linear_url, webhook_port)
 
-        athena_proc = start_athena(config_path, athena_log, args.athena_bin)
+        sparks_proc = start_sparks(config_path, sparks_log, args.sparks_bin)
         wait_for_port(webhook_port, timeout_secs=args.timeout_secs)
 
         send_linear_webhook(webhook_port, DEFAULT_WEBHOOK_FIXTURE, "test-secret")
@@ -266,17 +266,17 @@ def main() -> int:
         return 0
     except Exception as exc:
         print(f"user_flow=error reason={exc}")
-        print(f"athena_log={athena_log}")
+        print(f"sparks_log={sparks_log}")
         return 1
     finally:
-        if athena_proc is not None and athena_proc.stdin:
+        if sparks_proc is not None and sparks_proc.stdin:
             try:
-                athena_proc.stdin.write("/quit\n")
-                athena_proc.stdin.flush()
+                sparks_proc.stdin.write("/quit\n")
+                sparks_proc.stdin.flush()
             except Exception:
                 pass
-        if athena_proc is not None:
-            terminate(athena_proc, "athena")
+        if sparks_proc is not None:
+            terminate(sparks_proc, "sparks")
         if mock_proc is not None:
             terminate(mock_proc, "mock_linear_server")
 

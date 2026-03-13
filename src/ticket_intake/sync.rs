@@ -122,7 +122,7 @@ async fn sync_record(
         );
     }
 
-    let mut ci_followup_result: std::result::Result<(), crate::error::AthenaError> = Ok(());
+    let mut ci_followup_result: std::result::Result<(), crate::error::SparksError> = Ok(());
     if item.provider.starts_with("linear:") {
         if let Some(ci_status) = item
             .ci_monitor_status
@@ -130,7 +130,7 @@ async fn sync_record(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let ci_message = format!("Athena CI monitor update\nStatus: {}", ci_status);
+            let ci_message = format!("Sparks CI monitor update\nStatus: {}", ci_status);
             ci_followup_result = provider.post_comment(&ticket, &ci_message).await;
             if let Err(e) = &ci_followup_result {
                 observer.log(
@@ -167,7 +167,7 @@ fn build_sync_ticket(item: &TicketSyncRecord) -> ExternalTicket {
 
 fn format_sync_comment(item: &crate::ticket_intake::store::TicketSyncRecord) -> String {
     let mut lines = vec![
-        "Athena task update".to_string(),
+        "Sparks task update".to_string(),
         format!("Status: {}", item.task_status),
         format!("Goal: {}", truncate(&item.task_goal, 200)),
     ];
@@ -283,7 +283,7 @@ mod tests {
         let comment = format_sync_comment(&record);
         assert!(comment.contains("Status: succeeded"));
         assert!(comment.contains("Fix the login bug"));
-        assert!(comment.starts_with("Athena task update"));
+        assert!(comment.starts_with("Sparks task update"));
     }
 
     #[test]

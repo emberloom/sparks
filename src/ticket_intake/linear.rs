@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
 
 #[derive(Clone)]
@@ -40,14 +40,14 @@ impl LinearProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Linear request failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("Linear request failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("Linear response error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Linear response error: {}", e)))?;
 
         let value: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Linear parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Linear parse failed: {}", e)))?;
 
         if let Some(errors) = value.get("errors").and_then(|v| v.as_array()) {
             let messages = errors
@@ -55,7 +55,7 @@ impl LinearProvider {
                 .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
                 .collect::<Vec<_>>();
             if !messages.is_empty() {
-                return Err(AthenaError::Tool(format!(
+                return Err(SparksError::Tool(format!(
                     "Linear API errors: {}",
                     messages.join("; ")
                 )));
@@ -243,18 +243,18 @@ impl TicketProvider for LinearProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Linear request failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("Linear request failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("Linear response error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Linear response error: {}", e)))?;
 
         let payload: LinearResponse = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Linear parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Linear parse failed: {}", e)))?;
 
         if let Some(errors) = payload.errors {
             let messages = errors.into_iter().map(|e| e.message).collect::<Vec<_>>();
-            return Err(AthenaError::Tool(format!(
+            return Err(SparksError::Tool(format!(
                 "Linear API errors: {}",
                 messages.join("; ")
             )));

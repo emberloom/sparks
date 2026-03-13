@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal Linear GraphQL stub for CI/user-flow harness.
 
-Supports the subset used by Athena's Linear provider:
+Supports the subset used by Sparks's Linear provider:
 - Issues query (poll)
 - CommentCreate mutation (writeback)
 - IssueState query (completed state lookup)
@@ -26,7 +26,7 @@ DEFAULT_ISSUE = {
     "description": "Mock issue body.",
     "url": "https://linear.app/ENG/issue/ENG-1",
     "priority": 3,
-    "labels": ["athena"],
+    "labels": ["sparks"],
     "creator": "Mock User",
 }
 

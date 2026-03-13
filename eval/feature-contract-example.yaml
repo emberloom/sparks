@@ -1,7 +1,7 @@
-feature_id: athena-feature-orchestration-bootstrap
+feature_id: sparks-feature-orchestration-bootstrap
 lane: delivery
 risk: low
-repo: athena
+repo: sparks
 
 acceptance_criteria:
   - id: AC-1

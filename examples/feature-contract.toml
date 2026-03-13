@@ -2,13 +2,13 @@
 #
 # Fan-out / fan-in feature contract template (TOML).
 # This file is directly consumable by:
-#   athena feature validate --file examples/feature-contract.toml
-#   athena feature plan --file examples/feature-contract.toml
+#   sparks feature validate --file examples/feature-contract.toml
+#   sparks feature plan --file examples/feature-contract.toml
 
-feature_id = "athena-contract-report-hardening"
+feature_id = "sparks-contract-report-hardening"
 lane = "delivery"
 risk = "medium"
-repo = "athena"
+repo = "sparks"
 
 [[acceptance_criteria]]
 id = "AC-1"

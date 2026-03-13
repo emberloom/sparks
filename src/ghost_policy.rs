@@ -482,7 +482,7 @@ mod tests {
 
     fn scope() -> GhostPolicyScope {
         GhostPolicyScope {
-            repo: "athena".to_string(),
+            repo: "sparks".to_string(),
             lane: "ticket_intake".to_string(),
             risk_tier: Some("medium".to_string()),
         }
@@ -616,7 +616,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(decision.explanation.scope.repo, "athena");
+        assert_eq!(decision.explanation.scope.repo, "sparks");
         assert_eq!(decision.explanation.thresholds.min_samples, 3);
         assert!(!decision.explanation.reason_codes.is_empty());
         assert!(!decision.explanation.decided_at.is_empty());

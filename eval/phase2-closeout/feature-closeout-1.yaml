@@ -1,7 +1,7 @@
-feature_id: athena-phase2-closeout-1
+feature_id: sparks-phase2-closeout-1
 lane: delivery
 risk: low
-repo: athena
+repo: sparks
 
 acceptance_criteria:
   - id: AC-1

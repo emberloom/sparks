@@ -1,5 +1,5 @@
 [package]
-name = "athena"
+name = "sparks"
 version = "0.1.2"
 edition = "2021"
 description = "Secure autonomous multi-agent system"

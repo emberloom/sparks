@@ -6,7 +6,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 const MODEL_REPO: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const MODEL_FILE: &str = "model.onnx";
@@ -25,7 +25,7 @@ impl Embedder {
         let tokenizer_path = model_dir.join(TOKENIZER_FILE);
 
         if !model_path.exists() || !tokenizer_path.exists() {
-            return Err(AthenaError::Internal(format!(
+            return Err(SparksError::Internal(format!(
                 "Embedding model files not found in {}. Run ensure_model() first.",
                 model_dir.display()
             )));
@@ -34,10 +34,10 @@ impl Embedder {
         let session = Session::builder()
             .and_then(|b| b.with_intra_threads(1))
             .and_then(|b| b.commit_from_file(&model_path))
-            .map_err(|e| AthenaError::Internal(format!("Failed to load ONNX model: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Failed to load ONNX model: {}", e)))?;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| AthenaError::Internal(format!("Failed to load tokenizer: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Failed to load tokenizer: {}", e)))?;
 
         Ok(Self {
             session: Mutex::new(session),
@@ -55,7 +55,7 @@ impl Embedder {
         }
 
         std::fs::create_dir_all(model_dir)
-            .map_err(|e| AthenaError::Internal(format!("Failed to create model dir: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Failed to create model dir: {}", e)))?;
 
         let base_url = format!("https://huggingface.co/{}/resolve/main", MODEL_REPO);
 
@@ -79,7 +79,7 @@ impl Embedder {
         let encoding = self
             .tokenizer
             .encode(text, true)
-            .map_err(|e| AthenaError::Internal(format!("Tokenization failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Tokenization failed: {}", e)))?;
 
         let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
         let mut attention_mask: Vec<i64> = encoding
@@ -95,45 +95,45 @@ impl Embedder {
         let seq_len = input_ids.len();
 
         let input_ids_array = Array2::from_shape_vec((1, seq_len), input_ids)
-            .map_err(|e| AthenaError::Internal(format!("Shape error: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Shape error: {}", e)))?;
         let attention_mask_array = Array2::from_shape_vec((1, seq_len), attention_mask.clone())
-            .map_err(|e| AthenaError::Internal(format!("Shape error: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Shape error: {}", e)))?;
 
         // token_type_ids: all zeros for single-sentence encoding (required by BERT-based models)
         let token_type_ids_array = Array2::<i64>::zeros((1, seq_len));
 
         let input_ids_tensor = Tensor::from_array(input_ids_array)
-            .map_err(|e| AthenaError::Internal(format!("Input tensor creation failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Input tensor creation failed: {}", e)))?;
         let attention_mask_tensor = Tensor::from_array(attention_mask_array)
-            .map_err(|e| AthenaError::Internal(format!("Input tensor creation failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Input tensor creation failed: {}", e)))?;
         let token_type_ids_tensor = Tensor::from_array(token_type_ids_array)
-            .map_err(|e| AthenaError::Internal(format!("Input tensor creation failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Input tensor creation failed: {}", e)))?;
 
         let mut session = self
             .session
             .lock()
-            .map_err(|e| AthenaError::Internal(format!("Session lock poisoned: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Session lock poisoned: {}", e)))?;
         let outputs = session
             .run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
                 "token_type_ids" => token_type_ids_tensor,
             ])
-            .map_err(|e| AthenaError::Internal(format!("ONNX inference failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("ONNX inference failed: {}", e)))?;
 
         // Output shape: (1, seq_len, hidden_size=384)
         let token_embeddings = outputs[0]
             .try_extract_array::<f32>()
-            .map_err(|e| AthenaError::Internal(format!("Output extraction failed: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Output extraction failed: {}", e)))?;
 
         let token_embeddings = token_embeddings
             .into_dimensionality::<ndarray::Ix3>()
-            .map_err(|e| AthenaError::Internal(format!("Dimension error: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Dimension error: {}", e)))?;
 
         // Mean pooling: average token embeddings weighted by attention mask
         let mask: Vec<f32> = attention_mask.iter().map(|&m| m as f32).collect();
         let mask_array = Array2::from_shape_vec((1, seq_len), mask)
-            .map_err(|e| AthenaError::Internal(format!("Mask shape error: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Mask shape error: {}", e)))?;
 
         let embeddings_2d = token_embeddings.index_axis(Axis(0), 0); // (seq_len, hidden)
         let mask_1d = mask_array.index_axis(Axis(0), 0); // (seq_len,)
@@ -221,7 +221,7 @@ mod tests {
         // ── Setup ──────────────────────────────────────────────────
         let model_dir = dirs::home_dir()
             .unwrap()
-            .join(".athena/models/all-MiniLM-L6-v2");
+            .join(".sparks/models/all-MiniLM-L6-v2");
         Embedder::ensure_model(&model_dir).expect("model download failed");
         let embedder = Embedder::new(&model_dir).expect("embedder creation failed");
 
@@ -1220,10 +1220,10 @@ mod tests {
 
 fn download_file(url: &str, dest: &Path) -> Result<()> {
     let response = reqwest::blocking::get(url)
-        .map_err(|e| AthenaError::Internal(format!("Download failed for {}: {}", url, e)))?;
+        .map_err(|e| SparksError::Internal(format!("Download failed for {}: {}", url, e)))?;
 
     if !response.status().is_success() {
-        return Err(AthenaError::Internal(format!(
+        return Err(SparksError::Internal(format!(
             "Download failed for {}: HTTP {}",
             url,
             response.status()
@@ -1232,10 +1232,10 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 
     let bytes = response
         .bytes()
-        .map_err(|e| AthenaError::Internal(format!("Failed to read response body: {}", e)))?;
+        .map_err(|e| SparksError::Internal(format!("Failed to read response body: {}", e)))?;
 
     std::fs::write(dest, &bytes)
-        .map_err(|e| AthenaError::Internal(format!("Failed to write {}: {}", dest.display(), e)))?;
+        .map_err(|e| SparksError::Internal(format!("Failed to write {}: {}", dest.display(), e)))?;
 
     Ok(())
 }

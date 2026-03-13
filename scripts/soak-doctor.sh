@@ -4,12 +4,12 @@ set -euo pipefail
 DURATION_HOURS="${1:-24}"
 INTERVAL_SECS="${2:-3600}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_PATH="$ROOT_DIR/target/debug/athena"
-LOG_PATH="$ROOT_DIR/athena_doctor_soak.log"
+BIN_PATH="$ROOT_DIR/target/debug/sparks"
+LOG_PATH="$ROOT_DIR/sparks_doctor_soak.log"
 
 if [[ ! -x "$BIN_PATH" ]]; then
-  echo "Building athena binary..."
-  (cd "$ROOT_DIR" && cargo build --quiet --bin athena)
+  echo "Building sparks binary..."
+  (cd "$ROOT_DIR" && cargo build --quiet --bin sparks)
 fi
 
 runs=$(( (DURATION_HOURS * 3600 + INTERVAL_SECS - 1) / INTERVAL_SECS ))

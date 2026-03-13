@@ -1,12 +1,12 @@
 {
-  "name": "athena-cli-smoke-v1",
+  "name": "sparks-cli-smoke-v1",
   "description": "Lightweight benchmark for coding CLI integration across claude_code/codex/opencode.",
   "pass_threshold": 0.8,
   "defaults": {
     "ghost": "coder",
     "lane": "self_improvement",
     "risk": "low",
-    "repo": "athena",
+    "repo": "sparks",
     "wait_secs": 180,
     "timeout_secs": 300,
     "outcome_wait_secs": 210,

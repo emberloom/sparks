@@ -2,20 +2,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="${ATHENA_ENV_FILE:-$ROOT_DIR/.env}"
-ATHENA_BIN="${ATHENA_BIN:-$ROOT_DIR/target/debug/athena}"
-LOG_FILE="${ATHENA_TELEGRAM_LOG:-$ROOT_DIR/athena_telegram.log}"
+ENV_FILE="${SPARKS_ENV_FILE:-$ROOT_DIR/.env}"
+SPARKS_BIN="${SPARKS_BIN:-$ROOT_DIR/target/debug/sparks}"
+LOG_FILE="${SPARKS_TELEGRAM_LOG:-$ROOT_DIR/sparks_telegram.log}"
 
 usage() {
   cat <<'EOF'
 Usage: scripts/restart-telegram.sh
 
-Restarts Athena Telegram bot.
+Restarts Sparks Telegram bot.
 
 Environment overrides:
-  ATHENA_BIN           Path to Athena binary (default: ./target/debug/athena)
-  ATHENA_TELEGRAM_LOG  Log file path (default: ./athena_telegram.log)
-  ATHENA_ENV_FILE      Path to .env file (default: ./.env)
+  SPARKS_BIN           Path to Sparks binary (default: ./target/debug/sparks)
+  SPARKS_TELEGRAM_LOG  Log file path (default: ./sparks_telegram.log)
+  SPARKS_ENV_FILE      Path to .env file (default: ./.env)
 EOF
 }
 
@@ -32,11 +32,11 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 
-if ! "$ATHENA_BIN" telegram --help >/dev/null 2>&1; then
+if ! "$SPARKS_BIN" telegram --help >/dev/null 2>&1; then
   (cd "$ROOT_DIR" && cargo build --features telegram >/dev/null)
 fi
 
-existing_pids="$(pgrep -f "target/debug/athena telegram|cargo run --features telegram -- telegram" || true)"
+existing_pids="$(pgrep -f "target/debug/sparks telegram|cargo run --features telegram -- telegram" || true)"
 if [ -n "$existing_pids" ]; then
   echo "Stopping existing telegram process(es): $existing_pids"
   kill $existing_pids || true
@@ -44,7 +44,7 @@ if [ -n "$existing_pids" ]; then
 fi
 
 echo "Starting Telegram bot..."
-nohup "$ATHENA_BIN" telegram >"$LOG_FILE" 2>&1 &
+nohup "$SPARKS_BIN" telegram >"$LOG_FILE" 2>&1 &
 new_pid=$!
 
 sleep 2

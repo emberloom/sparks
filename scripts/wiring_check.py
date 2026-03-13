@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wiring & plumbing check for Athena.
+Wiring & plumbing check for Sparks.
 
 Validates that all declared enums/variants/implementations are actually wired
 into the runtime — catching loose ends before they become silent dead weight.
@@ -277,7 +277,7 @@ def check_energy_shift_wired() -> None:
 # Run all checks
 # ---------------------------------------------------------------------------
 def main() -> int:
-    print(f"{CYAN}Athena wiring check{RESET}")
+    print(f"{CYAN}Sparks wiring check{RESET}")
     print(f"{DIM}src: {SRC}{RESET}\n")
 
     check_observer_categories()

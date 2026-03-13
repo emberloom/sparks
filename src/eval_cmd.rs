@@ -22,7 +22,7 @@ pub struct EvalCommandOptions {
     pub scenario_filter: Option<String>,
     pub output_dir: PathBuf,
     pub history_file: PathBuf,
-    pub athena_bin: PathBuf,
+    pub sparks_bin: PathBuf,
     pub fail_fast: bool,
     pub max_tasks: u32,
     pub baseline: Option<PathBuf>,
@@ -185,7 +185,7 @@ pub fn run_eval(
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    let athena_bin = resolve_path(&repo_root, &opts.athena_bin);
+    let sparks_bin = resolve_path(&repo_root, &opts.sparks_bin);
     let config_path = resolve_config_path(&repo_root, cli_config_path)?;
 
     let mut harness_args: Vec<String> = vec![
@@ -194,8 +194,8 @@ pub fn run_eval(
         suite_for_run.display().to_string(),
         "--config".to_string(),
         config_path.display().to_string(),
-        "--athena-bin".to_string(),
-        athena_bin.display().to_string(),
+        "--sparks-bin".to_string(),
+        sparks_bin.display().to_string(),
         "--output-dir".to_string(),
         out_dir.display().to_string(),
         "--history-file".to_string(),
@@ -325,11 +325,11 @@ pub fn run_eval(
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .to_string();
     let ts = now_utc.format("%Y%m%dT%H%M%SZ").to_string();
-    let normalized_path = out_dir.join(format!("athena-eval-{}.json", ts));
+    let normalized_path = out_dir.join(format!("sparks-eval-{}.json", ts));
 
     let (git_commit, git_branch) = git_provenance(&repo_root);
     let artifact = EvalResultArtifact {
-        schema_version: "athena_eval_result_v1".to_string(),
+        schema_version: "sparks_eval_result_v1".to_string(),
         run_id: run_id.clone(),
         generated_at_utc: generated_at,
         scenario: ScenarioInfo {
@@ -671,6 +671,6 @@ mod tests {
 
     #[test]
     fn sanitize_filename_replaces_special_chars() {
-        assert_eq!(sanitize_filename("athena core/v2"), "athena-core-v2");
+        assert_eq!(sanitize_filename("sparks core/v2"), "sparks-core-v2");
     }
 }
