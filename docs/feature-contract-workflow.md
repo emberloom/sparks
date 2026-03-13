@@ -11,13 +11,13 @@ Run multi-task feature delivery with explicit dependency DAGs and auditable run 
 Create a template with defaults:
 
 ```bash
-sparks feature init --file feature-contract.toml --pattern fanout-fanin
+athena feature init --file feature-contract.toml --pattern fanout-fanin
 ```
 
 Alternative pattern:
 
 ```bash
-sparks feature init --file feature-contract-linear.toml --pattern linear
+athena feature init --file feature-contract-linear.toml --pattern linear
 ```
 
 Accepted input formats for runtime commands:
@@ -28,9 +28,9 @@ Accepted input formats for runtime commands:
 ## 2. Validate/Lint (Fail Fast)
 
 ```bash
-sparks feature validate --file feature-contract.toml
+athena feature validate --file feature-contract.toml
 # alias:
-sparks feature lint --file feature-contract.toml
+athena feature lint --file feature-contract.toml
 ```
 
 Validation exits non-zero on any contract error and prints deterministic diagnostics with field paths, cycle traces, and unknown-ID suggestions.
@@ -46,7 +46,7 @@ Invalid feature contract (my-feature):
 ## 3. Inspect DAG Plan
 
 ```bash
-sparks feature plan --file feature-contract.toml
+athena feature plan --file feature-contract.toml
 ```
 
 This prints:
@@ -57,7 +57,7 @@ This prints:
 ## 4. Dispatch Tasks
 
 ```bash
-sparks feature dispatch --file feature-contract.toml --wait-secs 240
+athena feature dispatch --file feature-contract.toml --wait-secs 240
 ```
 
 Useful options:
@@ -80,13 +80,13 @@ The contract report is emitted for both success and failure paths.
 
 CI autopilot behavior for dispatch:
 - Default is **enabled** via `[ticket_intake.ci_autopilot]` in config.
-- For successful tasks that open a PR, Sparks monitors CI, attempts bounded self-heal, and records `ci_monitor_status` in dispatch/report artifacts.
+- For successful tasks that open a PR, Emberloom monitors CI, attempts bounded self-heal, and records `ci_monitor_status` in dispatch/report artifacts.
 - Non-green CI autopilot outcomes are treated as task failures in dispatch summaries.
 
 ## 5. Run Verification
 
 ```bash
-sparks feature verify --file feature-contract.toml --profile strict
+athena feature verify --file feature-contract.toml --profile strict
 ```
 
 Profile behavior:
@@ -99,7 +99,7 @@ Verify emits:
 ## 6. Gate (Dispatch + Verify + Promote)
 
 ```bash
-sparks feature gate \
+athena feature gate \
   --file feature-contract.toml \
   --wait-secs 240 \
   --verify-profile strict
@@ -115,13 +115,13 @@ Gate emits:
 ## 7. Promote (Supervised Decision)
 
 ```bash
-sparks feature promote --file feature-contract.toml
+athena feature promote --file feature-contract.toml
 ```
 
 Optional explicit ledgers:
 
 ```bash
-sparks feature promote \
+athena feature promote \
   --file feature-contract.toml \
   --dispatch-ledger eval/results/feature-<feature_id>-<timestamp>.json \
   --verify-ledger eval/results/feature-verify-<feature_id>-<timestamp>.json

@@ -1,4 +1,4 @@
-# Sparks Feature Contract v1
+# Emberloom Feature Contract v1
 
 Feature contracts define an auditable DAG of autonomous tasks mapped to acceptance criteria.
 
@@ -67,7 +67,7 @@ tasks[3].depends_on[0] references unknown task 'TSK-2' (did you mean 'TASK-2'?)
 Initialize a new TOML contract:
 
 ```bash
-sparks feature init --file feature-contract.toml --pattern fanout-fanin
+athena feature init --file feature-contract.toml --pattern fanout-fanin
 ```
 
 Patterns:
@@ -77,8 +77,8 @@ Patterns:
 Validate (or lint) a contract:
 
 ```bash
-sparks feature validate --file feature-contract.toml
-sparks feature lint --file feature-contract.toml
+athena feature validate --file feature-contract.toml
+athena feature lint --file feature-contract.toml
 ```
 
 Backward-compatible flag alias:
@@ -106,6 +106,6 @@ For existing users:
 1. Existing YAML/JSON contracts remain supported unchanged.
 2. Existing `--contract` CLI usage still works (`--file` is canonical).
 3. To migrate to TOML, run:
-   - `sparks feature init --file <new>.toml --pattern <linear|fanout-fanin>`
+   - `athena feature init --file <new>.toml --pattern <linear|fanout-fanin>`
    - copy existing task/check content into the generated template.
 4. For dependency or mapping errors, prefer fixing the referenced IDs directly; diagnostics now include exact field paths and suggestions.

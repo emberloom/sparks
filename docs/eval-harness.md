@@ -1,10 +1,10 @@
-# Sparks Eval Harness
+# Emberloom Eval Harness
 
 Date: 2026-02-15
 
 ## Purpose
 
-Fixed benchmark gate for "is Sparks getting better?".
+Fixed benchmark gate for "is Emberloom getting better?".
 
 It runs a stable task suite end-to-end and scores:
 
@@ -36,7 +36,7 @@ Current lanes covered:
 
 CI smoke suite:
 
-- `eval/benchmark-mini-ci.json` (uses `scripts/mock_sparks_dispatch.py`)
+- `eval/benchmark-mini-ci.json` (uses `scripts/mock_athena_dispatch.py`)
 
 ## Run
 
@@ -61,7 +61,7 @@ Scenario library manifest (used in scorecard metadata):
 Raw harness invocation:
 
 ```bash
-python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --sparks-bin target/debug/sparks
+python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --athena-bin target/debug/athena
 ```
 
 Optional:
@@ -152,7 +152,7 @@ Inspect progress:
 
 ```bash
 tail -f "<run_dir>/soak.log"
-screen -ls | rg sparks_soak
+screen -ls | rg athena_soak
 ```
 
 On completion, a summary is generated at:
@@ -206,13 +206,13 @@ Gate passes when:
 Render combined KPI + eval trend dashboard:
 
 ```bash
-cargo run -- dashboard --repo sparks
+cargo run -- dashboard --repo athena
 ```
 
 Equivalent script invocation (used by soak/gate scripts):
 
 ```bash
-python3 scripts/eval_dashboard.py --config config.toml --repo sparks
+python3 scripts/eval_dashboard.py --config config.toml --repo athena
 ```
 
 Output:

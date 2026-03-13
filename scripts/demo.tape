@@ -1,4 +1,4 @@
-# VHS demo recording script for Sparks
+# VHS demo recording script for Emberloom Sparks
 # Prerequisites: install VHS (https://github.com/charmbracelet/vhs)
 # Run: vhs scripts/demo.tape
 # Output: docs/demo.gif
@@ -13,7 +13,7 @@ Set Padding 20
 
 # Set up demo alias invisibly
 Hide
-Type "alias sparks='bash scripts/demo-wrapper.sh'"
+Type "alias emberloom='bash scripts/demo-wrapper.sh'"
 Enter
 Sleep 300ms
 Show
@@ -21,10 +21,10 @@ Ctrl+L
 Sleep 300ms
 
 # Act 1: Show the agent roster
-Type "# Ghost agents configured for this workspace"
+Type "# Emberloom Sparks configured for this workspace"
 Enter
 Sleep 200ms
-Type "sparks ghosts"
+Type "emberloom sparks"
 Enter
 Sleep 6s
 
@@ -34,7 +34,7 @@ Enter
 Sleep 400ms
 
 # Act 2: Dispatch — wrapper prints output line-by-line with delays (~12s total)
-Type `sparks dispatch --goal "Add per-IP rate limiting to the login endpoint"`
+Type `emberloom dispatch --goal "Add per-IP rate limiting to the login endpoint"`
 Enter
 Sleep 15s
 
@@ -42,7 +42,7 @@ Sleep 15s
 Type "# Mission KPIs"
 Enter
 Sleep 200ms
-Type "sparks kpi status"
+Type "emberloom kpi status"
 Enter
 Sleep 4s
 

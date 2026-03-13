@@ -1,6 +1,6 @@
 # Observability Dashboard
 
-Sparks ships a static dashboard generator at `scripts/eval_dashboard.py`.
+Emberloom ships a static dashboard generator at `scripts/eval_dashboard.py`.
 It renders from local artifacts only (SQLite + JSONL) and produces CI-friendly exports.
 
 ## Local Generation
@@ -10,7 +10,7 @@ Render markdown + JSON:
 ```bash
 python3 scripts/eval_dashboard.py \
   --config config.toml \
-  --repo sparks \
+  --repo athena \
   --out-file eval/results/dashboard.md \
   --json-out-file eval/results/dashboard_data.json
 ```
@@ -20,7 +20,7 @@ Render HTML:
 ```bash
 python3 scripts/eval_dashboard.py \
   --config config.toml \
-  --repo sparks \
+  --repo athena \
   --output-format html \
   --out-file eval/results/dashboard.html \
   --json-out-file eval/results/dashboard_data.json

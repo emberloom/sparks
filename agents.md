@@ -1,22 +1,22 @@
 # Agents Guide
 
-## What Sparks Is
-Sparks is a security-first autonomous multi-agent system for shipping tasks safely. It turns user goals and external tickets into structured autonomous tasks, executes them in isolated environments, and records outcomes for health and KPI tracking. The mission contract is: run only the minimum necessary tools, keep credentials out of source control, and always prefer safe, auditable operations over speed.
+## What Emberloom Is
+Emberloom is a security-first autonomous multi-agent system for shipping tasks safely. It turns user goals and external tickets into structured autonomous tasks, executes them in isolated environments, and records outcomes for health and KPI tracking. The mission contract is: run only the minimum necessary tools, keep credentials out of source control, and always prefer safe, auditable operations over speed.
 
-## How Ghosts Work
-Ghosts are sub-agents that execute tasks inside Docker containers with explicit tool allowlists and mount rules.
+## How Sparks Work
+Sparks are sub-agents that execute tasks inside Docker containers with explicit tool allowlists and mount rules.
 
 Key mechanics:
-- **Isolation:** Ghosts run inside Docker images defined in config. Mounts are explicit and can be read-only.
-- **Tool allowlists:** Each ghost is configured with an allowlist of tools. The manager enforces these per step.
+- **Isolation:** Sparks run inside Docker images defined in config. Mounts are explicit and can be read-only.
+- **Tool allowlists:** Each spark is configured with an allowlist of tools. The manager enforces these per step.
 - **Strategy phases:** The coding strategy uses EXPLORE → EXECUTE → VERIFY phases with different tool sets and step limits.
 - **Resource limits:** Docker memory/CPU/time limits are enforced per run.
 
-Ghost configuration constraints:
+Spark configuration constraints:
 - `strategy` must be exactly `"code"` or `"react"`. Any other value silently fails at dispatch — no compile error or panic.
-- `soul_file` is an optional path to a persona file injected into the ghost's system prompt. Keep it under ~2K tokens; it counts against the completion budget.
+- `soul_file` is an optional path to a persona file injected into the spark's system prompt. Keep it under ~2K tokens; it counts against the completion budget.
 - Default completion limit: **4096 tokens**. Default context window: **128K tokens**. Long soul files, large memory payloads, and verbose tool outputs all reduce usable context for the task.
-- The local embedding model for memory search lives at `~/.sparks/models/all-MiniLM-L6-v2`. If the directory is missing, memory and semantic search fail silently — run `sparks doctor` to verify.
+- The local embedding model for memory search lives at `~/.athena/models/all-MiniLM-L6-v2`. If the directory is missing, memory and semantic search fail silently — run `athena doctor` to verify.
 
 Relevant code: `src/docker.rs`, `src/manager.rs`, `src/strategy/code.rs`, `config.example.toml`.
 
@@ -26,13 +26,13 @@ Each provider has **two independent model slots**:
 
 | Slot | Config key | Used by | Typical choice |
 | --- | --- | --- | --- |
-| Main | `model` | Ghost task execution | capable/expensive model (e.g. `claude-opus-4-6`, `gpt-5.3-codex`) |
+| Main | `model` | Spark task execution | capable/expensive model (e.g. `claude-opus-4-6`, `gpt-5.3-codex`) |
 | Classifier | `classifier_model` | Orchestrator routing only (SIMPLE / DIRECT / COMPLEX) | lighter/cheaper model (e.g. `claude-haiku-4-5-20251001`, `qwen2.5:3b`) |
 
 **Always set `classifier_model`** to a lighter model. If omitted, the main model handles routing on every request — slow and expensive.
 
 Auth requirements differ per provider:
-- **`openai`** — reads `~/.sparks/openai.json` (not an env var). Default URL: `https://chatgpt.com/backend-api/codex`. Legacy `~/.sparks/ouath.json` is auto-detected and migrated. (`ouath` alias is still accepted for backward compatibility.)
+- **`openai`** — reads `~/.athena/openai.json` (not an env var). Default URL: `https://chatgpt.com/backend-api/codex`. Legacy `~/.athena/ouath.json` is auto-detected and migrated. (`ouath` alias is still accepted for backward compatibility.)
 - **`openrouter`** — `OPENROUTER_API_KEY` env var.
 - **`zen`** — `OPENCODE_API_KEY` env var.
 - **`ollama`** — no auth; the Ollama daemon must be running at the configured URL (default `http://localhost:11434`).
@@ -60,7 +60,7 @@ Relevant code: `src/tools.rs`, `src/manager.rs`, `src/config.rs`, `src/doctor.rs
 ```
 Intake (poll/webhook)
   -> Dispatch (autonomous task queue)
-    -> Execute (ghost strategy)
+    -> Execute (spark strategy)
       -> Outcome (DB + memories)
         -> Sync (write-back to ticket source)
 ```
@@ -71,7 +71,7 @@ Relevant code: `src/ticket_intake/`, `src/core.rs`, `src/kpi.rs`.
 Before opening a PR or submitting a patch:
 1. Run `cargo check` (or `cargo check --all-features` if touching optional features).
 2. Run `cargo test` for relevant areas.
-3. Run `sparks doctor --ci` for safety and system checks.
+3. Run `athena doctor --ci` for safety and system checks.
 4. Run `scripts/dead_code_check.py --telegram` to verify zero dead code in both feature profiles.
 5. Run `scripts/wiring_check.py` to verify all declared variants/implementations are connected.
 6. Run `scripts/hygiene_check.py` to catch common AI code-smell patterns (panics, debug output, suppressors).
@@ -115,7 +115,7 @@ if !base_url.starts_with("https://") {
 This applies to any client that calls `.basic_auth()`, `.bearer_auth()`, or sets `Authorization` headers.
 
 ### Do not log credential-adjacent values
-Avoid passing values derived from auth tokens, account IDs, or API keys into `tracing::info!`, `tracing::debug!`, `eprintln!`, or `println!` in library/daemon code. CLI status output that the user explicitly requested (e.g. `sparks openai status`) is the exception; document it with a comment.
+Avoid passing values derived from auth tokens, account IDs, or API keys into `tracing::info!`, `tracing::debug!`, `eprintln!`, or `println!` in library/daemon code. CLI status output that the user explicitly requested (e.g. `athena openai status`) is the exception; document it with a comment.
 
 ### Dismissing false-positive CodeQL alerts
 If CodeQL flags a false positive (e.g. provider names mistaken for credentials due to taint-flow through LLM provider objects), dismiss it via the GitHub API with `dismissed_reason=false positive` and a clear comment explaining why it is not a real issue. Do **not** add `#[allow(...)]` suppressors or restructure production code solely to silence the scanner.
@@ -147,13 +147,13 @@ The "Hygiene check" CI step additionally enforces:
 | Data loss | No destructive git operations by default; guarded shell patterns. |
 
 ## Self-Improvement Loop
-Sparks continuously scans for health signals, memory gaps, and maintainability issues. Background loops collect tool usage stats, store health alerts/fixes, and periodically re-index code for refactoring opportunities.
+Emberloom continuously scans for health signals, memory gaps, and maintainability issues. Background loops collect tool usage stats, store health alerts/fixes, and periodically re-index code for refactoring opportunities.
 
 Relevant code: `src/proactive/`, `src/self_heal.rs`, `src/kpi.rs`.
 
 ## Key References
 - Core orchestration: `src/core.rs`
-- Ghosts and strategy phases: `src/strategy/`
+- Sparks and strategy phases: `src/strategy/`
 - Tool sandboxing and validation: `src/tools.rs`
 - Ticket intake and sync: `src/ticket_intake/`
 - Configuration and security: `src/config.rs`, `config.example.toml`

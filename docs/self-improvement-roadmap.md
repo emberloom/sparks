@@ -1,10 +1,10 @@
-# Sparks Self-Improvement Roadmap
+# Emberloom Self-Improvement Roadmap
 
 Date: 2026-02-17
 
 ## North Star
 
-Build Sparks into a spec-driven engineering agent that can reliably deliver backlog work across products and improve itself through measured, policy-bounded iteration.
+Build Emberloom into a spec-driven engineering agent that can reliably deliver backlog work across products and improve itself through measured, policy-bounded iteration.
 
 ## Current State (Baseline)
 
@@ -94,12 +94,12 @@ Deliverables:
 Current implementation status:
 
 - initial contract ingestion and DAG-ordered dispatch scaffolding is available via:
-  - `sparks feature validate --file <contract>`
-  - `sparks feature plan --file <contract>`
-  - `sparks feature dispatch --file <contract>`
-  - `sparks feature verify --file <contract>`
-  - `sparks feature promote --file <contract>`
-  - `sparks feature gate --file <contract> --verify-profile <fast|strict>`
+  - `athena feature validate --file <contract>`
+  - `athena feature plan --file <contract>`
+  - `athena feature dispatch --file <contract>`
+  - `athena feature verify --file <contract>`
+  - `athena feature promote --file <contract>`
+  - `athena feature gate --file <contract> --verify-profile <fast|strict>`
 - acceptance traceability floor is implemented:
   - required `acceptance_criteria[]` in feature contracts
   - required per-task `mapped_acceptance[]`
@@ -122,17 +122,17 @@ Exit criteria:
 Closure evidence:
 
 - closeout run batch: `eval/results/phase2-closeout-runs-20260217T141929Z.json`
-- gate artifacts: `eval/results/feature-gate-sparks-phase2-closeout-*.json` (`5/5 gate_ok=true`)
+- gate artifacts: `eval/results/feature-gate-athena-phase2-closeout-*.json` (`5/5 gate_ok=true`)
 - summary report: `eval/results/phase1-phase2-closeout-latest.md`
 
 ### Phase 3: Supervised Self-Build Pipeline (Closed 2026-02-17)
 
-Goal: Sparks can improve Sparks in a bounded loop.
+Goal: Emberloom can improve Emberloom in a bounded loop.
 
 Deliverables:
 
 - loop: detect issue -> propose patch -> isolated worktree implementation -> maintenance pack -> critic review -> promote decision
-- `sparks self-build run` now emits supervised promotion execution artifacts with explicit mode:
+- `athena self-build run` now emits supervised promotion execution artifacts with explicit mode:
   - `--promote-mode none|pr|auto`
   - `--base-branch <branch>` for PR target
   - low-risk + high-confidence may auto-merge only in `auto` mode

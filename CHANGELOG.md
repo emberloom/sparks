@@ -25,7 +25,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- GitHub wiki: 16 pages covering architecture, ghosts, memory, MCP, observability, CLI reference, troubleshooting, and contributing guidelines.
+- GitHub wiki: 16 pages covering architecture, sparks, memory, MCP, observability, CLI reference, troubleshooting, and contributing guidelines.
 - CodeQL security scanning workflow (weekly + on every PR) with Rust taint analysis.
 - `cargo audit` step in CI to catch dependency CVEs on every push.
 - `agents.md`: wiki update guideline (step 10) and CodeQL false-positive dismissal policy.
@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file.
 - Dismissed 3 CodeQL false-positive alerts with documented rationale: HTTPS guard in `LangfuseClient::new()` already validates base URL; `constant_time_eq` test inputs misidentified as cryptographic keys.
 
 - OpenAI-compatible API endpoints (`/v1/models`, `/v1/chat/completions`) with auth, rate limits, and docs.
-- Ghost auto-specialization based on KPI outcomes with stability thresholds and rollback behavior.
+- Spark auto-specialization based on KPI outcomes with stability thresholds and rollback behavior.
 - Session review and explainability system with activity-log persistence.
 - Telegram activity commands: `/review`, `/explain`, `/watch`, `/search`, `/alerts`.
 - MCP ToolRegistry wiring with namespaced tools (`mcp:<server>:<tool>`) and allowlist controls.
@@ -47,7 +47,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Autonomous task routing now evaluates historical KPI outcomes when selecting a default ghost.
+- Autonomous task routing now evaluates historical KPI outcomes when selecting a default spark.
 - Code-index/scout overlap cleanup: indexing remains proactive, with overlapping paths removed.
 
 ## [0.1.0] - 2026-02-26

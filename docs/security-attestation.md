@@ -1,6 +1,6 @@
-# Security Attestation (`sparks doctor --security`)
+# Security Attestation (`athena doctor --security`)
 
-Sparks can emit a falsifiable security posture report for each configured ghost.
+Emberloom can emit a falsifiable security posture report for each configured spark.
 
 ## Commands
 
@@ -14,12 +14,12 @@ Sparks can emit a falsifiable security posture report for each configured ghost.
 ## Text Output Example
 
 ```text
-Sparks Security Attestation
+Emberloom Security Attestation
 Schema: v1
 Generated: 2026-03-03T12:34:56.789Z
-Overall: PASS (ghosts=2, failing_ghosts=0, pass=20, warn=0, fail=0)
+Overall: PASS (sparks=2, failing_sparks=0, pass=20, warn=0, fail=0)
 
-Ghost: coder [PASS]
+Spark: coder [PASS]
   Effective controls: container_mode=docker caps_dropped=ALL rootfs_readonly=true network_mode=none
   Limits: pid_limit=256 memory_limit=268435456 cpu_quota=50000
   Guards: tool_allowlist=true path_validation=true sensitive_patterns=true
@@ -75,14 +75,14 @@ Ghost: coder [PASS]
 
 ## Check IDs and Meaning
 
-- `container.mode`: Ghost execution uses Docker container mode.
+- `container.mode`: Spark execution uses Docker container mode.
 - `container.caps_dropped`: Linux capabilities include `ALL` dropped.
 - `rootfs.readonly`: Container root filesystem is read-only.
 - `network.mode`: Container networking is disabled (`none`).
 - `limits.pid`: PID limit is set and conservative (`<= 256`).
 - `limits.memory`: Memory limit is set to a positive value.
 - `limits.cpu`: CPU quota is set to a positive value.
-- `guard.tool_allowlist`: Ghost has explicit non-empty tool allowlist.
+- `guard.tool_allowlist`: Spark has explicit non-empty tool allowlist.
 - `guard.path_validation`: File/path tool path validation is enabled.
 - `guard.sensitive_patterns`: Sensitive shell-pattern guard is configured.
 

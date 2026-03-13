@@ -1,6 +1,6 @@
-# Sparks Documentation
+# Emberloom Documentation
 
-Documentation index for the Sparks multi-agent orchestration system.
+Documentation index for the Emberloom multi-agent orchestration system.
 
 ---
 
@@ -19,8 +19,8 @@ Documentation index for the Sparks multi-agent orchestration system.
 | File | Description |
 |---|---|
 | [feature-contract-v1.md](feature-contract-v1.md) | Feature contract schema v1 — fields, validation rules, and lifecycle |
-| [task-contract-v1.md](task-contract-v1.md) | Task contract schema v1 — atomic unit of ghost work |
-| [execution-contract-v1.md](execution-contract-v1.md) | Execution contract v1 — how ghosts receive and report on tasks |
+| [task-contract-v1.md](task-contract-v1.md) | Task contract schema v1 — atomic unit of spark work |
+| [execution-contract-v1.md](execution-contract-v1.md) | Execution contract v1 — how sparks receive and report on tasks |
 | [mission-contract.md](mission-contract.md) | Top-level mission contract describing system objectives |
 | [feature-contract-workflow.md](feature-contract-workflow.md) | End-to-end workflow: create → dispatch → validate a feature contract |
 
@@ -46,11 +46,11 @@ Documentation index for the Sparks multi-agent orchestration system.
 | [hygiene-baseline.json](hygiene-baseline.json) | Hygiene check baseline (machine-generated, updated by `hygiene_check.py`) |
 | [maintainability-baseline.json](maintainability-baseline.json) | Maintainability baseline (machine-generated) |
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
-| [security-attestation.md](security-attestation.md) | `sparks doctor --security` attestation schema, samples, and CI interpretation guide |
+| [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
 | [openai-compatible-api.md](openai-compatible-api.md) | OpenAI-compatible API setup, supported fields, and documented deviations |
 | [mcp-integration.md](mcp-integration.md) | MCP server/tool configuration, namespacing, allowlists, and troubleshooting |
 | [session-review-explainability.md](session-review-explainability.md) | Session activity log, explainability workflow, and Telegram activity commands |
-| [ghost-specialization.md](ghost-specialization.md) | KPI-driven autonomous ghost selection policy and decision telemetry |
+| [ghost-specialization.md](ghost-specialization.md) | KPI-driven autonomous spark selection policy and decision telemetry |
 | [prompt-scanner.md](prompt-scanner.md) | Input-layer prompt scanner modes, thresholds, allowlists, and override behavior |
 | [lane-test-note.md](lane-test-note.md) | Notes on KPI lane test coverage |
 | [parsing-hardening-plan.md](parsing-hardening-plan.md) | Plan for hardening LLM-output parsing |
@@ -64,5 +64,5 @@ Documentation index for the Sparks multi-agent orchestration system.
 | [self-improvement-roadmap.md](self-improvement-roadmap.md) | Phased self-improvement roadmap with acceptance criteria per phase |
 | [self-build-supervised-batch.md](self-build-supervised-batch.md) | Supervised self-build batch execution design |
 | [autonomous-agents-epic-comparison.md](autonomous-agents-epic-comparison.md) | Comparison of autonomous agent frameworks considered during design |
-| [conductor-sparks-gap-analysis.md](conductor-sparks-gap-analysis.md) | Gap analysis: Conductor vs Sparks capability comparison |
+| [conductor-athena-gap-analysis.md](conductor-athena-gap-analysis.md) | Gap analysis: Conductor vs Emberloom capability comparison |
 | [telegram-planning-spec.md](telegram-planning-spec.md) | Telegram front-end feature specification |

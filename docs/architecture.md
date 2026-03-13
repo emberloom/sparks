@@ -1,4 +1,4 @@
-# Sparks Architecture
+# Emberloom Architecture
 
 System-level diagrams kept in sync with the codebase via `scripts/wiring_check.py`.
 Wiring violations are caught on every CI run — any variant not wired will fail the gate.
@@ -93,9 +93,9 @@ graph TB
 
 ---
 
-## Ghost Execution State Machine
+## Spark Execution State Machine
 
-A ghost is a named agent configuration. The Executor drives each task through this lifecycle:
+A spark is a named agent configuration. The Executor drives each task through this lifecycle:
 
 ```mermaid
 stateDiagram-v2

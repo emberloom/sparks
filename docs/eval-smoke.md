@@ -1,6 +1,6 @@
 # Eval Smoke Runbook
 
-Use this runbook for a fast integration check of Sparks benchmark plumbing.
+Use this runbook for a fast integration check of Emberloom benchmark plumbing.
 
 ## Purpose
 
@@ -11,8 +11,8 @@ Use this runbook for a fast integration check of Sparks benchmark plumbing.
 ## Prerequisites
 
 - Python 3.11+
-- Sparks repo checkout
-- optional: built `target/debug/sparks` (not required for mock smoke)
+- Emberloom repo checkout
+- optional: built `target/debug/athena` (not required for mock smoke)
 
 ## Local Smoke (Mock Dispatch)
 
@@ -20,9 +20,9 @@ Use this runbook for a fast integration check of Sparks benchmark plumbing.
 python3 scripts/eval_harness.py \
   --suite eval/benchmark-mini-ci.json \
   --config config.example.toml \
-  --sparks-bin scripts/mock_sparks_dispatch.py \
+  --athena-bin scripts/mock_athena_dispatch.py \
   --no-use-worktree \
-  --history-file /tmp/sparks-history.jsonl
+  --history-file /tmp/athena-history.jsonl
 ```
 
 Expected output artifacts:

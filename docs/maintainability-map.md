@@ -1,4 +1,4 @@
-# Sparks Maintainability Map
+# Emberloom Maintainability Map
 
 Date: 2026-02-15
 Scope: `src/**/*.rs` (31 Rust files)
@@ -215,7 +215,7 @@ Validation status:
 
 - `cargo check -q`: pass
 - `cargo test -q`: pass
-- `SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- doctor --skip-llm --ci`: `WARN` (exit `0`)
+- `ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- doctor --skip-llm --ci`: `WARN` (exit `0`)
 - `scripts/maintainability_check.py`: pass
 
 ## 10) Maintainer Policy and Next Tranche
