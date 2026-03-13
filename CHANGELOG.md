@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+## [0.2.0] - 2026-03-13
+
+### Changed
+
+- **Rebrand: Athena → Emberloom Sparks.** Full codebase rebrand across 132 files — crate name, error types, env vars (`ATHENA_*` → `SPARKS_*`), config paths (`~/.athena/` → `~/.sparks/`), CLI contract markers, docs, CI workflows, scripts, and eval configs.
+- GitHub repository moved from `Enreign/athena` to `emberloom/sparks`.
+- Removed old Athena banner image from README.
+
 ## [0.1.2] - 2026-03-09
 
 ### Fixed
