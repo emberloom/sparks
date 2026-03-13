@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>Emberloom</h1>
+<h1>Emberloom Sparks</h1>
 
 <p><strong>Self-hosted multi-agent orchestrator with a hardened execution sandbox,<br>
 semantic memory, and deep observability — built in Rust.</strong></p>
@@ -20,12 +20,12 @@ semantic memory, and deep observability — built in Rust.</strong></p>
 
 ---
 
-## What is Emberloom?
+## What is Emberloom Sparks?
 
 > [!WARNING]
 > **Early development.** Emberloom is actively developed and the internals change frequently. Expect rough edges, incomplete features, and breaking changes between versions. Bug reports and PRs are welcome.
 
-Emberloom is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
+Emberloom Sparks is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
 
 Named sub-agents called **sparks** run inside hardened Docker containers and execute tasks using configurable tool sets and execution strategies. A classifier model routes tasks to the right spark, informed by historical KPI outcomes. A persistent memory layer with ONNX embeddings and recency decay accumulates cross-session context. External tools are wired in via an MCP client registry with namespaced tool exposure and allowlist controls. A structured observability stack — event streams, Langfuse traces, KPI snapshots, and a `doctor` diagnostic command — makes system behavior inspectable at every level.
 
