@@ -42,6 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub slack: SlackConfig,
     #[serde(default)]
+    pub teams: TeamsConfig,
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -501,6 +503,92 @@ fn default_planning_auto() -> bool {
 
 fn default_planning_timeout() -> u64 {
     900
+}
+
+// ── Teams config ──────────────────────────────────────────────────────
+
+/// Microsoft Teams Bot Framework configuration.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct TeamsConfig {
+    /// Azure AD App ID (bot's application ID), or set SPARKS_TEAMS_APP_ID env var
+    pub app_id: Option<String>,
+    /// Azure AD App Password (client secret), or set SPARKS_TEAMS_APP_PASSWORD env var
+    pub app_password: Option<String>,
+    /// HTTP bind address for the Bot Framework webhook endpoint
+    #[serde(default = "default_teams_bind")]
+    pub bind_addr: String,
+    /// Optional LLM provider override
+    pub provider: Option<String>,
+    /// Allowed Azure AD tenant IDs (empty = deny all unless allow_all_tenants = true)
+    #[serde(default)]
+    pub allowed_tenants: Vec<String>,
+    /// Allow all tenants (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all_tenants: bool,
+    /// Rate limit cooldown in seconds (per user+conversation)
+    #[serde(default = "default_teams_rate_limit")]
+    pub rate_limit_secs: u64,
+    /// Confirmation timeout in seconds
+    #[serde(default = "default_confirm_timeout")]
+    pub confirm_timeout_secs: u64,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview for planning-like messages
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
+    /// Skip JWT signature verification (development only - NEVER use in production)
+    #[serde(default)]
+    pub skip_auth: bool,
+}
+
+impl std::fmt::Debug for TeamsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeamsConfig")
+            .field("app_id", &self.app_id.as_deref().map(|_| "[REDACTED]"))
+            .field("app_password", &"[REDACTED]")
+            .field("bind_addr", &self.bind_addr)
+            .field("provider", &self.provider)
+            .field("allowed_tenants", &self.allowed_tenants)
+            .field("allow_all_tenants", &self.allow_all_tenants)
+            .field("rate_limit_secs", &self.rate_limit_secs)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
+            .field("skip_auth", &self.skip_auth)
+            .finish()
+    }
+}
+
+impl Default for TeamsConfig {
+    fn default() -> Self {
+        Self {
+            app_id: None,
+            app_password: None,
+            bind_addr: default_teams_bind(),
+            provider: None,
+            allowed_tenants: vec![],
+            allow_all_tenants: false,
+            rate_limit_secs: default_teams_rate_limit(),
+            confirm_timeout_secs: default_confirm_timeout(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
+            skip_auth: false,
+        }
+    }
+}
+
+fn default_teams_bind() -> String {
+    "0.0.0.0:3979".into()
+}
+
+fn default_teams_rate_limit() -> u64 {
+    5
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1291,6 +1379,7 @@ impl Default for Config {
             persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
             slack: SlackConfig::default(),
+            teams: TeamsConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
             heartbeat: HeartbeatConfig::default(),

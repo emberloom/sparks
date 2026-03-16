@@ -127,14 +127,14 @@ pub struct CoreHandle {
     pub observer: ObserverHandle,
     pub pulse_bus: PulseBus,
     // activity is read by the telegram/slack features
-    #[cfg_attr(not(any(feature = "telegram", feature = "slack")), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "telegram", feature = "slack", feature = "teams")), allow(dead_code))]
     pub activity: Arc<ActivityTracker>,
     pub mood: Arc<MoodState>,
     pub cron_engine: Option<Arc<CronEngine>>,
     pub delivered_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Pulse>>>,
     pub auto_tx: mpsc::Sender<AutonomousTask>,
     pub metrics: SharedMetrics,
-    #[cfg(any(feature = "telegram", feature = "slack"))]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub activity_log: Arc<ActivityLogStore>,
 }
 
@@ -293,7 +293,7 @@ impl SparksCore {
     }
 }
 
-#[cfg(any(feature = "telegram", feature = "slack"))]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn build_core_handle_for_runtime(
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Vec<GhostInfo>,
@@ -328,7 +328,7 @@ fn build_core_handle_for_runtime(
     )
 }
 
-#[cfg(not(any(feature = "telegram", feature = "slack")))]
+#[cfg(not(any(feature = "telegram", feature = "slack", feature = "teams")))]
 fn build_core_handle_for_runtime(
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Vec<GhostInfo>,
@@ -363,7 +363,7 @@ fn build_core_handle_for_runtime(
     )
 }
 
-#[cfg(any(feature = "telegram", feature = "slack"))]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn build_core_handle(
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Vec<GhostInfo>,
@@ -398,7 +398,7 @@ fn build_core_handle(
     }
 }
 
-#[cfg(not(any(feature = "telegram", feature = "slack")))]
+#[cfg(not(any(feature = "telegram", feature = "slack", feature = "teams")))]
 fn build_core_handle(
     tx: mpsc::Sender<CoreRequest>,
     ghosts: Vec<GhostInfo>,

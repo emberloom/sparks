@@ -233,6 +233,20 @@ planning_timeout_secs = 900
 # planning_auto = true
 # planning_timeout_secs = 900
 
+[teams]
+# app_id = ""                        # Azure AD App ID; prefer SPARKS_TEAMS_APP_ID env var
+# app_password = ""                  # Azure AD App Password; prefer SPARKS_TEAMS_APP_PASSWORD env var
+# bind_addr = "0.0.0.0:3979"        # HTTP bind address for Bot Framework webhook
+# provider = "openai"                # optional LLM provider override
+# allowed_tenants = ["your-tenant-id"]  # list of allowed Azure AD tenant IDs
+# allow_all_tenants = false          # if true, any tenant may interact (use with caution)
+# rate_limit_secs = 5                # per-user+conversation cooldown in seconds
+# confirm_timeout_secs = 300
+# planning_enabled = true
+# planning_auto = true
+# planning_timeout_secs = 900
+# skip_auth = false                  # NEVER set to true in production
+
 [github]
 # token = "ghp_..."  # discouraged; prefer GH_TOKEN env var, .env, or `sparks secrets set github.token`
 

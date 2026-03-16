@@ -269,12 +269,16 @@ impl Confirmer for SlackConfirmer {
         let timeout = tokio::time::Duration::from_secs(self.timeout_secs);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(true)) => Ok(true),
-            Ok(Ok(false)) | Err(_) => {
+            Ok(Ok(false)) => {
+                let mut pending = self.pending.lock().await;
+                pending.remove(&confirm_id);
+                Err(SparksError::Denied)
+            }
+            Err(_) | Ok(Err(_)) => {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&confirm_id);
                 Err(SparksError::Cancelled)
             }
-            Ok(Err(_)) => Err(SparksError::Cancelled),
         }
     }
 }
@@ -810,45 +814,7 @@ async fn dispatch_to_core(
     text: String,
     initial_status: &str,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let confirmer = slack_confirmer(state, &channel, thread_ts.as_ref());
-    let api_session = state.client.open_session(&state.bot_token);
-
-    // Post initial status message
-    let content = SlackMessageContent::new().with_text(initial_status.to_string());
-    let mut req = SlackApiChatPostMessageRequest::new(channel.clone(), content);
-    if let Some(ts) = &thread_ts {
-        req = req.with_thread_ts(ts.clone());
-    }
-    let status_resp = api_session
-        .chat_post_message(&req)
-        .await
-        .map_err(|e| format!("Failed to send status: {}", e))?;
-    let status_ts = status_resp.ts;
-
-    let events = match state.handle.chat(session_ctx, &text, confirmer).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "Core dispatch failed");
-            let content = SlackMessageContent::new()
-                .with_text("_An internal error occurred._".to_string());
-            let _ = api_session
-                .chat_update(&SlackApiChatUpdateRequest::new(
-                    channel.clone(),
-                    content,
-                    status_ts,
-                ))
-                .await;
-            return Ok(());
-        }
-    };
-
-    let client = state.client.clone();
-    let bot_token = state.bot_token.clone();
-    tokio::spawn(async move {
-        forward_slack_events(client, bot_token, channel, thread_ts, status_ts, events).await;
-    });
-
-    Ok(())
+    dispatch_to_core_with_followup(state, channel, thread_ts, session_ctx, text, initial_status, None).await
 }
 
 /// Dispatch to core with a followup message after completion.
@@ -1316,7 +1282,7 @@ async fn command_review(
     arg: &str,
     state: &SlackState,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::session_review::{render_review, ReviewDetail};
+    use crate::session_review::{render_review_mrkdwn, ReviewDetail};
 
     let args: Vec<&str> = arg.split_whitespace().collect();
     let detail = args
@@ -1349,20 +1315,7 @@ async fn command_review(
         .filter(|e| e.created_at >= cutoff_str)
         .collect();
 
-    let review = render_review(&filtered, detail);
-    // render_review returns HTML; convert basic tags to mrkdwn
-    let review = review
-        .replace("<b>", "*")
-        .replace("</b>", "*")
-        .replace("<i>", "_")
-        .replace("</i>", "_")
-        .replace("<code>", "`")
-        .replace("</code>", "`")
-        .replace("<pre>", "```")
-        .replace("</pre>", "```")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">");
+    let review = render_review_mrkdwn(&filtered, detail);
     send_mrkdwn(session, channel, thread_ts, &review).await
 }
 
@@ -1426,7 +1379,7 @@ async fn command_search(
     arg: &str,
     state: &SlackState,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::session_review::render_search_results;
+    use crate::session_review::render_search_results_mrkdwn;
 
     if arg.is_empty() {
         return send_mrkdwn(
@@ -1443,18 +1396,8 @@ async fn command_search(
         .activity_log
         .search(arg, 50)
         .unwrap_or_default();
-    let html = render_search_results(&entries, arg);
-    let text = html
-        .replace("<b>", "*")
-        .replace("</b>", "*")
-        .replace("<i>", "_")
-        .replace("</i>", "_")
-        .replace("<code>", "`")
-        .replace("</code>", "`")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">");
-    send_mrkdwn(session, channel, thread_ts, &text).await
+    let mrkdwn = render_search_results_mrkdwn(&entries, arg);
+    send_mrkdwn(session, channel, thread_ts, &mrkdwn).await
 }
 
 async fn command_alerts(
@@ -1606,24 +1549,14 @@ async fn command_alerts(
             }
         }
         _ => {
-            use crate::session_review::render_alert_rules;
+            use crate::session_review::render_alert_rules_mrkdwn;
             let rules = state
                 .handle
                 .activity_log
                 .list_alert_rules()
                 .unwrap_or_default();
-            let html = render_alert_rules(&rules);
-            let text = html
-                .replace("<b>", "*")
-                .replace("</b>", "*")
-                .replace("<i>", "_")
-                .replace("</i>", "_")
-                .replace("<code>", "`")
-                .replace("</code>", "`")
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">");
-            send_mrkdwn(session, channel, thread_ts, &text).await
+            let mrkdwn = render_alert_rules_mrkdwn(&rules);
+            send_mrkdwn(session, channel, thread_ts, &mrkdwn).await
         }
     }
 }
