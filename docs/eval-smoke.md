@@ -1,6 +1,6 @@
 # Eval Smoke Runbook
 
-Use this runbook for a fast integration check of Athena benchmark plumbing.
+Use this runbook for a fast integration check of Emberloom benchmark plumbing.
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Use this runbook for a fast integration check of Athena benchmark plumbing.
 ## Prerequisites
 
 - Python 3.11+
-- Athena repo checkout
+- Emberloom repo checkout
 - optional: built `target/debug/athena` (not required for mock smoke)
 
 ## Local Smoke (Mock Dispatch)

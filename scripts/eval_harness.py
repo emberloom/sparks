@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Eval harness for Athena mission lanes.
+Eval harness for Sparks mission lanes.
 
-Runs a fixed benchmark suite of tasks via `athena dispatch`, scores each run,
+Runs a fixed benchmark suite of tasks via `sparks dispatch`, scores each run,
 and emits machine-readable and human-readable reports.
 """
 
@@ -113,7 +113,7 @@ def run_shell(
 
 
 def parse_db_path(config_path: Path) -> Path:
-    default = Path("~/.athena/athena.db").expanduser()
+    default = Path("~/.sparks/sparks.db").expanduser()
     if not config_path.exists():
         return default
     text = config_path.read_text()
@@ -538,7 +538,7 @@ def cleanup_stale_worktrees(base_repo: Path, stale_hours: float) -> tuple[int, i
 
 def run_task(
     repo: Path,
-    athena_bin: Path,
+    sparks_bin: Path,
     config_path: Path,
     conn: sqlite3.Connection,
     defaults: dict[str, Any],
@@ -554,7 +554,7 @@ def run_task(
     ghost = str(merged.get("ghost", "coder"))
     lane = str(merged.get("lane", "delivery"))
     risk = str(merged.get("risk", "medium"))
-    repo_name = str(merged.get("repo", "athena"))
+    repo_name = str(merged.get("repo", "sparks"))
     strict_timeout_budget = bool(merged.get("strict_timeout_budget", True))
     fast_mode = bool(dispatch_context and "[benchmark_fast_cli]" in dispatch_context.lower())
     min_wait_secs, min_outcome_wait_secs, min_timeout_secs = lane_timeout_budget(
@@ -580,10 +580,10 @@ def run_task(
     before = git_status_paths(repo)
     env = os.environ.copy()
     if cli_timeout_secs > 0:
-        env["ATHENA_CLI_TIMEOUT_SECS"] = str(cli_timeout_secs)
+        env["SPARKS_CLI_TIMEOUT_SECS"] = str(cli_timeout_secs)
 
     cmd = [
-        str(athena_bin),
+        str(sparks_bin),
         "--config",
         str(config_path),
         "dispatch",
@@ -803,17 +803,17 @@ def append_history(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Athena fixed benchmark eval harness.")
+    parser = argparse.ArgumentParser(description="Run Sparks fixed benchmark eval harness.")
     parser.add_argument("--suite", default="eval/benchmark-suite.json")
     parser.add_argument("--config", default="config.toml")
-    parser.add_argument("--athena-bin", default="target/debug/athena")
+    parser.add_argument("--sparks-bin", default="target/debug/sparks")
     parser.add_argument("--output-dir", default="eval/results")
     parser.add_argument("--history-file", default="eval/results/history.jsonl")
     parser.add_argument(
         "--cli-tool",
         choices=["claude_code", "codex", "opencode"],
         default=None,
-        help="Override Athena runtime cli_tool for each dispatch in this harness run.",
+        help="Override Sparks runtime cli_tool for each dispatch in this harness run.",
     )
     parser.add_argument(
         "--cli-model",
@@ -829,7 +829,7 @@ def parse_args() -> argparse.Namespace:
         "--cli-timeout-secs",
         type=int,
         default=0,
-        help="If >0, set ATHENA_CLI_TIMEOUT_SECS for each task run.",
+        help="If >0, set SPARKS_CLI_TIMEOUT_SECS for each task run.",
     )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--max-tasks", type=int, default=0, help="Run only first N tasks (0 = all).")
@@ -868,7 +868,7 @@ def main() -> int:
     repo = Path.cwd().resolve()
     suite_path = resolve_path(repo, args.suite)
     config_path = resolve_path(repo, args.config)
-    athena_bin = resolve_path(repo, args.athena_bin)
+    sparks_bin = resolve_path(repo, args.sparks_bin)
     output_dir = resolve_path(repo, args.output_dir)
     history_path = resolve_path(repo, args.history_file)
 
@@ -878,8 +878,8 @@ def main() -> int:
     if not config_path.exists():
         print(f"Config not found: {config_path}", file=sys.stderr)
         return 2
-    if not athena_bin.exists():
-        print(f"Athena binary not found: {athena_bin}", file=sys.stderr)
+    if not sparks_bin.exists():
+        print(f"Sparks binary not found: {sparks_bin}", file=sys.stderr)
         return 2
 
     suite = json.loads(suite_path.read_text())
@@ -918,7 +918,7 @@ def main() -> int:
         try:
             result = run_task(
                 workspace,
-                athena_bin,
+                sparks_bin,
                 config_path,
                 conn,
                 defaults,

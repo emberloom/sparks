@@ -1,4 +1,4 @@
-Kill all running Athena processes, rebuild with the telegram feature, and restart both the telegram bot and observer.
+Kill all running Emberloom processes, rebuild with the telegram feature, and restart both the telegram bot and observer.
 
 Steps:
 1. Run `pkill -f "target/debug/athena"` to kill existing processes (ignore errors if none running)

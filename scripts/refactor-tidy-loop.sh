@@ -22,7 +22,7 @@ PID_FILE="$RUN_DIR/loop.pid"
 SUMMARY_MD="$RUN_DIR/summary.md"
 MAINT_CURRENT_PATH="$ROOT_DIR/eval/results/maintainability-current.json"
 
-ATHENA_BIN="${ATHENA_BIN:-$ROOT_DIR/target/debug/athena}"
+SPARKS_BIN="${SPARKS_BIN:-$ROOT_DIR/target/debug/sparks}"
 CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/config.toml}"
 RISK="${RISK:-low}"
 WAIT_SECS="${WAIT_SECS:-420}"
@@ -40,9 +40,9 @@ if [[ ! -f "$TICKETS_FILE" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$ATHENA_BIN" ]]; then
-  echo "Building athena binary..."
-  cargo build -q --bin athena
+if [[ ! -x "$SPARKS_BIN" ]]; then
+  echo "Building sparks binary..."
+  cargo build -q --bin sparks
 fi
 
 if [[ -z "$PROMOTE_MODE" ]]; then
@@ -72,7 +72,7 @@ fi
   echo "RUN_DIR=$RUN_DIR"
   echo "LOG_PATH=$LOG_PATH"
   echo "TICKETS_FILE=$TICKETS_FILE"
-  echo "ATHENA_BIN=$ATHENA_BIN"
+  echo "SPARKS_BIN=$SPARKS_BIN"
   echo "CONFIG_PATH=$CONFIG_PATH"
   echo "CLI_TOOL=$CLI_TOOL"
   echo "CLI_MODEL=$CLI_MODEL"
@@ -120,7 +120,7 @@ while (( $(date +%s) < end_epoch )); do
   echo "ticket_index=$ticket_idx ticket=$ticket" | tee -a "$LOG_PATH"
 
   cmd=(
-    "$ATHENA_BIN" --config "$CONFIG_PATH"
+    "$SPARKS_BIN" --config "$CONFIG_PATH"
     self-build run
     --ticket "$ticket"
     --risk "$RISK"
@@ -156,7 +156,7 @@ while (( $(date +%s) < end_epoch )); do
       --top 20 || true
 
   run_step doctor_ci \
-    "$ATHENA_BIN" --config "$CONFIG_PATH" doctor --skip-llm --ci || true
+    "$SPARKS_BIN" --config "$CONFIG_PATH" doctor --skip-llm --ci || true
 
   now_epoch="$(date +%s)"
   if (( now_epoch >= end_epoch )); then

@@ -635,7 +635,7 @@ async fn run_heal_dispatch(
         CI_DISPATCH_WAIT_SECS.saturating_add(180),
     )
     .await;
-    ctx.record("athena_dispatch_ci_heal", &dispatch_run);
+    ctx.record("sparks_dispatch_ci_heal", &dispatch_run);
 
     let dispatch_output = command_combined_output(&dispatch_run);
     let dispatch_task_id = parse_dispatch_task_id(&dispatch_output);
@@ -1458,16 +1458,16 @@ mod tests {
     #[test]
     fn parse_pr_url_extracts_owner_repo_and_number() {
         let parsed =
-            parse_pr_url("https://github.com/Enreign/athena/pull/48").expect("parse pr url");
-        assert_eq!(parsed.owner, "Enreign");
-        assert_eq!(parsed.repo, "athena");
+            parse_pr_url("https://github.com/emberloom/sparks/pull/48").expect("parse pr url");
+        assert_eq!(parsed.owner, "emberloom");
+        assert_eq!(parsed.repo, "sparks");
         assert_eq!(parsed.number, 48);
     }
 
     #[test]
     fn parse_pr_url_rejects_invalid_url() {
-        assert!(parse_pr_url("https://example.com/Enreign/athena/pull/48").is_none());
-        assert!(parse_pr_url("https://github.com/Enreign/athena/issues/48").is_none());
+        assert!(parse_pr_url("https://example.com/emberloom/sparks/pull/48").is_none());
+        assert!(parse_pr_url("https://github.com/emberloom/sparks/issues/48").is_none());
     }
 
     #[test]
@@ -1493,10 +1493,10 @@ mod tests {
 
     #[test]
     fn parse_pr_list_first_url_returns_first_entry() {
-        let raw = r#"[{"url":"https://github.com/Enreign/athena/pull/100"},{"url":"https://github.com/Enreign/athena/pull/101"}]"#;
+        let raw = r#"[{"url":"https://github.com/emberloom/sparks/pull/100"},{"url":"https://github.com/emberloom/sparks/pull/101"}]"#;
         assert_eq!(
             parse_pr_list_first_url(raw).as_deref(),
-            Some("https://github.com/Enreign/athena/pull/100")
+            Some("https://github.com/emberloom/sparks/pull/100")
         );
     }
 
@@ -1511,10 +1511,10 @@ mod tests {
 
     #[test]
     fn extract_pull_request_url_finds_url_in_output() {
-        let out = "Created pull request:\nhttps://github.com/Enreign/athena/pull/55\n";
+        let out = "Created pull request:\nhttps://github.com/emberloom/sparks/pull/55\n";
         assert_eq!(
             extract_pull_request_url(out).as_deref(),
-            Some("https://github.com/Enreign/athena/pull/55")
+            Some("https://github.com/emberloom/sparks/pull/55")
         );
     }
 }

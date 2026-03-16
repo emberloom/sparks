@@ -1,6 +1,6 @@
 # MCP Integration
 
-Athena can discover and expose Model Context Protocol (MCP) tools through a config-driven registry.
+Emberloom can discover and expose Model Context Protocol (MCP) tools through a config-driven registry.
 
 ## Status
 

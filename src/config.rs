@@ -3,9 +3,9 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::llm::{
     LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
 };
@@ -166,7 +166,7 @@ fn default_openai_api_bind() -> String {
 }
 
 fn default_openai_api_key_env() -> String {
-    "ATHENA_OPENAI_API_KEY".into()
+    "SPARKS_OPENAI_API_KEY".into()
 }
 
 fn default_openai_api_principal() -> String {
@@ -237,7 +237,7 @@ fn default_openai_model() -> String {
 }
 
 fn default_openai_auth_file() -> String {
-    "~/.athena/openai.json".into()
+    "~/.sparks/openai.json".into()
 }
 
 impl Default for OpenAiConfig {
@@ -330,7 +330,7 @@ fn default_zen_url() -> String {
 
 #[derive(Deserialize, Clone)]
 pub struct TelegramConfig {
-    /// Bot token (or set ATHENA_TELEGRAM_TOKEN env var)
+    /// Bot token (or set SPARKS_TELEGRAM_TOKEN env var)
     pub token: Option<String>,
     /// Optional LLM provider override for Telegram (default: "openai")
     pub provider: Option<String>,
@@ -354,7 +354,7 @@ pub struct TelegramConfig {
     pub planning_timeout_secs: u64,
     /// Speech-to-text API URL (OpenAI Whisper-compatible endpoint)
     pub stt_url: Option<String>,
-    /// STT API key (or set ATHENA_STT_API_KEY env var)
+    /// STT API key (or set SPARKS_STT_API_KEY env var)
     pub stt_api_key: Option<String>,
     /// STT model name (default: whisper-large-v3)
     pub stt_model: Option<String>,
@@ -398,7 +398,7 @@ impl Default for TelegramConfig {
 
 // ── Slack config ─────────────────────────────────────────────────────
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct SlackConfig {
     /// Bot token (xoxb-...) or set ATHENA_SLACK_BOT_TOKEN env var
     pub bot_token: Option<String>,
@@ -524,7 +524,7 @@ fn default_embedding_enabled() -> bool {
     true
 }
 fn default_model_dir() -> String {
-    "~/.athena/models/all-MiniLM-L6-v2".into()
+    "~/.sparks/models/all-MiniLM-L6-v2".into()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -846,7 +846,7 @@ fn default_ticket_ci_timeout_secs() -> u64 {
 }
 
 fn default_ticket_intake_label() -> Option<String> {
-    Some("athena".to_string())
+    Some("sparks".to_string())
 }
 
 fn default_ticket_intake_webhook_bind() -> String {
@@ -968,7 +968,7 @@ pub struct ManagerConfig {
     pub sensitive_patterns: Vec<String>,
     #[serde(default)]
     pub loop_guard: LoopGuardConfig,
-    /// Directory containing dynamic tool YAML definitions (default: ~/.athena/dynamic_tools/)
+    /// Directory containing dynamic tool YAML definitions (default: ~/.sparks/dynamic_tools/)
     pub dynamic_tools_path: Option<String>,
 }
 
@@ -1086,7 +1086,7 @@ impl GhostRole {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct PersonaConfig {
-    /// Path to Athena's soul file
+    /// Path to Sparks's soul file
     pub soul_file: Option<String>,
     /// Runtime-loaded soul content (not serialized)
     #[serde(skip)]
@@ -1140,7 +1140,7 @@ fn default_timeout_secs() -> u64 {
     600
 }
 fn default_db_path() -> String {
-    "~/.athena/athena.db".into()
+    "~/.sparks/sparks.db".into()
 }
 fn default_max_steps() -> usize {
     15
@@ -1257,12 +1257,12 @@ impl Default for McpConfig {
 
 impl ManagerConfig {
     /// Resolve the dynamic tools directory, expanding ~ to home dir.
-    /// Falls back to ~/.athena/dynamic_tools/ if not configured.
+    /// Falls back to ~/.sparks/dynamic_tools/ if not configured.
     pub fn resolve_dynamic_tools_path(&self) -> Option<std::path::PathBuf> {
         let raw = self
             .dynamic_tools_path
             .clone()
-            .unwrap_or_else(|| "~/.athena/dynamic_tools".into());
+            .unwrap_or_else(|| "~/.sparks/dynamic_tools".into());
 
         let path = if raw.starts_with("~/") {
             dirs::home_dir().map(|h| h.join(&raw[2..]))?
@@ -1356,14 +1356,14 @@ impl Config {
         let config_path = if let Some(p) = path {
             Some(p.to_path_buf())
         } else {
-            // Look in current directory, then ~/.athena/
+            // Look in current directory, then ~/.sparks/
             let local = PathBuf::from("config.toml");
             if local.exists() {
                 Some(local)
             } else {
                 let home = dirs::home_dir()
-                    .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
-                let global = home.join(".athena").join("config.toml");
+                    .ok_or_else(|| SparksError::Config("Cannot find home directory".into()))?;
+                let global = home.join(".sparks").join("config.toml");
                 if global.exists() {
                     Some(global)
                 } else {
@@ -1375,10 +1375,10 @@ impl Config {
 
         let mut config = if let Some(path) = config_path {
             let contents = std::fs::read_to_string(&path).map_err(|e| {
-                AthenaError::Config(format!("Failed to read {}: {}", path.display(), e))
+                SparksError::Config(format!("Failed to read {}: {}", path.display(), e))
             })?;
             toml::from_str(&contents)
-                .map_err(|e| AthenaError::Config(format!("Failed to parse config: {}", e)))?
+                .map_err(|e| SparksError::Config(format!("Failed to parse config: {}", e)))?
         } else {
             Config::default()
         };
@@ -1391,8 +1391,8 @@ impl Config {
 
         config.inline_secret_labels = config.collect_inline_secret_labels();
         if !config.inline_secret_labels.is_empty() && !allow_inline_secrets() {
-            return Err(AthenaError::Config(format!(
-                "Inline secrets found in config: {}. Move these to env vars or a .env file (gitignored). Set ATHENA_ALLOW_INLINE_SECRETS=1 to override.",
+            return Err(SparksError::Config(format!(
+                "Inline secrets found in config: {}. Move these to env vars or a .env file (gitignored). Set SPARKS_ALLOW_INLINE_SECRETS=1 to override.",
                 config.inline_secret_labels.join(", ")
             )));
         }
@@ -1422,10 +1422,10 @@ impl Config {
         {
             labels.push("openai_api.api_key".to_string());
         }
-        if self.telegram.token.is_some() && std::env::var("ATHENA_TELEGRAM_TOKEN").is_err() {
+        if self.telegram.token.is_some() && std::env::var("SPARKS_TELEGRAM_TOKEN").is_err() {
             labels.push("telegram.token".to_string());
         }
-        if self.telegram.stt_api_key.is_some() && std::env::var("ATHENA_STT_API_KEY").is_err() {
+        if self.telegram.stt_api_key.is_some() && std::env::var("SPARKS_STT_API_KEY").is_err() {
             labels.push("telegram.stt_api_key".to_string());
         }
         if self
@@ -1452,10 +1452,10 @@ impl Config {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(token) = std::env::var("ATHENA_TELEGRAM_TOKEN") {
+        if let Ok(token) = std::env::var("SPARKS_TELEGRAM_TOKEN") {
             self.telegram.token = Some(token);
         }
-        if let Ok(key) = std::env::var("ATHENA_STT_API_KEY") {
+        if let Ok(key) = std::env::var("SPARKS_STT_API_KEY") {
             self.telegram.stt_api_key = Some(key);
         }
         if let Ok(token) = std::env::var("GH_TOKEN") {
@@ -1639,7 +1639,7 @@ impl Config {
             }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
-                    AthenaError::Config(
+                    SparksError::Config(
                         "provider = \"openrouter\" but [openrouter] section is missing".into(),
                     )
                 })?;
@@ -1648,7 +1648,7 @@ impl Config {
                     .clone()
                     .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                     .ok_or_else(|| {
-                        AthenaError::Config(
+                        SparksError::Config(
                             "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
                                 .into(),
                         )
@@ -1667,14 +1667,14 @@ impl Config {
             }
             "zen" => {
                 let cfg = self.zen.as_ref().ok_or_else(|| {
-                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+                    SparksError::Config("provider = \"zen\" but [zen] section is missing".into())
                 })?;
                 let api_key = cfg
                     .api_key
                     .clone()
                     .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
                     .ok_or_else(|| {
-                        AthenaError::Config(
+                        SparksError::Config(
                             "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
                                 .into(),
                         )
@@ -1691,7 +1691,7 @@ impl Config {
                     "Opencode Zen",
                 )))
             }
-            other => Err(AthenaError::Config(format!(
+            other => Err(SparksError::Config(format!(
                 "Unknown LLM provider: {}",
                 other
             ))),
@@ -1726,7 +1726,7 @@ impl Config {
             }
             "openrouter" => {
                 let cfg = self.openrouter.as_ref().ok_or_else(|| {
-                    AthenaError::Config(
+                    SparksError::Config(
                         "provider = \"openrouter\" but [openrouter] section is missing".into(),
                     )
                 })?;
@@ -1737,7 +1737,7 @@ impl Config {
                             .clone()
                             .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
                             .ok_or_else(|| {
-                                AthenaError::Config(
+                                SparksError::Config(
                                     "OpenRouter API key not set (config api_key or OPENROUTER_API_KEY env)"
                                         .into(),
                                 )
@@ -1759,7 +1759,7 @@ impl Config {
             }
             "zen" => {
                 let cfg = self.zen.as_ref().ok_or_else(|| {
-                    AthenaError::Config("provider = \"zen\" but [zen] section is missing".into())
+                    SparksError::Config("provider = \"zen\" but [zen] section is missing".into())
                 })?;
                 match &cfg.classifier_model {
                     Some(model) => {
@@ -1768,7 +1768,7 @@ impl Config {
                             .clone()
                             .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
                             .ok_or_else(|| {
-                                AthenaError::Config(
+                                SparksError::Config(
                                     "Opencode Zen API key not set (config api_key or OPENCODE_API_KEY env)"
                                         .into(),
                                 )
@@ -1796,7 +1796,7 @@ impl Config {
     pub fn db_path(&self) -> Result<PathBuf> {
         let path = if self.db.path.starts_with("~/") {
             let home = dirs::home_dir()
-                .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
+                .ok_or_else(|| SparksError::Config("Cannot find home directory".into()))?;
             home.join(&self.db.path[2..])
         } else {
             PathBuf::from(&self.db.path)
@@ -1808,7 +1808,7 @@ impl Config {
     pub fn resolve_model_dir(&self) -> Result<PathBuf> {
         let path = if self.embedding.model_dir.starts_with("~/") {
             let home = dirs::home_dir()
-                .ok_or_else(|| AthenaError::Config("Cannot find home directory".into()))?;
+                .ok_or_else(|| SparksError::Config("Cannot find home directory".into()))?;
             home.join(&self.embedding.model_dir[2..])
         } else {
             PathBuf::from(&self.embedding.model_dir)
@@ -1834,7 +1834,7 @@ impl Config {
 
 fn allow_inline_secrets() -> bool {
     matches!(
-        std::env::var("ATHENA_ALLOW_INLINE_SECRETS")
+        std::env::var("SPARKS_ALLOW_INLINE_SECRETS")
             .as_deref()
             .unwrap_or(""),
         "1" | "true" | "TRUE" | "yes" | "YES"
@@ -1922,13 +1922,13 @@ mod tests {
     fn trusted_repo_helpers_normalize_and_match() {
         let mut config = Config::default();
         config.runtime.profile = RuntimeProfile::SelfDevTrusted;
-        config.self_dev.trusted_repos = vec![" Athena ".to_string(), "".to_string()];
-        assert_eq!(config.trusted_self_dev_repos(), vec!["athena"]);
+        config.self_dev.trusted_repos = vec![" Sparks ".to_string(), "".to_string()];
+        assert_eq!(config.trusted_self_dev_repos(), vec!["sparks"]);
     }
 
     #[test]
     fn load_hydrates_default_ghosts_when_missing_in_file() {
-        let path = temp_config_path("athena-config-no-ghosts");
+        let path = temp_config_path("sparks-config-no-ghosts");
         std::fs::write(
             &path,
             r#"
@@ -1947,7 +1947,7 @@ provider = "ollama"
 
     #[test]
     fn load_preserves_explicit_ghosts_from_file() {
-        let path = temp_config_path("athena-config-explicit-ghost");
+        let path = temp_config_path("sparks-config-explicit-ghost");
         std::fs::write(
             &path,
             r#"

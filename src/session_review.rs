@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 #[cfg(any(feature = "telegram", feature = "slack"))]
 use crate::llm::{ChatRole, LlmProvider, Message};
@@ -109,7 +109,7 @@ pub struct ActivityLogStore {
 
 fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Connection>> {
     conn.lock()
-        .map_err(|e| AthenaError::Tool(format!("Failed to lock activity log store: {}", e)))
+        .map_err(|e| SparksError::Tool(format!("Failed to lock activity log store: {}", e)))
 }
 
 /// Helper to build an ActivityEntry from a row that selects all 13 columns.
@@ -653,14 +653,14 @@ fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> 
     let activity_dump = build_activity_dump(entries);
     match detail {
         ReviewDetail::Summary => format!(
-            "You are explaining what an AI agent system (Athena) did during a session.\n\
+            "You are explaining what an AI agent system (Sparks) did during a session.\n\
              Give a concise 2-3 sentence conceptual summary. Focus on WHAT was accomplished \
              and WHY, not implementation details. Write for a product manager.\n\n\
              Activity log:\n{}\n\nExplain:",
             activity_dump
         ),
         ReviewDetail::Standard => format!(
-            "You are explaining what an AI agent system (Athena) did during a session.\n\
+            "You are explaining what an AI agent system (Sparks) did during a session.\n\
              Give a structured explanation with:\n\
              1. **What happened** — conceptual overview (2-3 sentences)\n\
              2. **Key decisions** — what reasoning drove the actions\n\
@@ -672,7 +672,7 @@ fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> 
             activity_dump
         ),
         ReviewDetail::Detailed => format!(
-            "You are explaining what an AI agent system (Athena) did during a session.\n\
+            "You are explaining what an AI agent system (Sparks) did during a session.\n\
              Give a comprehensive explanation with:\n\
              1. **Executive summary** — 2-3 sentence overview\n\
              2. **Phase breakdown** — group events into logical phases, explain each\n\

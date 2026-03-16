@@ -1,6 +1,6 @@
 # OpenAI-Compatible API
 
-Athena can expose a minimal OpenAI-compatible surface for IDE/client integrations.
+Emberloom can expose a minimal OpenAI-compatible surface for IDE/client integrations.
 
 ## Endpoints
 

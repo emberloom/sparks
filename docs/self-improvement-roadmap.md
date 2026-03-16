@@ -1,10 +1,10 @@
-# Athena Self-Improvement Roadmap
+# Emberloom Self-Improvement Roadmap
 
 Date: 2026-02-17
 
 ## North Star
 
-Build Athena into a spec-driven engineering agent that can reliably deliver backlog work across products and improve itself through measured, policy-bounded iteration.
+Build Emberloom into a spec-driven engineering agent that can reliably deliver backlog work across products and improve itself through measured, policy-bounded iteration.
 
 ## Current State (Baseline)
 
@@ -127,7 +127,7 @@ Closure evidence:
 
 ### Phase 3: Supervised Self-Build Pipeline (Closed 2026-02-17)
 
-Goal: Athena can improve Athena in a bounded loop.
+Goal: Emberloom can improve Emberloom in a bounded loop.
 
 Deliverables:
 

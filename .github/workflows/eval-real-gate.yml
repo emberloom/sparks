@@ -5,7 +5,7 @@ on:
 
 jobs:
   real-gate:
-    # Intended for a self-hosted runner with Athena runtime + credentials configured.
+    # Intended for a self-hosted runner with Sparks runtime + credentials configured.
     runs-on: self-hosted
 
     steps:
@@ -17,26 +17,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build Athena
-        run: cargo build --bin athena
+      - name: Build Sparks
+        run: cargo build --bin sparks
 
       - name: Run real quality gate suite
         run: |
           python3 scripts/eval_harness.py \
             --suite eval/benchmark-real-gate.json \
             --config config.toml \
-            --athena-bin target/debug/athena
+            --sparks-bin target/debug/sparks
 
       - name: Render dashboard
         run: |
           python3 scripts/eval_dashboard.py \
             --config config.toml \
-            --repo athena \
+            --repo sparks \
             --out-file eval/results/dashboard.md \
             --json-out-file eval/results/dashboard_data.json
           python3 scripts/eval_dashboard.py \
             --config config.toml \
-            --repo athena \
+            --repo sparks \
             --output-format html \
             --out-file eval/results/dashboard.html \
             --json-out-file eval/results/dashboard_data.json

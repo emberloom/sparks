@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hygiene check for Athena — catches common AI-generated code smells.
+Hygiene check for Sparks — catches common AI-generated code smells.
 
 Zero-tolerance checks (must stay at 0):
   - todo!() / unimplemented!() outside test blocks
@@ -269,7 +269,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"{CYAN}Athena hygiene check{RESET}")
+    print(f"{CYAN}Sparks hygiene check{RESET}")
     print(f"{DIM}src: {SRC}{RESET}\n")
 
     failures: list[str] = []

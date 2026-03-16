@@ -30,9 +30,9 @@ pub struct EvalRunArgs {
     /// Config path override (falls back to global --config, then config.toml)
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Athena binary path override (defaults to currently running athena binary)
+    /// Sparks binary path override (defaults to currently running sparks binary)
     #[arg(long)]
-    pub athena_bin: Option<PathBuf>,
+    pub sparks_bin: Option<PathBuf>,
     /// Output scorecard JSON path
     #[arg(long, default_value = DEFAULT_SCORECARD_OUTPUT_PATH)]
     pub output: PathBuf,
@@ -42,7 +42,7 @@ pub struct EvalRunArgs {
     /// Deterministic seed tag passed to harness context/env
     #[arg(long)]
     pub seed: Option<u64>,
-    /// Optional ATHENA_CLI_TIMEOUT_SECS passthrough to harness
+    /// Optional SPARKS_CLI_TIMEOUT_SECS passthrough to harness
     #[arg(long)]
     pub timeout_secs: Option<u64>,
     /// Stop on first below-threshold task
@@ -111,7 +111,7 @@ pub struct EvalRunMetadataV1 {
     pub suite_name: String,
     pub config_path: String,
     pub config_sha256: Option<String>,
-    pub athena_bin: String,
+    pub sparks_bin: String,
     pub git_commit_sha: Option<String>,
     pub harness_report_json: String,
     pub harness_exit_code: i32,
@@ -272,9 +272,9 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
             .or(global_config_path)
             .unwrap_or_else(|| Path::new(DEFAULT_CONFIG_PATH)),
     );
-    let athena_bin = match args.athena_bin {
+    let sparks_bin = match args.sparks_bin {
         Some(path) => resolve_path(&repo_root, &path),
-        None => std::env::current_exe().context("failed to resolve current athena binary")?,
+        None => std::env::current_exe().context("failed to resolve current sparks binary")?,
     };
     let scorecard_output = resolve_path(&cwd, &args.output);
     let scenario_library_path = resolve_path(&repo_root, &args.scenario_library);
@@ -282,7 +282,7 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
 
     ensure_exists(&suite_path, "suite")?;
     ensure_exists(&config_path, "config")?;
-    ensure_exists(&athena_bin, "athena binary")?;
+    ensure_exists(&sparks_bin, "sparks binary")?;
     ensure_exists(&scenario_library_path, "scenario library")?;
     ensure_exists(&harness_script_path, "eval harness script")?;
 
@@ -290,7 +290,7 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
     validate_schema_v1(&scenario_library.schema_version, "scenario library")?;
 
     let temp_run_dir =
-        std::env::temp_dir().join(format!("athena-eval-run-{}", uuid::Uuid::new_v4()));
+        std::env::temp_dir().join(format!("sparks-eval-run-{}", uuid::Uuid::new_v4()));
     let harness_output_dir = temp_run_dir.join("harness");
     let harness_history_path = temp_run_dir.join("history.jsonl");
     fs::create_dir_all(&harness_output_dir).with_context(|| {
@@ -304,7 +304,7 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
     command.arg(&harness_script_path);
     command.args(["--suite", suite_path.to_string_lossy().as_ref()]);
     command.args(["--config", config_path.to_string_lossy().as_ref()]);
-    command.args(["--athena-bin", athena_bin.to_string_lossy().as_ref()]);
+    command.args(["--sparks-bin", sparks_bin.to_string_lossy().as_ref()]);
     command.args([
         "--output-dir",
         harness_output_dir.to_string_lossy().as_ref(),
@@ -324,7 +324,7 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
             "--dispatch-context",
             format!("[benchmark_seed:{}]", seed).as_str(),
         ]);
-        command.env("ATHENA_EVAL_SEED", seed.to_string());
+        command.env("SPARKS_EVAL_SEED", seed.to_string());
         command.env("PYTHONHASHSEED", seed.to_string());
     }
 
@@ -416,7 +416,7 @@ fn handle_eval_run(args: EvalRunArgs, global_config_path: Option<&Path>) -> anyh
             suite_name: harness_report.suite,
             config_path: config_path.to_string_lossy().to_string(),
             config_sha256: compute_sha256_hex(&config_path)?,
-            athena_bin: athena_bin.to_string_lossy().to_string(),
+            sparks_bin: sparks_bin.to_string_lossy().to_string(),
             git_commit_sha: git_commit_sha(&repo_root),
             harness_report_json: report_json_path.to_string_lossy().to_string(),
             harness_exit_code,
@@ -917,13 +917,13 @@ mod tests {
             generated_at_utc: "2026-03-02T00:00:00Z".to_string(),
             run: EvalRunMetadataV1 {
                 scenario_library_path: "eval/scenario-library-v1.json".to_string(),
-                scenario_library_id: "athena-eval-scenarios".to_string(),
+                scenario_library_id: "sparks-eval-scenarios".to_string(),
                 scenario_id: "sample".to_string(),
                 suite_path: "eval/benchmark-suite.json".to_string(),
-                suite_name: "athena-core-v2-real".to_string(),
+                suite_name: "sparks-core-v2-real".to_string(),
                 config_path: "config.toml".to_string(),
                 config_sha256: None,
-                athena_bin: "target/debug/athena".to_string(),
+                sparks_bin: "target/debug/sparks".to_string(),
                 git_commit_sha: Some("abc".to_string()),
                 harness_report_json: "eval/results/eval-raw.json".to_string(),
                 harness_exit_code: 0,

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# seed-memories.sh — Insert synthetic test data into Athena's SQLite DB.
+# seed-memories.sh — Insert synthetic test data into Sparks's SQLite DB.
 # Usage: ./scripts/seed-memories.sh [path-to-db]
 set -euo pipefail
 
-DB="${1:-$HOME/.athena/athena.db}"
+DB="${1:-$HOME/.sparks/sparks.db}"
 
 if [ ! -f "$DB" ]; then
   echo "Error: database not found at $DB"
-  echo "Start Athena at least once to initialize the schema, then re-run."
+  echo "Start Sparks at least once to initialize the schema, then re-run."
   exit 1
 fi
 
@@ -67,7 +67,7 @@ INSERT OR IGNORE INTO memories (id, category, content) VALUES
 
 -- ── Conversations: session 1 (architecture discussion) ───────────────
 INSERT OR IGNORE INTO conversations (session_key, role, content, created_at) VALUES
-  ('seed-session-01', 'user',      'I want to add a memory system to Athena. It should store facts, observations, and musings separately.',           datetime('now', '-2 days')),
+  ('seed-session-01', 'user',      'I want to add a memory system to Sparks. It should store facts, observations, and musings separately.',           datetime('now', '-2 days')),
   ('seed-session-01', 'assistant', 'That makes sense — separate categories let you query and weight them differently. I''d suggest a single table with a category column plus FTS5 for full-text search.', datetime('now', '-2 days', '+1 minute')),
   ('seed-session-01', 'user',      'What about deduplication? I don''t want the same insight stored 50 times.',                                          datetime('now', '-2 days', '+2 minutes')),
   ('seed-session-01', 'assistant', 'Cosine similarity on embeddings is the gold standard. Store embeddings alongside content, and before each insert check if any existing memory exceeds a threshold (0.95 works well). If so, update the timestamp instead of inserting.', datetime('now', '-2 days', '+3 minutes')),

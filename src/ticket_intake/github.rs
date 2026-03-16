@@ -3,7 +3,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
 
 #[derive(Clone)]
@@ -83,14 +83,14 @@ impl TicketProvider for GitHubProvider {
             ])
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitHub request failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitHub request failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitHub response error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitHub response error: {}", e)))?;
 
         let issues: Vec<GhIssue> = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitHub parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitHub parse failed: {}", e)))?;
 
         let tickets = issues
             .into_iter()
@@ -114,7 +114,7 @@ impl TicketProvider for GitHubProvider {
 
     async fn post_comment(&self, ticket: &ExternalTicket, message: &str) -> Result<()> {
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "GitHub write-back missing issue number".to_string(),
             ));
         };
@@ -132,9 +132,9 @@ impl TicketProvider for GitHubProvider {
             .json(&json!({ "body": message }))
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitHub comment failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitHub comment failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitHub comment error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitHub comment error: {}", e)))?;
         Ok(())
     }
 
@@ -143,7 +143,7 @@ impl TicketProvider for GitHubProvider {
             return Ok(());
         }
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "GitHub write-back missing issue number".to_string(),
             ));
         };
@@ -160,9 +160,9 @@ impl TicketProvider for GitHubProvider {
             .json(&json!({ "state": "closed" }))
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("GitHub status update failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("GitHub status update failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("GitHub status update error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("GitHub status update error: {}", e)))?;
         Ok(())
     }
 

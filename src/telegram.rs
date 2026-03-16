@@ -8,7 +8,7 @@ use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Pa
 use crate::config::TelegramConfig;
 use crate::confirm::Confirmer;
 use crate::core::{CoreEvent, CoreHandle, SessionContext};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::observer::ObserverCategory;
 use crate::session_review::{ActivityEntry, ActivityLogStore};
 
@@ -141,8 +141,8 @@ async fn transcribe_voice(
     let stt_key = config
         .stt_api_key
         .clone()
-        .or_else(|| std::env::var("ATHENA_STT_API_KEY").ok())
-        .ok_or("STT API key not configured. Set stt_api_key or ATHENA_STT_API_KEY env var.")?;
+        .or_else(|| std::env::var("SPARKS_STT_API_KEY").ok())
+        .ok_or("STT API key not configured. Set stt_api_key or SPARKS_STT_API_KEY env var.")?;
     let stt_model = config.stt_model.as_deref().unwrap_or("whisper-large-v3");
 
     // Download voice file from Telegram
@@ -228,7 +228,7 @@ impl Confirmer for TelegramConfirmer {
             .parse_mode(ParseMode::Html)
             .reply_markup(keyboard)
             .await
-            .map_err(|e| AthenaError::Tool(format!("Failed to send confirmation: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to send confirmation: {}", e)))?;
 
         let (tx, rx) = oneshot::channel();
         {
@@ -243,11 +243,11 @@ impl Confirmer for TelegramConfirmer {
                 // Timed out or denied — clean up
                 let mut pending = self.pending.lock().await;
                 pending.remove(&confirm_id);
-                Err(AthenaError::Cancelled)
+                Err(SparksError::Cancelled)
             }
             Ok(Err(_)) => {
                 // Channel dropped
-                Err(AthenaError::Cancelled)
+                Err(SparksError::Cancelled)
             }
         }
     }
@@ -685,7 +685,7 @@ fn session_user_id(msg: &Message) -> String {
 }
 
 async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
-    let help = "<b>Athena</b>
+    let help = "<b>Emberloom Sparks</b>
 
         <b>Commands:</b>
         /plan — Start a planning interview
@@ -710,7 +710,7 @@ async fn command_help(bot: &Bot, chat_id: ChatId) -> ResponseResult<()> {
         /alerts — Manage notification alert rules
         /help — This help message
 
-        Send any message to chat with Athena.";
+        Send any message to chat with Sparks.";
     send_html(bot, chat_id, help).await
 }
 
@@ -2922,9 +2922,9 @@ pub async fn run_telegram(
     let token = config
         .token
         .clone()
-        .or_else(|| std::env::var("ATHENA_TELEGRAM_TOKEN").ok())
+        .or_else(|| std::env::var("SPARKS_TELEGRAM_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!(
-            "Telegram token not set. Set [telegram].token in config.toml or ATHENA_TELEGRAM_TOKEN env var"
+            "Telegram token not set. Set [telegram].token in config.toml or SPARKS_TELEGRAM_TOKEN env var"
         ))?;
 
     let bot = Bot::new(&token);

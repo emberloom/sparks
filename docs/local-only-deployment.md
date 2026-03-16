@@ -1,6 +1,6 @@
 # Local-Only Deployment and Verification
 
-This guide defines Athena's `local_only` runtime profile for fully local operation where prompts and code stay on the machine.
+This guide defines Emberloom's `local_only` runtime profile for fully local operation where prompts and code stay on the machine.
 
 ## What `local_only` Means
 
@@ -97,7 +97,7 @@ Expected: fail at `Outbound integration toggles`.
 
 4. Egress observation (optional)
 
-Run Athena while observing non-loopback connections (tooling depends on host OS):
+Run Emberloom while observing non-loopback connections (tooling depends on host OS):
 
 - Linux example: `sudo tcpdump -i any 'tcp and not (dst host 127.0.0.1 or dst host ::1)'`
 - macOS example: `sudo tcpdump -i any 'tcp and not (dst host 127.0.0.1 or dst host ::1)'`
@@ -116,7 +116,7 @@ See `.github/workflows/doctor.yml` for a local-only smoke + negative-drift examp
 `local_only` (runtime profile), container-strict execution, and self-dev mode solve different layers and can be combined.
 
 - `local_only`: host runtime egress policy and integration constraints.
-- Container-strict execution: ghost container hardening (`network_mode=none`, dropped caps, read-only rootfs) in `src/docker.rs`.
+- Container-strict execution: spark container hardening (`network_mode=none`, dropped caps, read-only rootfs) in `src/docker.rs`.
 - Trusted-host self-dev mode (`[self_dev].enabled = true`): enables autonomous diagnosis/refactoring loops in the host process.
 
 Recommended combination for maximum locality:

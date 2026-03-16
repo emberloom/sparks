@@ -1,9 +1,9 @@
 use keyring::{Entry, Error as KeyringError};
 use rpassword::prompt_password;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
-const KEYRING_SERVICE: &str = "athena";
+const KEYRING_SERVICE: &str = "sparks";
 
 #[derive(Debug, Clone, Copy)]
 pub struct SecretSpec {
@@ -43,11 +43,11 @@ pub const KNOWN_SECRETS: &[SecretSpec] = &[
     },
     SecretSpec {
         key: "telegram.token",
-        env: "ATHENA_TELEGRAM_TOKEN",
+        env: "SPARKS_TELEGRAM_TOKEN",
     },
     SecretSpec {
         key: "telegram.stt_api_key",
-        env: "ATHENA_STT_API_KEY",
+        env: "SPARKS_STT_API_KEY",
     },
     SecretSpec {
         key: "openrouter.api_key",
@@ -132,26 +132,26 @@ pub fn set_secret(key: &str) -> Result<()> {
     let spec = find_spec(key)?;
     let prompt = format!("Enter value for {}: ", spec.key);
     let value = prompt_password(prompt)
-        .map_err(|e| AthenaError::Tool(format!("Failed to read secret from stdin: {}", e)))?;
+        .map_err(|e| SparksError::Tool(format!("Failed to read secret from stdin: {}", e)))?;
     if value.trim().is_empty() {
-        return Err(AthenaError::Tool("Secret cannot be empty".to_string()));
+        return Err(SparksError::Tool("Secret cannot be empty".to_string()));
     }
     let entry = Entry::new(KEYRING_SERVICE, spec.key)
-        .map_err(|e| AthenaError::Tool(format!("Keyring init failed: {}", e)))?;
+        .map_err(|e| SparksError::Tool(format!("Keyring init failed: {}", e)))?;
     entry
         .set_password(&value)
-        .map_err(|e| AthenaError::Tool(format!("Keyring write failed: {}", e)))?;
+        .map_err(|e| SparksError::Tool(format!("Keyring write failed: {}", e)))?;
     Ok(())
 }
 
 pub fn delete_secret(key: &str) -> Result<()> {
     let spec = find_spec(key)?;
     let entry = Entry::new(KEYRING_SERVICE, spec.key)
-        .map_err(|e| AthenaError::Tool(format!("Keyring init failed: {}", e)))?;
+        .map_err(|e| SparksError::Tool(format!("Keyring init failed: {}", e)))?;
     match entry.delete_credential() {
         Ok(_) => Ok(()),
         Err(KeyringError::NoEntry) => Ok(()),
-        Err(e) => Err(AthenaError::Tool(format!("Keyring delete failed: {}", e))),
+        Err(e) => Err(SparksError::Tool(format!("Keyring delete failed: {}", e))),
     }
 }
 
@@ -160,7 +160,7 @@ pub fn find_spec(key: &str) -> Result<SecretSpec> {
         .iter()
         .copied()
         .find(|spec| spec.key == key)
-        .ok_or_else(|| AthenaError::Tool(format!("Unknown secret key: {}", key)))
+        .ok_or_else(|| SparksError::Tool(format!("Unknown secret key: {}", key)))
 }
 
 #[cfg(test)]

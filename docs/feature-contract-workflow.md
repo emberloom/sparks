@@ -80,7 +80,7 @@ The contract report is emitted for both success and failure paths.
 
 CI autopilot behavior for dispatch:
 - Default is **enabled** via `[ticket_intake.ci_autopilot]` in config.
-- For successful tasks that open a PR, Athena monitors CI, attempts bounded self-heal, and records `ci_monitor_status` in dispatch/report artifacts.
+- For successful tasks that open a PR, Emberloom monitors CI, attempts bounded self-heal, and records `ci_monitor_status` in dispatch/report artifacts.
 - Non-green CI autopilot outcomes are treated as task failures in dispatch summaries.
 
 ## 5. Run Verification

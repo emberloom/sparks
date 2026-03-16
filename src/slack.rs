@@ -7,7 +7,7 @@ use slack_morphism::prelude::*;
 use crate::config::SlackConfig;
 use crate::confirm::Confirmer;
 use crate::core::{CoreEvent, CoreHandle, SessionContext};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 use crate::session_review::{ActivityEntry, ActivityLogStore};
 
@@ -57,14 +57,6 @@ impl PlanningInterview {
             last_updated: now,
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct ImplementContext {
-    goal: String,
-    prompt: String,
-    cli_tool: String,
-    last_updated: tokio::time::Instant,
 }
 
 // ── mrkdwn formatting helpers ───────────────────────────────────────
@@ -266,7 +258,7 @@ impl Confirmer for SlackConfirmer {
         session
             .chat_post_message(&req)
             .await
-            .map_err(|e| AthenaError::Tool(format!("Failed to send confirmation: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to send confirmation: {}", e)))?;
 
         let (tx, rx) = oneshot::channel();
         {
@@ -280,9 +272,9 @@ impl Confirmer for SlackConfirmer {
             Ok(Ok(false)) | Err(_) => {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&confirm_id);
-                Err(AthenaError::Cancelled)
+                Err(SparksError::Cancelled)
             }
-            Ok(Err(_)) => Err(AthenaError::Cancelled),
+            Ok(Err(_)) => Err(SparksError::Cancelled),
         }
     }
 }
@@ -299,12 +291,13 @@ struct SlackState {
     config: SlackConfig,
     last_request: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
     planning: Arc<Mutex<HashMap<String, PlanningInterview>>>,
-    implementing: Arc<Mutex<HashMap<String, ImplementContext>>>,
     system_info: SystemInfo,
 }
 
 /// Check if a channel is authorized.
 fn is_authorized(channel_id: &str, config: &SlackConfig) -> bool {
+    // allowed_channels takes precedence over allow_all for safety.
+    // If both are set, only channels in allowed_channels are accepted.
     if !config.allowed_channels.is_empty() {
         return config.allowed_channels.contains(&channel_id.to_string());
     }
@@ -2076,16 +2069,17 @@ async fn handle_slash_command(
 
     // Rate limit slash commands (except help/status which are read-only)
     {
+        let rate_key = format!("{}:{}", channel_str, user_str);
         let now = tokio::time::Instant::now();
         let mut map = state.last_request.lock().await;
         if should_rate_limit(
-            map.get(&channel_str).copied(),
+            map.get(&rate_key).copied(),
             now,
             tokio::time::Duration::from_secs(5),
         ) {
             return;
         }
-        map.insert(channel_str.clone(), now);
+        map.insert(rate_key, now);
     }
 
     // Parse subcommand and args
@@ -2277,16 +2271,17 @@ async fn handle_slack_message(
 
     // Rate limit check
     {
+        let rate_key = format!("{}:{}", channel_str, user_id);
         let mut last_req = state.last_request.lock().await;
         let now = tokio::time::Instant::now();
         if should_rate_limit(
-            last_req.get(&channel_str).copied(),
+            last_req.get(&rate_key).copied(),
             now,
             tokio::time::Duration::from_secs(5),
         ) {
             return Ok(());
         }
-        last_req.insert(channel_str.clone(), now);
+        last_req.insert(rate_key, now);
     }
 
     // Planning check
@@ -2374,21 +2369,22 @@ async fn handle_app_mention(
         return Ok(());
     }
 
+    let user_id = mention.user.to_string();
+
     // Rate limit mentions
     {
+        let rate_key = format!("{}:{}", channel_str, user_id);
         let now = tokio::time::Instant::now();
         let mut map = state.last_request.lock().await;
         if should_rate_limit(
-            map.get(&channel_str).copied(),
+            map.get(&rate_key).copied(),
             now,
             tokio::time::Duration::from_secs(5),
         ) {
             return Ok(());
         }
-        map.insert(channel_str.clone(), now);
+        map.insert(rate_key, now);
     }
-
-    let user_id = mention.user.to_string();
     let text = mention
         .content
         .text
@@ -2558,11 +2554,13 @@ async fn handle_planning_quick_select(
 
     match kind {
         "timeline" => {
-            interview.timeline = Some(value.to_string());
+            let label = planning_value_label("timeline", value).unwrap_or(value);
+            interview.timeline = Some(label.to_string());
             // Stay on constraints step, user can add more or skip
         }
         "scope" => {
-            interview.scope = Some(value.to_string());
+            let label = planning_value_label("scope", value).unwrap_or(value);
+            interview.scope = Some(label.to_string());
         }
         "constraints" if value == "none" => {
             interview.constraints = Some("none".to_string());
@@ -2888,8 +2886,6 @@ pub async fn run_slack(
         Arc::new(Mutex::new(HashMap::new()));
     let planning: Arc<Mutex<HashMap<String, PlanningInterview>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let implementing: Arc<Mutex<HashMap<String, ImplementContext>>> =
-        Arc::new(Mutex::new(HashMap::new()));
 
     // Spawn stale confirmation cleanup task
     let cleanup_pending = pending.clone();
@@ -2904,9 +2900,8 @@ pub async fn run_slack(
         }
     });
 
-    // Spawn stale planning + implementing cleanup task
+    // Spawn stale planning cleanup task
     let cleanup_planning = planning.clone();
-    let cleanup_implementing = implementing.clone();
     let planning_timeout = tokio::time::Duration::from_secs(config.planning_timeout_secs);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -2921,12 +2916,6 @@ pub async fn run_slack(
                     });
                 }
             }
-            {
-                let mut map = cleanup_implementing.lock().await;
-                if !map.is_empty() {
-                    map.retain(|_, ctx| now.duration_since(ctx.last_updated) < planning_timeout);
-                }
-            }
         }
     });
 
@@ -2938,7 +2927,6 @@ pub async fn run_slack(
         config: config.clone(),
         last_request,
         planning,
-        implementing,
         system_info,
     };
 
@@ -3060,7 +3048,7 @@ async fn run_socket_mode(
         socket_mode_callbacks,
     );
 
-    eprintln!("Slack bot starting (Socket Mode)...");
+    tracing::info!("Slack bot starting (Socket Mode)...");
     socket_mode_listener.listen_for(&app_token).await
         .map_err(|e| anyhow::anyhow!("Failed to start socket mode: {}", e))?;
     socket_mode_listener.serve().await;
@@ -3069,47 +3057,10 @@ async fn run_socket_mode(
 }
 
 async fn run_events_api(
-    config: SlackConfig,
-    state: SlackState,
+    _config: SlackConfig,
+    _state: SlackState,
 ) -> anyhow::Result<()> {
-    let _signing_secret = config
-        .signing_secret
-        .clone()
-        .or_else(|| std::env::var("ATHENA_SLACK_SIGNING_SECRET").ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Events API requires signing_secret. Set [slack].signing_secret or ATHENA_SLACK_SIGNING_SECRET env var"
-            )
-        })?;
-
-    // Events API mode uses HTTP endpoints.
-    // For now, we log a message indicating it's not yet fully implemented.
-    // The socket mode is the recommended default.
-    let bind_addr: std::net::SocketAddr = config
-        .events_api_bind
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid events_api_bind address: {}", e))?;
-
-    eprintln!(
-        "Slack bot starting (Events API on {})...",
-        bind_addr
-    );
-    eprintln!("Note: Events API mode requires a public URL. Socket Mode is recommended for development.");
-
-    // Simple health-check endpoint for now.
-    // Full Events API signing verification and routing would go here.
-    let app = axum::Router::new()
-        .route(
-            "/slack/health",
-            axum::routing::get(|| async { "ok" }),
-        );
-
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    axum::serve(listener, app).await?;
-
-    let _ = state; // used in full implementation
-
-    Ok(())
+    Err(anyhow::anyhow!("Events API mode is not yet implemented. Use mode = \"socket\" instead."))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

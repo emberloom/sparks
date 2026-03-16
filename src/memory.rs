@@ -9,7 +9,7 @@ use hnsw_rs::prelude::{DistCosine, Hnsw};
 use rusqlite::Connection;
 
 use crate::embeddings::cosine_similarity;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 /// Minimum cosine similarity to keep a semantic result.
 pub const SEMANTIC_THRESHOLD: f32 = 0.25;
@@ -289,7 +289,7 @@ impl MemoryStore {
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
-            .map_err(|e| AthenaError::Internal(format!("Database lock poisoned: {}", e)))
+            .map_err(|e| SparksError::Internal(format!("Database lock poisoned: {}", e)))
     }
 
     fn current_memory_generation(&self) -> u64 {
@@ -401,7 +401,7 @@ impl MemoryStore {
         let mut cache = self
             .embedding_cache
             .write()
-            .map_err(|e| AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
         for (id, blob) in pairs {
             if let Some(emb) = blob_to_embedding(&blob) {
                 cache.insert(id, emb);
@@ -581,7 +581,7 @@ impl MemoryStore {
         // Phase 1: compute similarities in memory (only hold cache read lock)
         let id_scores = {
             let cache = self.embedding_cache.read().map_err(|e| {
-                AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e))
+                SparksError::Internal(format!("Embedding cache lock poisoned: {}", e))
             })?;
             let mut id_scores: Vec<(String, f32)> = cache
                 .iter()
@@ -627,7 +627,7 @@ impl MemoryStore {
 
         let snapshot: Vec<(String, Vec<f32>)> = {
             let cache = self.embedding_cache.read().map_err(|e| {
-                AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e))
+                SparksError::Internal(format!("Embedding cache lock poisoned: {}", e))
             })?;
             cache
                 .iter()
@@ -662,7 +662,7 @@ impl MemoryStore {
         }
 
         let mut state = self.semantic_index.write().map_err(|e| {
-            AthenaError::Internal(format!(
+            SparksError::Internal(format!(
                 "Semantic index lock poisoned during rebuild: {}",
                 e
             ))
@@ -712,7 +712,7 @@ impl MemoryStore {
         let cache = self
             .embedding_cache
             .read()
-            .map_err(|e| AthenaError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
+            .map_err(|e| SparksError::Internal(format!("Embedding cache lock poisoned: {}", e)))?;
         Ok(candidate_ids
             .iter()
             .filter_map(|id| {
@@ -1105,7 +1105,7 @@ impl MemoryStore {
                 ))
             },
         )
-        .map_err(|e| AthenaError::Db(e))
+        .map_err(|e| SparksError::Db(e))
     }
 
     /// Persist mood state.
@@ -1350,7 +1350,7 @@ impl MemoryStore {
         ) {
             Ok(r) => Ok(Some(r)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(AthenaError::Db(e)),
+            Err(e) => Err(SparksError::Db(e)),
         }
     }
 }

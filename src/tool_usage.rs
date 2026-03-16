@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 /// Aggregated usage statistics for a single tool.
 #[derive(Debug, Clone)]
@@ -67,7 +67,7 @@ impl ToolUsageStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let success_inc: i64 = if success { 1 } else { 0 };
         let failure_inc: i64 = if success { 0 } else { 1 };
@@ -94,7 +94,7 @@ impl ToolUsageStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let mut stmt = conn.prepare(
             "SELECT tool_name, invocation_count, success_count, failure_count, avg_duration_ms, last_error, last_used
@@ -125,7 +125,7 @@ impl ToolUsageStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock usage store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock usage store: {}", e)))?;
 
         let mut stmt = conn.prepare(
             "SELECT tool_name, invocation_count, success_count, failure_count, avg_duration_ms, last_error, last_used

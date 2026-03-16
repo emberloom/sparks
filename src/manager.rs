@@ -10,7 +10,7 @@ use crate::core::{CoreEvent, SessionContext};
 use crate::doctor;
 use crate::dynamic_tools::{self, DynamicTool};
 use crate::embeddings::Embedder;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::executor::Executor;
 use crate::introspect::SharedMetrics;
 use crate::knobs::SharedKnobs;
@@ -290,7 +290,7 @@ impl Manager {
     ) -> Result<String> {
         // M1: Reject excessively long inputs
         if user_input.len() > 10_000 {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "Input too long (max 10,000 characters)".into(),
             ));
         }
@@ -482,7 +482,7 @@ impl Manager {
                     .ghosts
                     .iter()
                     .find(|g| g.name == ghost_name)
-                    .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
+                    .ok_or_else(|| SparksError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
                 eprintln!("Delegating to ghost: {}", ghost.name);
 
@@ -597,12 +597,12 @@ impl Manager {
         }
 
         let ghost_name =
-            ghost_name.ok_or_else(|| AthenaError::Tool("Missing ghost name".to_string()))?;
+            ghost_name.ok_or_else(|| SparksError::Tool("Missing ghost name".to_string()))?;
         let ghost = self
             .ghosts
             .iter()
             .find(|g| g.name == ghost_name)
-            .ok_or_else(|| AthenaError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
+            .ok_or_else(|| SparksError::Tool(format!("Unknown ghost: {}", ghost_name)))?;
 
         tracing::info!(ghost = %ghost.name, goal = %goal, "Autonomous task executing");
 
@@ -679,7 +679,7 @@ impl Manager {
         let coder = self
             .find_pipeline_ghost(GhostRole::Coder, "coder")
             .ok_or_else(|| {
-                AthenaError::Tool(
+                SparksError::Tool(
                     "Hierarchical pipeline requires a coder ghost (role=coder or name='coder')"
                         .to_string(),
                 )
@@ -687,7 +687,7 @@ impl Manager {
         let critic = self
             .find_pipeline_ghost(GhostRole::Critic, "critic")
             .ok_or_else(|| {
-                AthenaError::Tool(
+                SparksError::Tool(
                     "Hierarchical pipeline requires a critic ghost (role=critic or name='critic')"
                         .to_string(),
                 )
@@ -847,14 +847,14 @@ impl Manager {
         format!("{}\n\n[critic]\napproved=true\nsummary={}", output, summary)
     }
 
-    fn hierarchical_failure_error(&self, review: &CriticReview) -> AthenaError {
+    fn hierarchical_failure_error(&self, review: &CriticReview) -> SparksError {
         let remaining = review
             .feedback
             .iter()
             .map(|item| format!("- {}", item))
             .collect::<Vec<_>>()
             .join("\n");
-        AthenaError::Tool(format!(
+        SparksError::Tool(format!(
             "Hierarchical pipeline did not pass critic after one second-pass coder iteration.\n\
              Critic summary: {}\n\
              Remaining feedback:\n{}",
@@ -1192,7 +1192,7 @@ impl Manager {
         if let Some(tx) = status_tx {
             let _ = tx.send(CoreEvent::Status(err.clone())).await;
         }
-        Err(AthenaError::Tool(err))
+        Err(SparksError::Tool(err))
     }
 
     #[tracing::instrument(skip(
@@ -1433,7 +1433,7 @@ impl Manager {
         for (i, step) in steps.iter().enumerate() {
             let tool = direct_tools
                 .get(&step.tool)
-                .ok_or_else(|| AthenaError::Tool(format!("Unknown direct tool: {}", step.tool)))?;
+                .ok_or_else(|| SparksError::Tool(format!("Unknown direct tool: {}", step.tool)))?;
 
             // Validate and render command
             let cmd = match tool.validate_and_render(&step.params) {
@@ -2736,7 +2736,7 @@ mod tests {
     #[test]
     fn format_kpi_context_contains_expected_metrics() {
         let section = format_kpi_context(
-            "athena",
+            "sparks",
             Some("delivery"),
             Some("medium"),
             0.75,
@@ -2744,7 +2744,7 @@ mod tests {
             0.1,
             20,
         );
-        assert!(section.contains("athena/delivery/medium"));
+        assert!(section.contains("sparks/delivery/medium"));
         assert!(section.contains("success_rate=75.0%"));
         assert!(section.contains("verification_pass=80.0%"));
         assert!(section.contains("rollback_rate=10.0%"));
@@ -2755,20 +2755,20 @@ mod tests {
     fn format_kpi_fallback_context_contains_scope_and_guidance() {
         let scope = KpiPromptScope {
             lane: Some("delivery".to_string()),
-            repo: "athena".to_string(),
+            repo: "sparks".to_string(),
             risk_tier: Some("high".to_string()),
         };
         let section = format_kpi_fallback_context(&scope);
-        assert!(section.contains("athena/delivery/high"));
+        assert!(section.contains("sparks/delivery/high"));
         assert!(section.contains("conservative routing defaults"));
     }
 
     #[test]
     fn infer_kpi_prompt_scope_extracts_lane_repo_risk() {
         let recent = vec![("user".to_string(), "please use lane delivery".to_string())];
-        let scope = infer_kpi_prompt_scope("for repo: athena risk: high", &recent);
+        let scope = infer_kpi_prompt_scope("for repo: sparks risk: high", &recent);
         assert_eq!(scope.lane.as_deref(), Some("delivery"));
-        assert_eq!(scope.repo, "athena");
+        assert_eq!(scope.repo, "sparks");
         assert_eq!(scope.risk_tier.as_deref(), Some("high"));
     }
 
@@ -2903,10 +2903,10 @@ mod tests {
         let ctx = super::RoutingPromptContext {
             scope: super::KpiPromptScope {
                 lane: Some("delivery".to_string()),
-                repo: "athena".to_string(),
+                repo: "sparks".to_string(),
                 risk_tier: Some("medium".to_string()),
             },
-            kpi_context: "\n\nRecent stats for athena/delivery/medium: success_rate=75.0%"
+            kpi_context: "\n\nRecent stats for sparks/delivery/medium: success_rate=75.0%"
                 .to_string(),
             lesson_context: "\n\nRecent lessons:\n- Always run targeted tests first".to_string(),
             kpi_available: true,
@@ -2914,7 +2914,7 @@ mod tests {
         };
 
         let payload = routing_feature_payload_preview(&ctx);
-        assert!(payload.contains("scope=athena/delivery/medium"));
+        assert!(payload.contains("scope=sparks/delivery/medium"));
         assert!(payload.contains("kpi_available=true"));
         assert!(payload.contains("lessons=1"));
         assert!(payload.contains("kpi_preview="));

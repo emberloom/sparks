@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
 
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
 
 #[derive(Clone)]
@@ -103,14 +103,14 @@ impl TicketProvider for JiraProvider {
             .query(&[("jql", jql), ("maxResults", "20".to_string())])
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("JIRA request failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("JIRA request failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("JIRA response error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("JIRA response error: {}", e)))?;
 
         let payload: JiraSearchResponse = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("JIRA parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("JIRA parse failed: {}", e)))?;
 
         let tickets = payload
             .issues
@@ -152,7 +152,7 @@ impl TicketProvider for JiraProvider {
 
     async fn post_comment(&self, ticket: &ExternalTicket, message: &str) -> Result<()> {
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "Jira write-back missing issue key".to_string(),
             ));
         };
@@ -178,9 +178,9 @@ impl TicketProvider for JiraProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Jira comment failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("Jira comment failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("Jira comment error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Jira comment error: {}", e)))?;
         Ok(())
     }
 
@@ -189,7 +189,7 @@ impl TicketProvider for JiraProvider {
             return Ok(());
         }
         let Some(number) = ticket.number.as_ref() else {
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "Jira write-back missing issue key".to_string(),
             ));
         };
@@ -202,14 +202,14 @@ impl TicketProvider for JiraProvider {
             .header("Authorization", format!("Basic {}", auth))
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Jira transitions failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("Jira transitions failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("Jira transitions error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Jira transitions error: {}", e)))?;
 
         let payload: Value = resp
             .json()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Jira transitions parse failed: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Jira transitions parse failed: {}", e)))?;
         let transitions = payload
             .get("transitions")
             .and_then(|t| t.as_array())
@@ -254,9 +254,9 @@ impl TicketProvider for JiraProvider {
             .json(&update_body)
             .send()
             .await
-            .map_err(|e| AthenaError::Tool(format!("Jira status update failed: {}", e)))?
+            .map_err(|e| SparksError::Tool(format!("Jira status update failed: {}", e)))?
             .error_for_status()
-            .map_err(|e| AthenaError::Tool(format!("Jira status update error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Jira status update error: {}", e)))?;
         Ok(())
     }
 

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::confirm::Confirmer;
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::executor::Executor;
 use crate::langfuse::ActiveTrace;
 use crate::llm::{ChatMessage, ChatResponse, LlmProvider, StreamEvent};
@@ -62,7 +62,7 @@ pub fn strategy_from_config(name: &str) -> Result<Box<dyn LoopStrategy>> {
     match name {
         "react" => Ok(Box::new(react::ReactStrategy)),
         "code" => Ok(Box::new(code::CodeStrategy)),
-        other => Err(AthenaError::Config(format!("Unknown strategy: {}", other))),
+        other => Err(SparksError::Config(format!("Unknown strategy: {}", other))),
     }
 }
 

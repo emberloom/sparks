@@ -1,6 +1,6 @@
-# Ghost Specialization Policy
+# Spark Specialization Policy
 
-Athena can auto-select autonomous task ghosts using KPI history instead of a static default.
+Emberloom can auto-select autonomous task sparks using KPI history instead of a static default.
 
 ## Scope
 
@@ -9,20 +9,20 @@ Policy is evaluated per autonomous task scope:
 - `lane`
 - `risk_tier`
 
-If a task specifies an explicit ghost, specialization is bypassed.
+If a task specifies an explicit spark, specialization is bypassed.
 
 ## Baseline Selection
 
 Baseline default is:
 - `coder` when present
-- otherwise first configured ghost
+- otherwise first configured spark
 
 ## Decision Inputs
 
 Policy combines:
-- overall ghost metrics
-- recent-window ghost metrics
-- previous selected ghost
+- overall spark metrics
+- recent-window spark metrics
+- previous selected spark
 
 Metrics include:
 - success rate
@@ -50,7 +50,7 @@ Selection mode is emitted as telemetry (`promote`, `rollback`, `fallback_default
 ## Telemetry
 
 Specialization decisions are logged with:
-- selected ghost
+- selected spark
 - scope (`lane`, `repo`, `risk`)
 - sample count
 - success rate
@@ -60,4 +60,4 @@ Specialization decisions are logged with:
 ## Current Boundary
 
 Specialization is runtime policy-based for dispatch routing.
-It does not automatically materialize repo-specific ghost config files.
+It does not automatically materialize repo-specific spark config files.

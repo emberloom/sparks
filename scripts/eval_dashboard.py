@@ -38,7 +38,7 @@ TOKEN_PRICING_USD_PER_MTOK: dict[str, dict[str, dict[str, float]]] = {
 
 
 def parse_db_path(config_path: Path) -> Path:
-    default = Path("~/.athena/athena.db").expanduser()
+    default = Path("~/.sparks/sparks.db").expanduser()
     if not config_path.exists():
         return default
     text = config_path.read_text()
@@ -1933,7 +1933,7 @@ def render_dashboard(
 
     now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = []
-    lines.append("# Athena KPI + Eval Dashboard")
+    lines.append("# Sparks KPI + Eval Dashboard")
     lines.append("")
     lines.append(f"- generated_utc: {now}")
     lines.append(f"- repo: `{repo_name}`")
@@ -2177,10 +2177,10 @@ def render_dashboard_html(
         "<!doctype html>",
         "<html lang='en'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
-        "<title>Athena KPI + Eval Dashboard</title>",
+        "<title>Sparks KPI + Eval Dashboard</title>",
         "<style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:1200px;margin:24px auto;padding:0 16px;line-height:1.4}h1,h2,h3{margin-top:28px}table{width:100%;border-collapse:collapse;margin:10px 0 20px}th,td{border:1px solid #d0d7de;padding:6px;text-align:left}code{background:#f6f8fa;padding:1px 4px;border-radius:4px}ul{margin-top:8px}</style>",
         "</head><body>",
-        "<h1>Athena KPI + Eval Dashboard</h1>",
+        "<h1>Sparks KPI + Eval Dashboard</h1>",
         "<ul>",
         f"<li>generated_utc: <code>{html.escape(now)}</code></li>",
         f"<li>repo: <code>{html.escape(repo_name)}</code></li>",
@@ -2401,7 +2401,7 @@ def render_dashboard_html(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Render combined KPI + eval dashboard.")
     p.add_argument("--config", default="config.toml")
-    p.add_argument("--repo", default="athena")
+    p.add_argument("--repo", default="sparks")
     p.add_argument("--lane", default=None, help="Optional lane filter for KPI sections.")
     p.add_argument("--risk", default=None, help="Optional risk tier filter for KPI sections.")
     p.add_argument("--history-file", default="eval/results/history.jsonl")

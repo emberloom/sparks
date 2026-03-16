@@ -1,16 +1,14 @@
 <div align="center">
 
-<img src="docs/athena-banner.png" alt="Athena" width="838" />
-
-<h1>Athena</h1>
+<h1>Emberloom Sparks</h1>
 
 <p><strong>Self-hosted multi-agent orchestrator with a hardened execution sandbox,<br>
 semantic memory, and deep observability — built in Rust.</strong></p>
 
-[![CI](https://github.com/Enreign/athena/actions/workflows/maintainability.yml/badge.svg)](https://github.com/Enreign/athena/actions/workflows/maintainability.yml)
+[![CI](https://github.com/emberloom/sparks/actions/workflows/maintainability.yml/badge.svg)](https://github.com/emberloom/sparks/actions/workflows/maintainability.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/github/v/tag/Enreign/athena?label=version&color=blue)](https://github.com/Enreign/athena/releases)
+[![Version](https://img.shields.io/github/v/tag/emberloom/sparks?label=version&color=blue)](https://github.com/emberloom/sparks/releases)
 [![Status](https://img.shields.io/badge/status-active%20development-yellow.svg)](CHANGELOG.md)
 
 <br>
@@ -22,26 +20,26 @@ semantic memory, and deep observability — built in Rust.</strong></p>
 
 ---
 
-## What is Athena?
+## What is Emberloom Sparks?
 
 > [!WARNING]
-> **Early development.** Athena is actively developed and the internals change frequently. Expect rough edges, incomplete features, and breaking changes between versions. Bug reports and PRs are welcome.
+> **Early development.** Emberloom is actively developed and the internals change frequently. Expect rough edges, incomplete features, and breaking changes between versions. Bug reports and PRs are welcome.
 
-Athena is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
+Emberloom Sparks is a **self-hosted Rust multi-agent system** built as a portfolio/learning project to explore the hard parts of autonomous agent architecture: sandboxed execution, semantic memory, multi-agent routing, LLM orchestration, and observability. It is not a SaaS product or a startup — it exists because building these subsystems from scratch is the fastest way to understand them.
 
-Named sub-agents called **ghosts** run inside hardened Docker containers and execute tasks using configurable tool sets and execution strategies. A classifier model routes tasks to the right ghost, informed by historical KPI outcomes. A persistent memory layer with ONNX embeddings and recency decay accumulates cross-session context. External tools are wired in via an MCP client registry with namespaced tool exposure and allowlist controls. A structured observability stack — event streams, Langfuse traces, KPI snapshots, and a `doctor` diagnostic command — makes system behavior inspectable at every level.
+Named sub-agents called **sparks** run inside hardened Docker containers and execute tasks using configurable tool sets and execution strategies. A classifier model routes tasks to the right spark, informed by historical KPI outcomes. A persistent memory layer with ONNX embeddings and recency decay accumulates cross-session context. External tools are wired in via an MCP client registry with namespaced tool exposure and allowlist controls. A structured observability stack — event streams, Langfuse traces, KPI snapshots, and a `doctor` diagnostic command — makes system behavior inspectable at every level.
 
 ---
 
-## Why Athena?
+## Why Emberloom?
 
-| | Athena | Typical self-hosted agent |
+| | Emberloom | Typical self-hosted agent |
 |---|---|---|
 | **Sandbox hardening** | CAP_DROP ALL, read-only rootfs, SSRF/path-traversal blocking, PID+memory limits | Docker run with default caps |
 | **Memory** | ONNX embeddings locally, HNSW index, recency decay, FTS5, deduplication | None, or external embedding API |
 | **Observability** | 20-type event stream, Langfuse traces, KPI snapshots, `doctor` command, HTML dashboard | stdout logs |
-| **Safety model** | 5-level autonomy ladder, prompt scanner, loop guard, per-ghost tool allowlists | Trust the LLM |
-| **Self-improvement** | Eval harness, optimizer tournament, supervised self-build, KPI-driven ghost selection | None |
+| **Safety model** | 5-level autonomy ladder, prompt scanner, loop guard, per-spark tool allowlists | Trust the LLM |
+| **Self-improvement** | Eval harness, optimizer tournament, supervised self-build, KPI-driven spark selection | None |
 
 ---
 
@@ -52,7 +50,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
 - **HNSW semantic memory index** — approximate nearest-neighbor search with exact-cosine fallback
 - **MCP ToolRegistry** — connect any MCP server via config; tools exposed as `mcp:<server>:<tool>`
 - **OpenAI-compatible API** — `/v1/models` and `/v1/chat/completions` for IDE/client integrations
-- **Ghost auto-specialization** — autonomous routing driven by historical KPI success rates
+- **Spark auto-specialization** — autonomous routing driven by historical KPI success rates
 - **Session review & explainability** — activity log with Telegram `/review`, `/explain`, `/watch`, `/alerts`
 - **Prompt scanner** — input-layer safety hardening with `flag_only`/`block` modes and allowlist overrides
 
@@ -72,7 +70,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
   - [OpenAI-Compatible API](#openai-compatible-api)
   - [Configuration & Runtime Control](#configuration--runtime-control)
   - [Proactive & Personality](#proactive--personality-experimental)
-  - [What Athena Does Not Do (Yet)](#what-athena-does-not-do-yet)
+  - [What Emberloom Does Not Do (Yet)](#what-athena-does-not-do-yet)
 - [Architecture](#architecture)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -87,7 +85,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
 
 ```bash
 # 1. Clone
-git clone https://github.com/Enreign/athena.git && cd athena
+git clone https://github.com/emberloom/sparks.git && cd sparks
 
 # 2. Configure
 cp config.example.toml config.toml
@@ -115,9 +113,9 @@ Fully local deployment profile + verification: [`docs/local-only-deployment.md`]
 
 ### Execution & Sandboxing
 
-Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
+Emberloom's Docker sandbox applies layered hardening beyond a typical `docker run`:
 
-- **CAP_DROP ALL** — all Linux capabilities dropped from every ghost container
+- **CAP_DROP ALL** — all Linux capabilities dropped from every spark container
 - **Read-only root filesystem** — containers cannot modify their own image
 - **Network isolation** — disabled by default inside containers
 - **PID limit (256) and memory cap** — per-container resource limits enforced by the daemon
@@ -139,14 +137,14 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 
 ### Multi-Agent Architecture
 
-- **Ghost personas** — named agents (`coder`, `scout`, custom) each with their own tool set, strategy, and optional soul file (personality markdown)
-- **KPI-driven ghost selection** — autonomous routing uses historical success/rollback rates per repo, lane, and risk tier rather than a static default
-- **Classifier-based routing** — an LLM classifier analyzes each task and selects the appropriate ghost
+- **Spark personas** — named agents (`coder`, `scout`, custom) each with their own tool set, strategy, and optional soul file (personality markdown)
+- **KPI-driven spark selection** — autonomous routing uses historical success/rollback rates per repo, lane, and risk tier rather than a static default
+- **Classifier-based routing** — an LLM classifier analyzes each task and selects the appropriate spark
 - **Two execution strategies** — `react` (ReAct loop with observation steps) and `code` (optimized four-phase pipeline for multi-file edits)
 - **Multi-phase pipeline** — EXPLORE → EXECUTE → VERIFY → HEAL phases per task
 - **Async dispatch** — tasks run concurrently via an internal mpsc task queue
-- **Docker isolation** — each ghost execution gets a fresh container; no shared state between runs
-- **Custom profiles** — define new ghost types in `config.toml` or `~/.athena/ghosts/*.toml`
+- **Docker isolation** — each spark execution gets a fresh container; no shared state between runs
+- **Custom profiles** — define new spark types in `config.toml` or `~/.athena/ghosts/*.toml`
 
 ### Planning & Orchestration
 
@@ -154,7 +152,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 - **DAG execution** — tasks within a feature contract execute in topological order with cycle detection
 - **Adaptive token budgeting** — pre-dispatch context budgeting for oversized task contracts
 - **Verification phase** — contracts define acceptance criteria checked against task output
-- **Rollback on failure** — individual ghost tasks roll back git commits on failure
+- **Rollback on failure** — individual spark tasks roll back git commits on failure
 - **Proactive refactoring scanner** — background process identifies improvement opportunities and dispatches tasks autonomously (with spontaneity gate)
 
 ### MCP Integration
@@ -163,12 +161,13 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 - **Namespaced tool exposure** — discovered tools are exposed as `mcp:<server>:<tool>` with per-server allowlists
 - **Confirmation propagation** — `requires_confirmation` flows through the normal tool approval path
 - **`stdio` transport** — production-ready; `sse`/`websocket` config enum exists, rejected at runtime
+- **[Cartograph](https://github.com/emberloom/cartograph) integration** — add `cartograph` to your MCP registry to give sparks codebase-aware context: blast radius, co-change patterns, and ownership before touching code
 
 ### Safety & Intake Hardening
 
 - **Prompt scanner** — input-layer scanner at chat and autonomous task intake with `flag_only`/`block` modes, severity-weighted scoring, and per-provider/repo overrides
 - **Allowlist controls** — scanner bypasses configurable by ticket ID, repo, author, or regex text patterns
-- **Bounded autonomy ladder** — 5-level safety model governing what ghosts may do autonomously
+- **Bounded autonomy ladder** — 5-level safety model governing what sparks may do autonomously
 
 ### Observability & Diagnostics
 
@@ -193,7 +192,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
   - Quiet hours (timezone-aware pulse suppression during off-hours)
   - Heartbeat interval, pulse rate limit (4/hr for non-urgent)
   - Mood drift parameters, energy curve shape
-  - Sensitive pattern blocklist, auto-approve patterns per ghost
+  - Sensitive pattern blocklist, auto-approve patterns per spark
 - **LLM providers** — OpenAI, Ollama (local), OpenRouter, Zen — swap via config with no code changes
 - **Cron scheduling** — POSIX cron, interval-with-jitter, and one-shot scheduling for background tasks
 - **Secret management** — OS keyring via `athena secrets set <key>`; inline secrets in config are blocked by default
@@ -205,7 +204,7 @@ Athena's Docker sandbox applies layered hardening beyond a typical `docker run`:
 - **Conversation re-entry** — autonomously resumes threads based on past context
 - **Telegram front-end** — multi-step planning interview with inline keyboards; voice input via Telegram speech-to-text; quiet-hours-aware pulse delivery
 
-### What Athena Does Not Do (Yet)
+### What Emberloom Does Not Do (Yet)
 
 - **No IDE integration** — CLI and Telegram only
 - **No git worktree workspace isolation** — parallel agents share the working tree; Docker-based isolation only
@@ -311,7 +310,7 @@ Full architecture with state machines and data-flow diagrams: [`docs/architectur
 | Command | Description |
 |---|---|
 | `cargo run -- chat` | Start interactive REPL session |
-| `cargo run -- ghosts` | List all configured ghost agents |
+| `cargo run -- ghosts` | List all configured spark agents |
 | `cargo run -- dispatch --goal "..." --wait-secs 120` | Dispatch a task and wait for completion |
 | `cargo run -- doctor --skip-llm` | Run health checks (no LLM required) |
 | `cargo run -- doctor --security` | Print security attestation |
@@ -339,7 +338,7 @@ model = "gpt-4o"
 [docker]
 image        = "rust:1.84-slim"
 runtime      = "runc"
-memory_limit = 268435456   # 256 MiB per ghost container
+memory_limit = 268435456   # 256 MiB per spark container
 
 [[ghosts]]
 name        = "coder"
@@ -366,7 +365,7 @@ Key references:
 - [OpenAI-compatible API](docs/openai-compatible-api.md)
 - [MCP integration](docs/mcp-integration.md)
 - [Session review & explainability](docs/session-review-explainability.md)
-- [Ghost specialization policy](docs/ghost-specialization.md)
+- [Spark specialization policy](docs/ghost-specialization.md)
 - [Prompt scanner](docs/prompt-scanner.md)
 - [Local-only deployment](docs/local-only-deployment.md)
 - [Security attestation](docs/security-attestation.md)
@@ -379,7 +378,7 @@ Runnable examples in [`examples/`](examples/README.md):
 
 - `basic-dispatch.sh` — copy config, run doctor, dispatch a task
 - `feature-contract.toml` — annotated feature contract with all fields
-- `custom-ghost.toml` — minimal ghost customization snippet
+- `custom-ghost.toml` — minimal spark customization snippet
 
 ---
 
@@ -399,4 +398,10 @@ Real-gate and nightly optimizer workflows are intentionally self-hosted.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [LICENSE](LICENSE) · [CHANGELOG.md](CHANGELOG.md)
 
-Questions and bug reports → [GitHub Issues](https://github.com/Enreign/athena/issues)
+Questions and bug reports → [GitHub Issues](https://github.com/emberloom/sparks/issues)
+
+---
+
+## Ecosystem
+
+- **[Emberloom Cartograph](https://github.com/emberloom/cartograph)** — codebase world model: dependency graph, blast radius, co-change patterns, and ownership — queryable via MCP by Sparks agents

@@ -18,14 +18,14 @@ Run the same checks used by CI:
 - `python3 scripts/test_eval_harness.py`
 - `python3 scripts/test_optimizer_tournament.py`
 - `python3 scripts/test_generate_improvement_backlog.py`
-- `ATHENA_DISABLE_HOME_PROFILES=1 cargo run --quiet -- doctor --skip-llm --ci`
+- `SPARKS_DISABLE_HOME_PROFILES=1 cargo run --quiet -- doctor --skip-llm --ci`
 - `./scripts/maintainability_check.py`
 
 ## Deterministic Local Runs
 
-If you use local profile ghosts under `~/.athena/ghosts`, disable them for reproducible checks:
+If you use local profile ghosts under `~/.sparks/ghosts`, disable them for reproducible checks:
 
-- `ATHENA_DISABLE_HOME_PROFILES=1 ...`
+- `SPARKS_DISABLE_HOME_PROFILES=1 ...`
 
 ## Commit/PR Guidelines
 

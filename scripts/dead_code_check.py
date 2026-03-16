@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dead code gate for Athena.
+Dead code gate for Sparks.
 
 Runs `cargo check` (and optionally `cargo check --features telegram`) and
 fails if ANY dead_code warnings are emitted.  Call from CI after the normal

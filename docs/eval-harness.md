@@ -1,10 +1,10 @@
-# Athena Eval Harness
+# Emberloom Eval Harness
 
 Date: 2026-02-15
 
 ## Purpose
 
-Fixed benchmark gate for "is Athena getting better?".
+Fixed benchmark gate for "is Emberloom getting better?".
 
 It runs a stable task suite end-to-end and scores:
 

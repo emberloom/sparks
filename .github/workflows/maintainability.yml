@@ -32,9 +32,15 @@ jobs:
       - name: Cargo test (telegram feature)
         run: cargo test -q --features telegram
 
+      - name: Cargo check (slack feature)
+        run: cargo check -q --features slack
+
+      - name: Cargo test (slack feature)
+        run: cargo test -q --features slack
+
       - name: Doctor guard
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: cargo run --quiet -- doctor --skip-llm
 
       - name: Dead code gate

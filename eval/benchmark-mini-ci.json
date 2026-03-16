@@ -1,12 +1,12 @@
 {
-  "name": "athena-ci-mini",
+  "name": "sparks-ci-mini",
   "description": "CI smoke benchmark for eval harness mechanics.",
   "pass_threshold": 0.7,
   "defaults": {
     "ghost": "coder",
     "lane": "delivery",
     "risk": "low",
-    "repo": "athena",
+    "repo": "sparks",
     "wait_secs": 5,
     "timeout_secs": 30,
     "outcome_wait_secs": 5,

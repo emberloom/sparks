@@ -37,7 +37,7 @@ class ImprovementBacklogTests(unittest.TestCase):
             acceptance=["a"],
         )
         self.assertEqual(ticket["status"], "open")
-        self.assertEqual(ticket["owner"], "athena-runtime")
+        self.assertEqual(ticket["owner"], "sparks-runtime")
         self.assertEqual(ticket["eta"], "2d")
 
 

@@ -1,6 +1,6 @@
 # Observability Dashboard
 
-Athena ships a static dashboard generator at `scripts/eval_dashboard.py`.
+Emberloom ships a static dashboard generator at `scripts/eval_dashboard.py`.
 It renders from local artifacts only (SQLite + JSONL) and produces CI-friendly exports.
 
 ## Local Generation

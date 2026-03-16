@@ -1,20 +1,20 @@
 # Agents Guide
 
-## What Athena Is
-Athena is a security-first autonomous multi-agent system for shipping tasks safely. It turns user goals and external tickets into structured autonomous tasks, executes them in isolated environments, and records outcomes for health and KPI tracking. The mission contract is: run only the minimum necessary tools, keep credentials out of source control, and always prefer safe, auditable operations over speed.
+## What Emberloom Is
+Emberloom is a security-first autonomous multi-agent system for shipping tasks safely. It turns user goals and external tickets into structured autonomous tasks, executes them in isolated environments, and records outcomes for health and KPI tracking. The mission contract is: run only the minimum necessary tools, keep credentials out of source control, and always prefer safe, auditable operations over speed.
 
-## How Ghosts Work
-Ghosts are sub-agents that execute tasks inside Docker containers with explicit tool allowlists and mount rules.
+## How Sparks Work
+Sparks are sub-agents that execute tasks inside Docker containers with explicit tool allowlists and mount rules.
 
 Key mechanics:
-- **Isolation:** Ghosts run inside Docker images defined in config. Mounts are explicit and can be read-only.
-- **Tool allowlists:** Each ghost is configured with an allowlist of tools. The manager enforces these per step.
+- **Isolation:** Sparks run inside Docker images defined in config. Mounts are explicit and can be read-only.
+- **Tool allowlists:** Each spark is configured with an allowlist of tools. The manager enforces these per step.
 - **Strategy phases:** The coding strategy uses EXPLORE → EXECUTE → VERIFY phases with different tool sets and step limits.
 - **Resource limits:** Docker memory/CPU/time limits are enforced per run.
 
-Ghost configuration constraints:
+Spark configuration constraints:
 - `strategy` must be exactly `"code"` or `"react"`. Any other value silently fails at dispatch — no compile error or panic.
-- `soul_file` is an optional path to a persona file injected into the ghost's system prompt. Keep it under ~2K tokens; it counts against the completion budget.
+- `soul_file` is an optional path to a persona file injected into the spark's system prompt. Keep it under ~2K tokens; it counts against the completion budget.
 - Default completion limit: **4096 tokens**. Default context window: **128K tokens**. Long soul files, large memory payloads, and verbose tool outputs all reduce usable context for the task.
 - The local embedding model for memory search lives at `~/.athena/models/all-MiniLM-L6-v2`. If the directory is missing, memory and semantic search fail silently — run `athena doctor` to verify.
 
@@ -26,7 +26,7 @@ Each provider has **two independent model slots**:
 
 | Slot | Config key | Used by | Typical choice |
 | --- | --- | --- | --- |
-| Main | `model` | Ghost task execution | capable/expensive model (e.g. `claude-opus-4-6`, `gpt-5.3-codex`) |
+| Main | `model` | Spark task execution | capable/expensive model (e.g. `claude-opus-4-6`, `gpt-5.3-codex`) |
 | Classifier | `classifier_model` | Orchestrator routing only (SIMPLE / DIRECT / COMPLEX) | lighter/cheaper model (e.g. `claude-haiku-4-5-20251001`, `qwen2.5:3b`) |
 
 **Always set `classifier_model`** to a lighter model. If omitted, the main model handles routing on every request — slow and expensive.
@@ -60,7 +60,7 @@ Relevant code: `src/tools.rs`, `src/manager.rs`, `src/config.rs`, `src/doctor.rs
 ```
 Intake (poll/webhook)
   -> Dispatch (autonomous task queue)
-    -> Execute (ghost strategy)
+    -> Execute (spark strategy)
       -> Outcome (DB + memories)
         -> Sync (write-back to ticket source)
 ```
@@ -78,7 +78,7 @@ Before opening a PR or submitting a patch:
 7. Run `scripts/maintainability_check.py` if you changed core architecture or tool behavior.
 8. After each bigger change, run the relevant tests and report results without using the phrase "Tests not run." If tests fail, fix the issues and iterate until they pass.
 9. If there is a suggestion to run a command, run it.
-10. **Update the wiki** when relevant. Clone `https://github.com/Enreign/athena.wiki.git`, edit the appropriate page, commit, and push. Update the wiki when you: change CLI flags or commands, add/remove config keys, change LLM provider auth, change the security model or autonomy ladder, add/remove observability event types, change memory system behavior, fix a non-obvious bug others are likely to hit (add to Troubleshooting), or change the architecture in a meaningful way. The wiki is the primary reference for users — keep it accurate.
+10. **Update the wiki** when relevant. Clone `https://github.com/emberloom/sparks.wiki.git`, edit the appropriate page, commit, and push. Update the wiki when you: change CLI flags or commands, add/remove config keys, change LLM provider auth, change the security model or autonomy ladder, add/remove observability event types, change memory system behavior, fix a non-obvious bug others are likely to hit (add to Troubleshooting), or change the architecture in a meaningful way. The wiki is the primary reference for users — keep it accurate.
 
 Review expectations:
 - No hardcoded credentials or tokens.
@@ -147,13 +147,13 @@ The "Hygiene check" CI step additionally enforces:
 | Data loss | No destructive git operations by default; guarded shell patterns. |
 
 ## Self-Improvement Loop
-Athena continuously scans for health signals, memory gaps, and maintainability issues. Background loops collect tool usage stats, store health alerts/fixes, and periodically re-index code for refactoring opportunities.
+Emberloom continuously scans for health signals, memory gaps, and maintainability issues. Background loops collect tool usage stats, store health alerts/fixes, and periodically re-index code for refactoring opportunities.
 
 Relevant code: `src/proactive/`, `src/self_heal.rs`, `src/kpi.rs`.
 
 ## Key References
 - Core orchestration: `src/core.rs`
-- Ghosts and strategy phases: `src/strategy/`
+- Sparks and strategy phases: `src/strategy/`
 - Tool sandboxing and validation: `src/tools.rs`
 - Ticket intake and sync: `src/ticket_intake/`
 - Configuration and security: `src/config.rs`, `config.example.toml`

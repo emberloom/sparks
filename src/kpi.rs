@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::ghost_policy::GhostPolicyMetrics;
 use crate::langfuse::LangfuseClient;
 
@@ -68,7 +68,7 @@ impl TaskOutcomeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
         conn.execute(
             "INSERT OR REPLACE INTO autonomous_task_outcomes (
                 task_id, lane, repo, risk_tier, ghost, goal, status, started_at
@@ -91,7 +91,7 @@ impl TaskOutcomeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
         conn.execute(
             "UPDATE autonomous_task_outcomes
              SET status = ?2,
@@ -119,7 +119,7 @@ impl TaskOutcomeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
         let updated = conn.execute(
             "UPDATE autonomous_task_outcomes
              SET status = 'failed',
@@ -136,7 +136,7 @@ impl TaskOutcomeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
         let cutoff = format!("-{} seconds", stale_after_secs.max(1));
         let updated = conn.execute(
             "UPDATE autonomous_task_outcomes
@@ -158,7 +158,7 @@ impl TaskOutcomeStore {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AthenaError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("Failed to lock task outcome store: {}", e)))?;
         conn.execute(
             "UPDATE ticket_intake_log
              SET ci_monitor_status = ?2
@@ -955,7 +955,7 @@ fn langfuse_client_from_config(config: &Config) -> Option<Arc<LangfuseClient>> {
 
 pub async fn emit_snapshot_to_langfuse(config: &Config, snapshot: &KpiSnapshot) -> Result<()> {
     let Some(client) = langfuse_client_from_config(config) else {
-        return Err(AthenaError::Config(
+        return Err(SparksError::Config(
             "Langfuse credentials missing; set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY."
                 .to_string(),
         ));
@@ -964,7 +964,7 @@ pub async fn emit_snapshot_to_langfuse(config: &Config, snapshot: &KpiSnapshot) 
     client
         .emit_kpi_snapshot(&snapshot.lane, &snapshot.repo, &snapshot.risk_tier, payload)
         .await
-        .map_err(AthenaError::Tool)?;
+        .map_err(SparksError::Tool)?;
     Ok(())
 }
 
@@ -1051,7 +1051,7 @@ mod tests {
         )
         .unwrap();
 
-        let snap = compute_snapshot(&conn, "delivery", "athena", "medium").unwrap();
+        let snap = compute_snapshot(&conn, "delivery", "sparks", "medium").unwrap();
         assert_eq!(snap.tasks_started, 3);
         assert_eq!(snap.tasks_succeeded, 2);
         assert_eq!(snap.tasks_failed, 1);
@@ -1068,7 +1068,7 @@ mod tests {
         let conn = setup_conn();
         let snap = KpiSnapshot {
             lane: "self_improvement".to_string(),
-            repo: "athena".to_string(),
+            repo: "sparks".to_string(),
             risk_tier: "medium".to_string(),
             captured_at: "2026-01-01T00:00:00.000Z".to_string(),
             task_success_rate: 0.5,
@@ -1083,7 +1083,7 @@ mod tests {
             rollbacks: 1,
         };
         store_snapshot(&conn, &snap).unwrap();
-        let rows = list_history(&conn, Some("self_improvement"), Some("athena"), 10).unwrap();
+        let rows = list_history(&conn, Some("self_improvement"), Some("sparks"), 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lane, "self_improvement");
     }
@@ -1096,13 +1096,13 @@ mod tests {
              (lane, repo, risk_tier, captured_at, task_success_rate, verification_pass_rate, rollback_rate, mean_time_to_fix_secs,
               tasks_started, tasks_succeeded, tasks_failed, verifications_total, verifications_passed, rollbacks)
              VALUES
-             ('delivery','athena','low','2026-02-17T05:28:37.000Z',0.11,1.0,0.0,NULL,10,1,9,1,1,0),
-             ('delivery','athena','low','2026-02-17 18:24:17',0.40,1.0,0.0,NULL,10,4,6,1,1,0)",
+             ('delivery','sparks','low','2026-02-17T05:28:37.000Z',0.11,1.0,0.0,NULL,10,1,9,1,1,0),
+             ('delivery','sparks','low','2026-02-17 18:24:17',0.40,1.0,0.0,NULL,10,4,6,1,1,0)",
             [],
         )
         .unwrap();
 
-        let rows = list_history(&conn, Some("delivery"), Some("athena"), 10).unwrap();
+        let rows = list_history(&conn, Some("delivery"), Some("sparks"), 10).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].captured_at, "2026-02-17 18:24:17");
         assert_eq!(rows[1].captured_at, "2026-02-17T05:28:37.000Z");
@@ -1115,14 +1115,14 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, goal, status, started_at, finished_at, verification_total, verification_passed, rolled_back)
              VALUES
-             ('a1','delivery','athena','high','task1','succeeded','2026-01-01 10:00:00','2026-01-01 10:10:00',1,1,0),
-             ('a2','delivery','athena','high','task2','failed','2026-01-01 11:00:00','2026-01-01 11:10:00',1,0,0),
-             ('a3','delivery','athena','high','task3','succeeded','2026-01-01 12:00:00','2026-01-01 12:20:00',1,1,1)",
+             ('a1','delivery','sparks','high','task1','succeeded','2026-01-01 10:00:00','2026-01-01 10:10:00',1,1,0),
+             ('a2','delivery','sparks','high','task2','failed','2026-01-01 11:00:00','2026-01-01 11:10:00',1,0,0),
+             ('a3','delivery','sparks','high','task3','succeeded','2026-01-01 12:00:00','2026-01-01 12:20:00',1,1,1)",
             [],
         )
         .unwrap();
 
-        let snap = compute_snapshot(&conn, "delivery", "athena", "high").unwrap();
+        let snap = compute_snapshot(&conn, "delivery", "sparks", "high").unwrap();
         assert_eq!(snap.tasks_started, 3);
         assert_eq!(snap.tasks_succeeded, 2);
         assert_eq!(snap.tasks_failed, 1);
@@ -1139,10 +1139,10 @@ mod tests {
         let conn = setup_conn();
         let store = TaskOutcomeStore::new(conn);
         store
-            .record_start("t1", "delivery", "athena", "low", Some("coder"), "goal")
+            .record_start("t1", "delivery", "sparks", "low", Some("coder"), "goal")
             .unwrap();
         store
-            .record_start("t2", "delivery", "athena", "low", Some("coder"), "goal")
+            .record_start("t2", "delivery", "sparks", "low", Some("coder"), "goal")
             .unwrap();
         store
             .record_finish("t2", "succeeded", 0, 0, false, None, Some("codex"))
@@ -1182,9 +1182,9 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, goal, status, started_at)
              VALUES
-             ('old-started','delivery','athena','low','goal','started',datetime('now','-7200 seconds')),
-             ('fresh-started','delivery','athena','low','goal','started',datetime('now','-60 seconds')),
-             ('already-done','delivery','athena','low','goal','succeeded',datetime('now','-7200 seconds'))",
+             ('old-started','delivery','sparks','low','goal','started',datetime('now','-7200 seconds')),
+             ('fresh-started','delivery','sparks','low','goal','started',datetime('now','-60 seconds')),
+             ('already-done','delivery','sparks','low','goal','succeeded',datetime('now','-7200 seconds'))",
             [],
         )
         .unwrap();
@@ -1229,25 +1229,25 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at)
              VALUES
-             ('g1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00'),
-             ('g2','delivery','athena','medium','coder','b','succeeded','2026-01-01 10:02:00','2026-01-01 10:03:00'),
-             ('g3','delivery','athena','medium','coder','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00'),
-             ('g4','delivery','athena','medium','coder','d','failed','2026-01-01 10:06:00','2026-01-01 10:07:00'),
-             ('g5','delivery','athena','medium','scout','e','failed','2026-01-01 10:08:00','2026-01-01 10:09:00'),
-             ('g6','delivery','athena','medium','scout','f','failed','2026-01-01 10:10:00','2026-01-01 10:11:00'),
-             ('g7','delivery','athena','medium','scout','g','succeeded','2026-01-01 10:12:00','2026-01-01 10:13:00'),
-             ('g8','delivery','athena','medium','architect','h','succeeded','2026-01-01 10:14:00','2026-01-01 10:15:00'),
-             ('g9','delivery','athena','medium','architect','i','failed','2026-01-01 10:16:00','2026-01-01 10:17:00'),
-             ('g10','delivery','athena','medium','architect','j','failed','2026-01-01 10:18:00','2026-01-01 10:19:00'),
-             ('g11','delivery','athena','medium','','k','succeeded','2026-01-01 10:20:00','2026-01-01 10:21:00'),
-             ('g12','delivery','athena','medium',NULL,'l','succeeded','2026-01-01 10:22:00','2026-01-01 10:23:00'),
-             ('g13','delivery','athena','medium','coder','m','started','2026-01-01 10:24:00',NULL)",
+             ('g1','delivery','sparks','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00'),
+             ('g2','delivery','sparks','medium','coder','b','succeeded','2026-01-01 10:02:00','2026-01-01 10:03:00'),
+             ('g3','delivery','sparks','medium','coder','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00'),
+             ('g4','delivery','sparks','medium','coder','d','failed','2026-01-01 10:06:00','2026-01-01 10:07:00'),
+             ('g5','delivery','sparks','medium','scout','e','failed','2026-01-01 10:08:00','2026-01-01 10:09:00'),
+             ('g6','delivery','sparks','medium','scout','f','failed','2026-01-01 10:10:00','2026-01-01 10:11:00'),
+             ('g7','delivery','sparks','medium','scout','g','succeeded','2026-01-01 10:12:00','2026-01-01 10:13:00'),
+             ('g8','delivery','sparks','medium','architect','h','succeeded','2026-01-01 10:14:00','2026-01-01 10:15:00'),
+             ('g9','delivery','sparks','medium','architect','i','failed','2026-01-01 10:16:00','2026-01-01 10:17:00'),
+             ('g10','delivery','sparks','medium','architect','j','failed','2026-01-01 10:18:00','2026-01-01 10:19:00'),
+             ('g11','delivery','sparks','medium','','k','succeeded','2026-01-01 10:20:00','2026-01-01 10:21:00'),
+             ('g12','delivery','sparks','medium',NULL,'l','succeeded','2026-01-01 10:22:00','2026-01-01 10:23:00'),
+             ('g13','delivery','sparks','medium','coder','m','started','2026-01-01 10:24:00',NULL)",
             [],
         )
         .unwrap();
 
         let rows =
-            query_ghost_success_rates(&conn, "athena", Some("delivery"), Some("medium"), 3, 10)
+            query_ghost_success_rates(&conn, "sparks", Some("delivery"), Some("medium"), 3, 10)
                 .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].ghost, "coder");
@@ -1273,18 +1273,18 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, goal, status, started_at, finished_at, cli_tool_used)
              VALUES
-             ('t1','delivery','athena','medium','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00','codex'),
-             ('t2','delivery','athena','medium','b','succeeded','2026-01-01 10:02:00','2026-01-01 10:03:00','codex'),
-             ('t3','delivery','athena','medium','c','failed','2026-01-01 10:04:00','2026-01-01 10:05:00','codex'),
-             ('t4','delivery','athena','medium','d','succeeded','2026-01-01 10:06:00','2026-01-01 10:07:00','claude_code'),
-             ('t5','delivery','athena','medium','e','failed','2026-01-01 10:08:00','2026-01-01 10:09:00','claude_code'),
-             ('t6','delivery','athena','medium','f','succeeded','2026-01-01 10:10:00','2026-01-01 10:11:00','opencode'),
-             ('t7','self_improvement','athena','medium','g','succeeded','2026-01-01 10:12:00','2026-01-01 10:13:00','opencode')",
+             ('t1','delivery','sparks','medium','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00','codex'),
+             ('t2','delivery','sparks','medium','b','succeeded','2026-01-01 10:02:00','2026-01-01 10:03:00','codex'),
+             ('t3','delivery','sparks','medium','c','failed','2026-01-01 10:04:00','2026-01-01 10:05:00','codex'),
+             ('t4','delivery','sparks','medium','d','succeeded','2026-01-01 10:06:00','2026-01-01 10:07:00','claude_code'),
+             ('t5','delivery','sparks','medium','e','failed','2026-01-01 10:08:00','2026-01-01 10:09:00','claude_code'),
+             ('t6','delivery','sparks','medium','f','succeeded','2026-01-01 10:10:00','2026-01-01 10:11:00','opencode'),
+             ('t7','self_improvement','sparks','medium','g','succeeded','2026-01-01 10:12:00','2026-01-01 10:13:00','opencode')",
             [],
         )
         .unwrap();
 
-        let rows = query_cli_tool_success_rates(&conn, "athena", Some("delivery"), 3, 5).unwrap();
+        let rows = query_cli_tool_success_rates(&conn, "sparks", Some("delivery"), 3, 5).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool_name, "codex");
         assert_eq!(rows[0].tasks_started, 3);
@@ -1292,7 +1292,7 @@ mod tests {
         assert!((rows[0].success_rate - (2.0 / 3.0)).abs() < 1e-9);
 
         let none_rows =
-            query_cli_tool_success_rates(&conn, "athena", Some("delivery"), 4, 5).unwrap();
+            query_cli_tool_success_rates(&conn, "sparks", Some("delivery"), 4, 5).unwrap();
         assert!(none_rows.is_empty());
     }
 
@@ -1303,15 +1303,15 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, verification_total, verification_passed, rolled_back)
              VALUES
-             ('p1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
-             ('p2','delivery','athena','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
-             ('p3','delivery','athena','medium','scout','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00',2,1,0)",
+             ('p1','delivery','sparks','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
+             ('p2','delivery','sparks','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
+             ('p3','delivery','sparks','medium','scout','c','succeeded','2026-01-01 10:04:00','2026-01-01 10:05:00',2,1,0)",
             [],
         )
         .unwrap();
 
         let rows =
-            query_ghost_policy_metrics(&conn, "athena", Some("delivery"), Some("medium")).unwrap();
+            query_ghost_policy_metrics(&conn, "sparks", Some("delivery"), Some("medium")).unwrap();
         let coder = rows.iter().find(|r| r.ghost == "coder").unwrap();
         assert_eq!(coder.tasks_started, 2);
         assert_eq!(coder.tasks_succeeded, 1);
@@ -1330,17 +1330,17 @@ mod tests {
             "INSERT INTO autonomous_task_outcomes
              (task_id, lane, repo, risk_tier, ghost, goal, status, started_at, finished_at, verification_total, verification_passed, rolled_back)
              VALUES
-             ('r1','delivery','athena','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
-             ('r2','delivery','athena','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
-             ('r3','delivery','athena','medium','coder','c','failed','2026-01-01 10:04:00','2026-01-01 10:05:00',1,0,0),
-             ('r4','delivery','athena','medium','scout','d','succeeded','2026-01-01 10:06:00','2026-01-01 10:07:00',1,1,0),
-             ('r5','delivery','athena','medium','scout','e','succeeded','2026-01-01 10:08:00','2026-01-01 10:09:00',1,1,0)",
+             ('r1','delivery','sparks','medium','coder','a','succeeded','2026-01-01 10:00:00','2026-01-01 10:01:00',1,1,0),
+             ('r2','delivery','sparks','medium','coder','b','failed','2026-01-01 10:02:00','2026-01-01 10:03:00',1,0,1),
+             ('r3','delivery','sparks','medium','coder','c','failed','2026-01-01 10:04:00','2026-01-01 10:05:00',1,0,0),
+             ('r4','delivery','sparks','medium','scout','d','succeeded','2026-01-01 10:06:00','2026-01-01 10:07:00',1,1,0),
+             ('r5','delivery','sparks','medium','scout','e','succeeded','2026-01-01 10:08:00','2026-01-01 10:09:00',1,1,0)",
             [],
         )
         .unwrap();
 
         let recent =
-            query_recent_ghost_policy_metrics(&conn, "athena", Some("delivery"), Some("medium"), 2)
+            query_recent_ghost_policy_metrics(&conn, "sparks", Some("delivery"), Some("medium"), 2)
                 .unwrap();
         let coder = recent.iter().find(|r| r.ghost == "coder").unwrap();
         // Only last two coder rows (r3 + r2): both failed.
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(coder.rollbacks, 1);
 
         let last =
-            query_last_selected_ghost(&conn, "athena", Some("delivery"), Some("medium")).unwrap();
+            query_last_selected_ghost(&conn, "sparks", Some("delivery"), Some("medium")).unwrap();
         assert_eq!(last.as_deref(), Some("scout"));
     }
 }

@@ -47,14 +47,14 @@ class EvalHarnessRegressionTests(unittest.TestCase):
             """
             INSERT INTO autonomous_task_outcomes
             (task_id, lane, repo, risk_tier, goal, status, started_at)
-            VALUES ('t-started','delivery','athena','low','goal','started',datetime('now'))
+            VALUES ('t-started','delivery','sparks','low','goal','started',datetime('now'))
             """
         )
         conn.execute(
             """
             INSERT INTO autonomous_task_outcomes
             (task_id, lane, repo, risk_tier, goal, status, started_at, finished_at)
-            VALUES ('t-done','delivery','athena','low','goal','failed',datetime('now','-10 sec'),datetime('now'))
+            VALUES ('t-done','delivery','sparks','low','goal','failed',datetime('now','-10 sec'),datetime('now'))
             """
         )
         conn.commit()
@@ -89,7 +89,7 @@ class EvalHarnessRegressionTests(unittest.TestCase):
             """
             INSERT INTO autonomous_task_outcomes
             (task_id, lane, repo, risk_tier, goal, status, started_at)
-            VALUES (?1,'delivery','athena','low','goal','started',datetime('now'))
+            VALUES (?1,'delivery','sparks','low','goal','started',datetime('now'))
             """,
             (task_id,),
         )

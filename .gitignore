@@ -10,6 +10,7 @@
 config.toml
 eval/results/
 eval/.worktrees/
+.worktrees/
 *.log
 hello.txt
 __pycache__/
@@ -37,3 +38,4 @@ docs/lane-test-note.md
 scripts/athena-with-vaultwarden.sh
 docs/secrets-vaultwarden.md
 .env.vaultwarden.example
+dist/

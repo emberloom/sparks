@@ -7,7 +7,7 @@ on:
 
 jobs:
   nightly-optimizer:
-    # Intended for a self-hosted runner with Athena runtime + credentials configured.
+    # Intended for a self-hosted runner with Sparks runtime + credentials configured.
     runs-on: self-hosted
 
     steps:
@@ -19,15 +19,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build Athena
-        run: cargo build --bin athena
+      - name: Build Sparks
+        run: cargo build --bin sparks
 
       - name: Run nightly full real-gate optimizer tournament
         run: |
           python3 scripts/optimizer_tournament.py \
             --suite eval/benchmark-real-gate.json \
             --config config.toml \
-            --athena-bin target/debug/athena \
+            --sparks-bin target/debug/sparks \
             --cli-tool codex \
             --regen-backlog \
             --top-backlog 6 \

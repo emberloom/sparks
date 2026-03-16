@@ -1,9 +1,9 @@
 # Refactor/tidy queue for unattended 8h loop.
 # Keep each ticket bounded, test-backed, and behavior-preserving.
 
-In src/strategy/code.rs harden parse_cli_failure_policy so it finds the [athena_cli_contract] marker anywhere in output (not only first line), parses known key/value fields deterministically, and add/extend unit tests for marker-first, marker-middle, and malformed-token cases. Run cargo test parse_cli_failure_policy -- --nocapture.
+In src/strategy/code.rs harden parse_cli_failure_policy so it finds the [sparks_cli_contract] marker anywhere in output (not only first line), parses known key/value fields deterministically, and add/extend unit tests for marker-first, marker-middle, and malformed-token cases. Run cargo test parse_cli_failure_policy -- --nocapture.
 
-In src/tools.rs make the nested Claude session early-return path emit a structured [athena_cli_contract] marker with code=session_conflict (instead of plain prose only), preserving fallback=true behavior. Add/update tests that assert this marker is present for that path.
+In src/tools.rs make the nested Claude session early-return path emit a structured [sparks_cli_contract] marker with code=session_conflict (instead of plain prose only), preserving fallback=true behavior. Add/update tests that assert this marker is present for that path.
 
 In src/manager.rs extract classification parsing into focused helpers (e.g., parse_direct, parse_complex, parse_simple) to reduce branching in classify while keeping behavior unchanged. Add unit tests for valid direct/complex/simple envelopes and unknown direct tool fallback behavior.
 

@@ -2,12 +2,12 @@
 #
 # Linear chain feature contract template.
 # Use with:
-#   athena feature validate --file examples/feature-contract-linear.toml
+#   sparks feature validate --file examples/feature-contract-linear.toml
 
-feature_id = "athena-linear-example"
+feature_id = "sparks-linear-example"
 lane = "delivery"
 risk = "low"
-repo = "athena"
+repo = "sparks"
 
 [[acceptance_criteria]]
 id = "AC-1"

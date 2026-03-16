@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate ranked Athena self-improvement backlog.")
+    p = argparse.ArgumentParser(description="Generate ranked Sparks self-improvement backlog.")
     p.add_argument("--config", default="config.toml")
     p.add_argument("--db", default="")
     p.add_argument("--maint-baseline", default="docs/maintainability-baseline.json")
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_db_path(config_path: Path) -> Path:
-    default = Path("~/.athena/athena.db").expanduser()
+    default = Path("~/.sparks/sparks.db").expanduser()
     if not config_path.exists():
         return default
     text = config_path.read_text()
@@ -63,12 +63,12 @@ def score_ticket(impact: int, confidence: int, effort: int, risk: str) -> float:
 
 def default_owner(source: str) -> str:
     if source == "maintainability_hotspot":
-        return "athena-refactor"
+        return "sparks-refactor"
     if source in {"runtime_failures", "tool_usage"}:
-        return "athena-runtime"
+        return "sparks-runtime"
     if source == "eval_history":
-        return "athena-eval"
-    return "athena"
+        return "sparks-eval"
+    return "sparks"
 
 
 def default_eta_days(effort: int) -> str:
@@ -321,7 +321,7 @@ def dedupe_tickets(tickets: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def render_markdown(ts: str, tickets: list[dict[str, Any]]) -> str:
     lines = [
-        "# Athena Improvement Backlog",
+        "# Sparks Improvement Backlog",
         "",
         f"- generated_utc: {ts}",
         f"- ticket_count: {len(tickets)}",
@@ -332,7 +332,7 @@ def render_markdown(ts: str, tickets: list[dict[str, Any]]) -> str:
     for i, t in enumerate(tickets, start=1):
         lines.append(
             f"| {i} | {t['score']:.3f} | `{t['source']}` | `{t['risk']}` | `{t.get('status','open')}` | "
-            f"`{t.get('owner','athena')}` | `{t.get('eta','n/a')}` | {t['title']} | {t['evidence']} |"
+            f"`{t.get('owner','sparks')}` | `{t.get('eta','n/a')}` | {t['title']} | {t['evidence']} |"
         )
     lines.append("")
     lines.append("## Acceptance Checks")

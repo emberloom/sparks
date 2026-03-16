@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
 use crate::config::OpenAiConfig;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 
 const DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -77,14 +77,14 @@ impl OpenAiAuth {
         };
 
         let contents = std::fs::read_to_string(&token_file).map_err(|e| {
-            AthenaError::Config(format!(
+            SparksError::Config(format!(
                 "Failed to read OpenAI token file {}: {}",
                 token_file.display(),
                 e
             ))
         })?;
         let tokens: OpenAiTokens = serde_json::from_str(&contents).map_err(|e| {
-            AthenaError::Config(format!(
+            SparksError::Config(format!(
                 "Failed to parse OpenAI token file {}: {}",
                 token_file.display(),
                 e
@@ -110,7 +110,7 @@ impl OpenAiAuth {
     pub async fn save_tokens(&self, tokens: &OpenAiTokens) -> Result<()> {
         if let Some(parent) = self.token_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                AthenaError::Config(format!(
+                SparksError::Config(format!(
                     "Failed to create OpenAI token dir {}: {}",
                     parent.display(),
                     e
@@ -119,10 +119,10 @@ impl OpenAiAuth {
         }
 
         let body = serde_json::to_string_pretty(tokens).map_err(|e| {
-            AthenaError::Internal(format!("Failed to serialize OpenAI tokens: {}", e))
+            SparksError::Internal(format!("Failed to serialize OpenAI tokens: {}", e))
         })?;
         std::fs::write(&self.token_path, body).map_err(|e| {
-            AthenaError::Config(format!(
+            SparksError::Config(format!(
                 "Failed to write OpenAI token file {}: {}",
                 self.token_path.display(),
                 e
@@ -134,7 +134,7 @@ impl OpenAiAuth {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.token_path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| {
-                    AthenaError::Config(format!(
+                    SparksError::Config(format!(
                         "Failed to set permissions on OpenAI token file {}: {}",
                         self.token_path.display(),
                         e
@@ -149,7 +149,7 @@ impl OpenAiAuth {
 
     pub async fn ensure_valid_tokens(&self) -> Result<OpenAiTokens> {
         let tokens = self.load_tokens().await?.ok_or_else(|| {
-            AthenaError::Config("OpenAI not authenticated. Run `athena openai login`.".into())
+            SparksError::Config("OpenAI not authenticated. Run `sparks openai login`.".into())
         })?;
 
         if !tokens.expired(60) {
@@ -165,7 +165,7 @@ impl OpenAiAuth {
 
     pub async fn force_refresh(&self) -> Result<OpenAiTokens> {
         let tokens = self.load_tokens().await?.ok_or_else(|| {
-            AthenaError::Config("OpenAI not authenticated. Run `athena openai login`.".into())
+            SparksError::Config("OpenAI not authenticated. Run `sparks openai login`.".into())
         })?;
         let refreshed = self
             .refresh_tokens(&tokens.refresh_token, tokens.chatgpt_account_id.as_deref())
@@ -216,7 +216,7 @@ impl OpenAiAuth {
     pub async fn logout(&self) -> Result<()> {
         if self.token_path.exists() {
             std::fs::remove_file(&self.token_path).map_err(|e| {
-                AthenaError::Config(format!(
+                SparksError::Config(format!(
                     "Failed to remove OpenAI token file {}: {}",
                     self.token_path.display(),
                     e
@@ -226,7 +226,7 @@ impl OpenAiAuth {
         if let Some(legacy_path) = &self.legacy_token_path {
             if legacy_path.exists() {
                 std::fs::remove_file(legacy_path).map_err(|e| {
-                    AthenaError::Config(format!(
+                    SparksError::Config(format!(
                         "Failed to remove legacy OpenAI token file {}: {}",
                         legacy_path.display(),
                         e
@@ -256,7 +256,7 @@ impl OpenAiAuth {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AthenaError::Llm(format!(
+            return Err(SparksError::Llm(format!(
                 "OpenAI refresh failed ({}): {}",
                 status, body
             )));
@@ -392,7 +392,7 @@ fn build_authorize_url(
     state: &str,
 ) -> Result<String> {
     let mut url = url::Url::parse(auth_url)
-        .map_err(|e| AthenaError::Config(format!("Invalid OpenAI auth URL {}: {}", auth_url, e)))?;
+        .map_err(|e| SparksError::Config(format!("Invalid OpenAI auth URL {}: {}", auth_url, e)))?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -407,12 +407,12 @@ fn build_authorize_url(
 
 async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<String> {
     let url = url::Url::parse(redirect_uri).map_err(|e| {
-        AthenaError::Config(format!("Invalid redirect URI {}: {}", redirect_uri, e))
+        SparksError::Config(format!("Invalid redirect URI {}: {}", redirect_uri, e))
     })?;
     let host = url.host_str().unwrap_or("127.0.0.1");
     let port = url.port().unwrap_or(1455);
     let listener = TcpListener::bind((host, port)).await.map_err(|e| {
-        AthenaError::Config(format!(
+        SparksError::Config(format!(
             "Failed to bind OpenAI callback listener on {}:{}: {}",
             host, port, e
         ))
@@ -423,12 +423,12 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         listener.accept(),
     )
     .await
-    .map_err(|_| AthenaError::Timeout(DEFAULT_CALLBACK_TIMEOUT_SECS))?
-    .map_err(|e| AthenaError::Config(format!("OpenAI callback listener failed: {}", e)))?;
+    .map_err(|_| SparksError::Timeout(DEFAULT_CALLBACK_TIMEOUT_SECS))?
+    .map_err(|e| SparksError::Config(format!("OpenAI callback listener failed: {}", e)))?;
 
     let mut buf = [0u8; 4096];
     let n = socket.read(&mut buf).await.map_err(|e| {
-        AthenaError::Config(format!("Failed to read OpenAI callback request: {}", e))
+        SparksError::Config(format!("Failed to read OpenAI callback request: {}", e))
     })?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req
@@ -437,7 +437,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
     let parsed = url::Url::parse(&format!("http://localhost{}", path))
-        .map_err(|e| AthenaError::Config(format!("Failed to parse OpenAI callback URL: {}", e)))?;
+        .map_err(|e| SparksError::Config(format!("Failed to parse OpenAI callback URL: {}", e)))?;
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;
     for (k, v) in parsed.query_pairs() {
@@ -456,7 +456,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
-        return Err(AthenaError::Config(
+        return Err(SparksError::Config(
             "OpenAI callback missing authorization code".into(),
         ));
     };
@@ -468,7 +468,7 @@ async fn wait_for_auth_code(redirect_uri: &str, expected_state: &str) -> Result<
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
-        return Err(AthenaError::Config("OpenAI callback state mismatch".into()));
+        return Err(SparksError::Config("OpenAI callback state mismatch".into()));
     }
 
     let body =
@@ -503,7 +503,7 @@ async fn exchange_code_for_tokens(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AthenaError::Llm(format!(
+        return Err(SparksError::Llm(format!(
             "OpenAI token exchange failed ({}): {}",
             status, body
         )));
@@ -515,7 +515,7 @@ async fn exchange_code_for_tokens(
     Ok(OpenAiTokens {
         access_token: body.access_token,
         refresh_token: body.refresh_token.ok_or_else(|| {
-            AthenaError::Config("OpenAI token response missing refresh_token".into())
+            SparksError::Config("OpenAI token response missing refresh_token".into())
         })?,
         expires_at,
         chatgpt_account_id: None,

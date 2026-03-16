@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.1). Defaults to the current ref name."
+        required: false
+        default: ""
 
 jobs:
   publish:
@@ -28,22 +33,22 @@ jobs:
           python-version: "3.11"
 
       - name: Build release binary
-        run: cargo build --release --bin athena
+        run: cargo build --release --bin sparks
 
       - name: Generate observability dashboard artifacts
         run: |
-          cat > /tmp/athena-release.toml <<'EOF'
+          cat > /tmp/sparks-release.toml <<'EOF'
           [db]
-          path = "/tmp/athena-release.db"
+          path = "/tmp/sparks-release.db"
           EOF
           python3 scripts/eval_dashboard.py \
-            --config /tmp/athena-release.toml \
-            --repo athena \
+            --config /tmp/sparks-release.toml \
+            --repo sparks \
             --out-file eval/results/dashboard.md \
             --json-out-file eval/results/dashboard_data.json
           python3 scripts/eval_dashboard.py \
-            --config /tmp/athena-release.toml \
-            --repo athena \
+            --config /tmp/sparks-release.toml \
+            --repo sparks \
             --output-format html \
             --out-file eval/results/dashboard.html \
             --json-out-file eval/results/dashboard_data.json
@@ -51,9 +56,9 @@ jobs:
       - name: Package artifacts
         run: |
           mkdir -p dist
-          cp target/release/athena dist/athena-linux-x86_64
-          tar -C dist -czf dist/athena-linux-x86_64.tar.gz athena-linux-x86_64
-          shasum -a 256 dist/athena-linux-x86_64.tar.gz > dist/athena-linux-x86_64.tar.gz.sha256
+          cp target/release/sparks dist/sparks-linux-x86_64
+          tar -C dist -czf dist/sparks-linux-x86_64.tar.gz sparks-linux-x86_64
+          shasum -a 256 dist/sparks-linux-x86_64.tar.gz > dist/sparks-linux-x86_64.tar.gz.sha256
           cp eval/results/dashboard.md dist/dashboard.md
           cp eval/results/dashboard.html dist/dashboard.html
           cp eval/results/dashboard_data.json dist/dashboard_data.json
@@ -69,12 +74,13 @@ jobs:
             dist/dashboard_data.json
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            dist/athena-linux-x86_64.tar.gz
-            dist/athena-linux-x86_64.tar.gz.sha256
-            dist/dashboard.md
-            dist/dashboard.html
-            dist/dashboard_data.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          FILES="dist/sparks-linux-x86_64.tar.gz dist/sparks-linux-x86_64.tar.gz.sha256 dist/dashboard.md dist/dashboard.html dist/dashboard_data.json"
+          if gh release view "$TAG" &>/dev/null; then
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" --generate-notes $FILES
+          fi

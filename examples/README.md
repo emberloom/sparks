@@ -1,13 +1,13 @@
-# Athena Examples
+# Emberloom Examples
 
-Runnable examples demonstrating common Athena workflows.
+Runnable examples demonstrating common Emberloom workflows.
 
 | File | Description |
 |---|---|
 | [basic-dispatch.sh](basic-dispatch.sh) | Copy config, run a health check, and dispatch a task from the command line |
 | [feature-contract.toml](feature-contract.toml) | Fan-out/fan-in feature contract template (TOML) |
 | [feature-contract-linear.toml](feature-contract-linear.toml) | Linear-chain feature contract template (TOML) |
-| [custom-ghost.toml](custom-ghost.toml) | Minimal ghost configuration snippet showing personality and tool customization |
+| [custom-ghost.toml](custom-ghost.toml) | Minimal spark configuration snippet showing personality and tool customization |
 
 ---
 
@@ -31,8 +31,8 @@ chmod +x examples/basic-dispatch.sh
 This will:
 1. Copy `config.example.toml` → `config.toml` (if not already present)
 2. Run `doctor --skip-llm` to verify the environment
-3. List available ghost agents
-4. Dispatch a simple "hello world" task to the `coder` ghost
+3. List available spark agents
+4. Dispatch a simple "hello world" task to the `coder` spark
 
 ---
 
@@ -50,12 +50,12 @@ athena feature plan --file my-feature.toml
 
 ---
 
-## Customising a Ghost
+## Customising a Spark
 
-Place your custom ghost config fragment into `config.toml` under a `[[ghosts]]` section
+Place your custom spark config fragment into `config.toml` under a `[[ghosts]]` section
 (or in `~/.athena/ghosts/<name>.toml` for user-local overrides):
 
 ```bash
-# Append the custom ghost snippet to your config
+# Append the custom spark snippet to your config
 cat examples/custom-ghost.toml >> config.toml
 ```

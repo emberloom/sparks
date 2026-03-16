@@ -20,9 +20,9 @@ jobs:
 
       - name: Build CI config
         run: |
-          cat > /tmp/athena-ci.toml <<'EOF'
+          cat > /tmp/sparks-ci.toml <<'EOF'
           [db]
-          path = "/tmp/athena-ci.db"
+          path = "/tmp/sparks-ci.db"
           EOF
 
       - name: Validate eval scripts
@@ -30,7 +30,7 @@ jobs:
           python3 -m py_compile \
             scripts/eval_harness.py \
             scripts/eval_dashboard.py \
-            scripts/mock_athena_dispatch.py \
+            scripts/mock_sparks_dispatch.py \
             scripts/optimizer_tournament.py \
             scripts/test_eval_dashboard.py \
             scripts/test_eval_harness.py \
@@ -46,23 +46,23 @@ jobs:
         run: |
           python3 scripts/eval_harness.py \
             --suite eval/benchmark-mini-ci.json \
-            --config /tmp/athena-ci.toml \
-            --athena-bin scripts/mock_athena_dispatch.py \
+            --config /tmp/sparks-ci.toml \
+            --sparks-bin scripts/mock_sparks_dispatch.py \
             --no-use-worktree \
-            --history-file /tmp/athena-history.jsonl
+            --history-file /tmp/sparks-history.jsonl
 
       - name: Render observability dashboard artifacts
         run: |
           python3 scripts/eval_dashboard.py \
-            --config /tmp/athena-ci.toml \
-            --repo athena \
-            --history-file /tmp/athena-history.jsonl \
+            --config /tmp/sparks-ci.toml \
+            --repo sparks \
+            --history-file /tmp/sparks-history.jsonl \
             --out-file eval/results/dashboard.md \
             --json-out-file eval/results/dashboard_data.json
           python3 scripts/eval_dashboard.py \
-            --config /tmp/athena-ci.toml \
-            --repo athena \
-            --history-file /tmp/athena-history.jsonl \
+            --config /tmp/sparks-ci.toml \
+            --repo sparks \
+            --history-file /tmp/sparks-history.jsonl \
             --output-format html \
             --out-file eval/results/dashboard.html \
             --json-out-file eval/results/dashboard_data.json
@@ -104,7 +104,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build athena (webhook feature)
+      - name: Build sparks (webhook feature)
         run: cargo build --quiet --features webhook
 
       - name: Validate user flow harness
@@ -112,6 +112,6 @@ jobs:
 
       - name: Run user flow harness
         env:
-          ATHENA_DISABLE_HOME_PROFILES: "1"
+          SPARKS_DISABLE_HOME_PROFILES: "1"
         run: |
-          python3 scripts/user_flow_harness.py --athena-bin target/debug/athena
+          python3 scripts/user_flow_harness.py --sparks-bin target/debug/sparks

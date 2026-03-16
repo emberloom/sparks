@@ -1,6 +1,6 @@
 # Session Review & Explainability
 
-Athena records chat/tool/task activity and exposes review and explainability workflows in Telegram.
+Emberloom records chat/tool/task activity and exposes review and explainability workflows in Telegram.
 
 ## Scope
 
@@ -32,7 +32,7 @@ Activity entries capture:
 - event type (`chat_in`, `chat_out`, `tool_run`, `task_start`, `task_finish`, `task_fail`)
 - summary/detail text
 - tool name/input/output (where available)
-- ghost, task id, duration, parent linkage
+- spark, task id, duration, parent linkage
 
 Review/explain commands merge:
 - current Telegram session activity
@@ -46,7 +46,7 @@ Alert rules are pattern-based and can target:
 - `detail`
 - `tool_input`
 - `tool_output`
-- `ghost`
+- `spark`
 - `event_type`
 - `any`
 
@@ -61,7 +61,7 @@ Severities:
 - goals and outcomes
 - key tool decisions
 - notable failures/retries
-- ghost strategy choices
+- spark strategy choices
 - follow-up risks/actions
 
 ## Operator Notes

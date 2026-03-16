@@ -1,4 +1,4 @@
-# Athena Execution Contract v1
+# Emberloom Execution Contract v1
 
 Standard runtime contract for coding CLI tools (`codex`, `claude_code`, `opencode`).
 
@@ -11,7 +11,7 @@ Ensure deterministic execution behavior independent of CLI backend.
 Each execution must produce normalized fields:
 
 - `tool`: cli backend name
-- `task_id`: Athena task ID
+- `task_id`: Emberloom task ID
 - `exit_code`: numeric process code
 - `status`: `succeeded | failed | timeout | contract_error`
 - `stdout`: captured standard output

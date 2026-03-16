@@ -9,11 +9,11 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 
 use crate::config::{McpConfig, McpServerConfig, McpTransport};
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::observer::{ObserverCategory, ObserverHandle};
 
 const INIT_PROTOCOL_VERSION: &str = "2024-11-05";
-const CLIENT_NAME: &str = "athena";
+const CLIENT_NAME: &str = "sparks";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SHUTDOWN_GRACE_MS: u64 = 750;
 
@@ -258,7 +258,7 @@ impl McpRegistry {
         let runtime = self
             .servers
             .get(server)
-            .ok_or_else(|| AthenaError::Tool(format!("MCP server '{}' is not configured", server)))?
+            .ok_or_else(|| SparksError::Tool(format!("MCP server '{}' is not configured", server)))?
             .clone();
 
         runtime.invoke(remote_tool, args).await
@@ -309,7 +309,7 @@ struct McpStdioSession {
 impl McpStdioSession {
     async fn start(config: &McpServerConfig) -> Result<Self> {
         if config.transport != McpTransport::Stdio {
-            return Err(AthenaError::Tool(format!(
+            return Err(SparksError::Tool(format!(
                 "MCP server '{}' uses unsupported transport '{}'; currently only 'stdio' is supported",
                 config.name,
                 config.transport.as_str()
@@ -317,7 +317,7 @@ impl McpStdioSession {
         }
 
         let command = config.command.clone().ok_or_else(|| {
-            AthenaError::Tool(format!(
+            SparksError::Tool(format!(
                 "MCP server '{}' is missing 'command' for stdio transport",
                 config.name
             ))
@@ -349,7 +349,7 @@ impl McpStdioSession {
                 "failed to spawn MCP server '{}' command '{}': {}",
                 config.name, command, e
             );
-            AthenaError::Tool(build_diagnostic(
+            SparksError::Tool(build_diagnostic(
                 &config.name,
                 McpFailureKind::Connection,
                 &message,
@@ -357,7 +357,7 @@ impl McpStdioSession {
         })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
-            AthenaError::Tool(build_diagnostic(
+            SparksError::Tool(build_diagnostic(
                 &config.name,
                 McpFailureKind::Connection,
                 "spawned process does not expose stdin",
@@ -365,7 +365,7 @@ impl McpStdioSession {
         })?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
-            AthenaError::Tool(build_diagnostic(
+            SparksError::Tool(build_diagnostic(
                 &config.name,
                 McpFailureKind::Connection,
                 "spawned process does not expose stdout",
@@ -407,7 +407,7 @@ impl McpStdioSession {
         });
 
         self.request("initialize", init_params).await.map_err(|e| {
-            AthenaError::Tool(build_diagnostic(
+            SparksError::Tool(build_diagnostic(
                 &self.server_name,
                 classify_failure_kind(&e.to_string(), McpFailureKind::Connection),
                 &format!("initialize failed: {}", e),
@@ -417,7 +417,7 @@ impl McpStdioSession {
         self.notify("notifications/initialized", json!({}))
             .await
             .map_err(|e| {
-                AthenaError::Tool(build_diagnostic(
+                SparksError::Tool(build_diagnostic(
                     &self.server_name,
                     classify_failure_kind(&e.to_string(), McpFailureKind::Protocol),
                     &format!("initialized notification failed: {}", e),
@@ -439,7 +439,7 @@ impl McpStdioSession {
                 .request("tools/list", Value::Object(params))
                 .await
                 .map_err(|e| {
-                    AthenaError::Tool(build_diagnostic(
+                    SparksError::Tool(build_diagnostic(
                         &self.server_name,
                         classify_failure_kind(&e.to_string(), McpFailureKind::Discovery),
                         &format!("tools/list failed: {}", e),
@@ -450,7 +450,7 @@ impl McpStdioSession {
                 .get("tools")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| {
-                    AthenaError::Tool(build_diagnostic(
+                    SparksError::Tool(build_diagnostic(
                         &self.server_name,
                         McpFailureKind::Protocol,
                         "tools/list result missing 'tools' array",
@@ -462,7 +462,7 @@ impl McpStdioSession {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        AthenaError::Tool(build_diagnostic(
+                        SparksError::Tool(build_diagnostic(
                             &self.server_name,
                             McpFailureKind::Protocol,
                             "tools/list item missing 'name'",
@@ -517,7 +517,7 @@ impl McpStdioSession {
         });
 
         let result = self.request("tools/call", params).await.map_err(|e| {
-            AthenaError::Tool(build_diagnostic(
+            SparksError::Tool(build_diagnostic(
                 &self.server_name,
                 classify_failure_kind(&e.to_string(), McpFailureKind::Invocation),
                 &format!("tools/call failed for '{}': {}", remote_tool, e),
@@ -560,14 +560,14 @@ impl McpStdioSession {
 
             if let Some(err) = response.get("error") {
                 let msg = format_jsonrpc_error(err);
-                return Err(AthenaError::Tool(msg));
+                return Err(SparksError::Tool(msg));
             }
 
             if let Some(result) = response.get("result") {
                 return Ok(result.clone());
             }
 
-            return Err(AthenaError::Tool(
+            return Err(SparksError::Tool(
                 "MCP protocol error: response missing both 'result' and 'error'".to_string(),
             ));
         }
@@ -584,23 +584,23 @@ impl McpStdioSession {
 
     async fn write_message(&mut self, value: &Value) -> Result<()> {
         let payload = serde_json::to_vec(value)
-            .map_err(|e| AthenaError::Tool(format!("MCP serialization error: {}", e)))?;
+            .map_err(|e| SparksError::Tool(format!("MCP serialization error: {}", e)))?;
         let header = format!("Content-Length: {}\r\n\r\n", payload.len());
 
         timeout(self.timeout, self.stdin.write_all(header.as_bytes()))
             .await
-            .map_err(|_| AthenaError::Tool("MCP write timed out".to_string()))
-            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e))))?;
+            .map_err(|_| SparksError::Tool("MCP write timed out".to_string()))
+            .and_then(|r| r.map_err(|e| SparksError::Tool(format!("MCP write error: {}", e))))?;
 
         timeout(self.timeout, self.stdin.write_all(&payload))
             .await
-            .map_err(|_| AthenaError::Tool("MCP write timed out".to_string()))
-            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP write error: {}", e))))?;
+            .map_err(|_| SparksError::Tool("MCP write timed out".to_string()))
+            .and_then(|r| r.map_err(|e| SparksError::Tool(format!("MCP write error: {}", e))))?;
 
         timeout(self.timeout, self.stdin.flush())
             .await
-            .map_err(|_| AthenaError::Tool("MCP flush timed out".to_string()))
-            .and_then(|r| r.map_err(|e| AthenaError::Tool(format!("MCP flush error: {}", e))))?;
+            .map_err(|_| SparksError::Tool("MCP flush timed out".to_string()))
+            .and_then(|r| r.map_err(|e| SparksError::Tool(format!("MCP flush error: {}", e))))?;
 
         Ok(())
     }
@@ -609,16 +609,16 @@ impl McpStdioSession {
         let mut first_line = String::new();
         let first_read = timeout(self.timeout, self.stdout.read_line(&mut first_line))
             .await
-            .map_err(|_| AthenaError::Tool("MCP read timed out".to_string()))?
-            .map_err(|e| AthenaError::Tool(format!("MCP read error: {}", e)))?;
+            .map_err(|_| SparksError::Tool("MCP read timed out".to_string()))?
+            .map_err(|e| SparksError::Tool(format!("MCP read error: {}", e)))?;
 
         if first_read == 0 {
-            return Err(AthenaError::Tool("MCP stream closed by server".to_string()));
+            return Err(SparksError::Tool("MCP stream closed by server".to_string()));
         }
 
         if first_line.trim_start().starts_with('{') {
             return serde_json::from_str(first_line.trim()).map_err(|e| {
-                AthenaError::Tool(format!("MCP protocol error: invalid JSON frame: {}", e))
+                SparksError::Tool(format!("MCP protocol error: invalid JSON frame: {}", e))
             });
         }
 
@@ -628,11 +628,11 @@ impl McpStdioSession {
             let mut header_line = String::new();
             let read = timeout(self.timeout, self.stdout.read_line(&mut header_line))
                 .await
-                .map_err(|_| AthenaError::Tool("MCP read timed out".to_string()))?
-                .map_err(|e| AthenaError::Tool(format!("MCP read error: {}", e)))?;
+                .map_err(|_| SparksError::Tool("MCP read timed out".to_string()))?
+                .map_err(|e| SparksError::Tool(format!("MCP read error: {}", e)))?;
 
             if read == 0 {
-                return Err(AthenaError::Tool(
+                return Err(SparksError::Tool(
                     "MCP protocol error: EOF while reading headers".to_string(),
                 ));
             }
@@ -647,17 +647,17 @@ impl McpStdioSession {
         }
 
         let length = content_length.ok_or_else(|| {
-            AthenaError::Tool("MCP protocol error: missing Content-Length header".to_string())
+            SparksError::Tool("MCP protocol error: missing Content-Length header".to_string())
         })?;
 
         let mut payload = vec![0_u8; length];
         timeout(self.timeout, self.stdout.read_exact(&mut payload))
             .await
-            .map_err(|_| AthenaError::Tool("MCP read timed out".to_string()))?
-            .map_err(|e| AthenaError::Tool(format!("MCP read error: {}", e)))?;
+            .map_err(|_| SparksError::Tool("MCP read timed out".to_string()))?
+            .map_err(|e| SparksError::Tool(format!("MCP read error: {}", e)))?;
 
         serde_json::from_slice(&payload)
-            .map_err(|e| AthenaError::Tool(format!("MCP protocol error: invalid JSON: {}", e)))
+            .map_err(|e| SparksError::Tool(format!("MCP protocol error: invalid JSON: {}", e)))
     }
 }
 
@@ -924,7 +924,7 @@ while True:
 
     fn write_stub_mcp_server_script() -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("athena-mcp-stub-{}.py", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("sparks-mcp-stub-{}.py", uuid::Uuid::new_v4()));
         std::fs::write(&path, STUB_MCP_SERVER_SCRIPT)
             .expect("stub MCP server script should be writable");
         path
@@ -1035,7 +1035,7 @@ while True:
                 name: "broken".to_string(),
                 enabled: true,
                 transport: McpTransport::Stdio,
-                command: Some("athena-mcp-command-does-not-exist".to_string()),
+                command: Some("sparks-mcp-command-does-not-exist".to_string()),
                 args: vec![],
                 env: vec![],
                 timeout_secs: 5,

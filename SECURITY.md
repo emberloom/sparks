@@ -27,7 +27,7 @@ Include:
 
 ## Local-Only Operation
 
-Athena supports an explicit local runtime profile:
+Emberloom supports an explicit local runtime profile:
 
 - set `[runtime].profile = "local_only"`
 - set `[llm].provider = "ollama"` with loopback URL (`localhost`, `127.0.0.1`, or `::1`)
@@ -42,6 +42,6 @@ Reference guide: `docs/local-only-deployment.md`
 
 ## Scope and Limits
 
-- `local_only` constrains Athena runtime configuration and integrations.
-- Ghost execution is container-hardened by default (`network_mode=none`, dropped capabilities, read-only rootfs).
+- `local_only` constrains Emberloom runtime configuration and integrations.
+- Spark execution is container-hardened by default (`network_mode=none`, dropped capabilities, read-only rootfs).
 - Host-level outbound controls (firewall/egress policy) remain operator responsibility.

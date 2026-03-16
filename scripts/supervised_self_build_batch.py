@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run a supervised batch of `athena self-build run` jobs and aggregate artifacts.
+Run a supervised batch of `sparks self-build run` jobs and aggregate artifacts.
 """
 
 from __future__ import annotations
@@ -154,11 +154,11 @@ def main() -> int:
     p.add_argument("--max-runs", type=int, default=0)
     p.add_argument("--timeout-secs", type=int, default=1800)
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--athena-bin", default="./target/debug/athena")
+    p.add_argument("--sparks-bin", default="./target/debug/sparks")
     p.add_argument(
         "--skip-build",
         action="store_true",
-        help="Skip pre-batch cargo build of athena binary.",
+        help="Skip pre-batch cargo build of sparks binary.",
     )
     args = p.parse_args()
 
@@ -171,18 +171,18 @@ def main() -> int:
         return 1
 
     if not args.dry_run and not args.skip_build:
-        print("Pre-building athena binary...", flush=True)
+        print("Pre-building sparks binary...", flush=True)
         build = run_cmd(["cargo", "build", "-q"], repo, timeout=max(args.timeout_secs, 900))
         if build.returncode != 0:
             sys.stderr.write(build.stdout or "")
             sys.stderr.write(build.stderr or "")
-            print("Failed to build athena binary before batch.", file=sys.stderr)
+            print("Failed to build sparks binary before batch.", file=sys.stderr)
             return build.returncode or 1
 
     rows: list[BatchRow] = []
     for i, ticket in enumerate(tickets, start=1):
         cmd = [
-            args.athena_bin,
+            args.sparks_bin,
             "self-build",
             "run",
             "--ticket",

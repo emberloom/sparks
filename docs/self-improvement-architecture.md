@@ -1,4 +1,4 @@
-# Athena Self-Improvement Architecture
+# Emberloom Self-Improvement Architecture
 
 > Systems that think, adapt, and act with bounded autonomy.
 
@@ -6,7 +6,7 @@
 
 ## Target Operating Model (Spec-Driven)
 
-Athena's long-horizon engineering loop should follow one explicit contract stack:
+Emberloom's long-horizon engineering loop should follow one explicit contract stack:
 
 1. `Feature Contract` defines user outcome, scope, constraints, and acceptance criteria.
 2. `Task Contracts` decompose a feature into a DAG of atomic tasks with dependencies.
@@ -47,7 +47,7 @@ flowchart LR
 
 ```mermaid
 graph TB
-    subgraph "SENSE — What Athena Knows About Herself"
+    subgraph "SENSE — What Emberloom Knows About Itself"
         LLM_CALLS["LLM Providers<br/>(3 call sites)"]
         LLM_CALLS -->|record_llm_latency| ATOMICS["Global Atomics<br/>latency_avg / call_count"]
 
@@ -68,20 +68,20 @@ graph TB
         COLLECTOR -->|SelfMetrics event| OBSERVER["Observer Bus<br/>(UDS socket)"]
     end
 
-    subgraph "THINK — How Athena Understands Patterns"
+    subgraph "THINK — How Emberloom Understands Patterns"
         METRICS -->|injected when self_dev=on| CLASSIFY["Manager::classify()<br/>task routing prompt"]
 
         MEM_SCANNER["spawn_memory_scanner<br/>⏱ every 1h"] -->|"last 50 memories → LLM"| PATTERNS["Memories: category='pattern'"]
         HEARTBEAT["spawn_heartbeat_loop<br/>⏱ every 30min"] -->|"HEARTBEAT.md + random memories → LLM"| HB_MEM["Memories: category='heartbeat'"]
         IDLE["spawn_idle_musings<br/>⏱ check every 5min"] -->|"random memories → LLM"| MUSE_MEM["Memories: category='musing'"]
 
-        CODE_IDX["spawn_code_indexer<br/>⏱ every 4h"] -->|"AutonomousTask → scout ghost"| CODE_MEM["Memories: category='code_structure'"]
+        CODE_IDX["spawn_code_indexer<br/>⏱ every 4h"] -->|"AutonomousTask → scout spark"| CODE_MEM["Memories: category='code_structure'"]
 
         CODE_MEM --> REFACTOR_SCAN["spawn_refactoring_scanner<br/>⏱ every 6h"]
         REFACTOR_SCAN -->|"code_structure → LLM analysis"| REFACTOR_MEM["Memories: category='refactoring_opportunity'"]
     end
 
-    subgraph "ACT — How Athena Improves Herself"
+    subgraph "ACT — How Emberloom Improves Itself"
         REFACTOR_SCAN -->|"30% × spontaneity gate"| AUTO_TX["auto_tx channel"]
         AUTO_TX --> AUTO_LOOP["Autonomous Task Consumer<br/>(core.rs event loop)"]
         AUTO_LOOP -->|"manager.execute_task()"| EXECUTOR["Executor → CodeStrategy"]
@@ -185,7 +185,7 @@ graph LR
 
 ### Funnel 1: Health Monitor → Diagnose → Auto-Fix
 
-**Purpose**: Athena notices something is wrong with herself and fixes it.
+**Purpose**: Emberloom notices something is wrong with herself and fixes it.
 
 ```mermaid
 flowchart TD
@@ -197,7 +197,7 @@ flowchart TD
 
     D -->|"User asks about it"| E1["💬 ADVISE<br/>Suggest fix to user<br/>via conversation"]
 
-    D -->|"spontaneity gate passes<br/>+ self_dev_enabled"| E2["🔧 AUTO-FIX<br/>Dispatch AutonomousTask<br/>ghost=coder"]
+    D -->|"spontaneity gate passes<br/>+ self_dev_enabled"| E2["🔧 AUTO-FIX<br/>Dispatch AutonomousTask<br/>spark=coder"]
 
     E2 --> F["CodeStrategy<br/>EXPLORE → EXECUTE → VERIFY"]
     F -->|"test_generation=true"| G["Write tests → Run → Verify"]
@@ -222,8 +222,8 @@ flowchart TD
 **How it should work**:
 1. Metrics collector detects anomaly (tool failure rate spike, latency degradation, memory growth)
 2. Stores anomaly as memory with category `"health_alert"`
-3. If `self_dev_enabled` + spontaneity gate: dispatches diagnostic task to scout ghost
-4. Scout identifies root cause → dispatches fix task to coder ghost
+3. If `self_dev_enabled` + spontaneity gate: dispatches diagnostic task to scout spark
+4. Scout identifies root cause → dispatches fix task to coder spark
 5. Coder runs CodeStrategy with `test_generation=true`
 6. If VERIFY tests fail → `attempt_test_fix()` triggers corrective retry (currently single cycle)
 7. On success: stores `"health_fix"` memory, emits pulse
@@ -232,11 +232,11 @@ flowchart TD
 
 ### Funnel 2: Index → Analyze → Propose → Refactor
 
-**Purpose**: Athena builds understanding of her own codebase and improves it structurally.
+**Purpose**: Emberloom builds understanding of its own codebase and improves it structurally.
 
 ```mermaid
 flowchart TD
-    A["🗺️ INDEX<br/>spawn_code_indexer (4h)<br/>ghost=scout"] -->|"Extract symbols,<br/>mod/use graph,<br/>dependency map"| B["📦 STORE<br/>Memories: 'code_structure'"]
+    A["🗺️ INDEX<br/>spawn_code_indexer (4h)<br/>spark=scout"] -->|"Extract symbols,<br/>mod/use graph,<br/>dependency map"| B["📦 STORE<br/>Memories: 'code_structure'"]
 
     B --> C["🔬 ANALYZE<br/>spawn_refactoring_scanner (6h)<br/>Direct LLM call"]
 
@@ -250,7 +250,7 @@ flowchart TD
 
     F -->|"gate fails"| G1["📋 PROPOSE ONLY<br/>Stored as memory<br/>Available via heartbeat/conversation"]
 
-    F -->|"gate passes"| G2["🔧 AUTO-REFACTOR<br/>AutonomousTask → coder ghost"]
+    F -->|"gate passes"| G2["🔧 AUTO-REFACTOR<br/>AutonomousTask → coder spark"]
 
     G2 --> H["CodeStrategy + test_generation=true"]
     H --> I["EXPLORE → EXECUTE (ripple warning) → VERIFY"]
@@ -279,7 +279,7 @@ flowchart TD
 2. Refactoring scanner queries structure + tool failure patterns + historical fixes
 3. LLM identifies highest-impact opportunity
 4. Stored as `refactoring_opportunity` memory (always)
-5. If spontaneity allows: dispatched automatically to coder ghost
+5. If spontaneity allows: dispatched automatically to coder spark
 6. CodeStrategy uses code_structure memories for ripple analysis before EXECUTE
 7. VERIFY phase writes tests + runs them
 8. On failure: stores `"refactoring_failed"` memory with details → scanner learns to avoid similar ideas
@@ -289,7 +289,7 @@ flowchart TD
 
 ### Funnel 3: Interact → Learn → Evolve
 
-**Purpose**: Athena learns from conversations and proactively suggests or makes improvements.
+**Purpose**: Emberloom learns from conversations and proactively suggests or makes improvements.
 
 ```mermaid
 flowchart TD
@@ -352,7 +352,7 @@ flowchart TD
 
 ### Funnel 4: Execute → Verify → Self-Heal → Learn
 
-**Purpose**: Every code change Athena makes feeds back into her understanding.
+**Purpose**: Every code change Emberloom makes feeds back into its understanding.
 
 ```mermaid
 flowchart TD
@@ -479,7 +479,7 @@ graph TB
 
 ## Bounded Autonomy Ladder
 
-Athena's self-improvement operates at 5 levels of autonomy, each with different gates:
+Emberloom's self-improvement operates at 5 levels of autonomy, each with different gates:
 
 ```
 Level 5: AUTONOMOUS REFACTORING
@@ -522,4 +522,4 @@ The user controls maximum autonomy via knob combinations.
 | Code indexer relies on LLM | **MEDIUM** | F2 | No programmatic guarantee memories are stored |
 | Ripple uses heuristics only | **LOW** | F4 | Doesn't query code_structure memories |
 | Streaming latency = TTFB only | **LOW** | F1 | Doesn't measure full generation time |
-| Metrics not visible to ghosts | **LOW** | F1 | Only in classify prompt, not in task execution |
+| Metrics not visible to sparks | **LOW** | F1 | Only in classify prompt, not in task execution |

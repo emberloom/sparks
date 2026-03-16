@@ -1,4 +1,4 @@
-# Athena Task Contract v1
+# Emberloom Task Contract v1
 
 Use one task contract per executable task in a feature DAG.
 

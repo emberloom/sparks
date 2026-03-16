@@ -1,4 +1,4 @@
-# Athena Maintainability Map
+# Emberloom Maintainability Map
 
 Date: 2026-02-15
 Scope: `src/**/*.rs` (31 Rust files)

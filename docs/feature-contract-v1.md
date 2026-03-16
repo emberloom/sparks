@@ -1,4 +1,4 @@
-# Athena Feature Contract v1
+# Emberloom Feature Contract v1
 
 Feature contracts define an auditable DAG of autonomous tasks mapped to acceptance criteria.
 

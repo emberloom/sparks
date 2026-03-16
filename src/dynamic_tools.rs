@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::docker::DockerSession;
-use crate::error::{AthenaError, Result};
+use crate::error::{SparksError, Result};
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::tools::{Tool, ToolResult};
 
@@ -343,7 +343,7 @@ pub fn discover(path: &Path, host_workspace: &str) -> Result<Vec<Box<dyn Tool>>>
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
 
     let entries = std::fs::read_dir(path).map_err(|e| {
-        AthenaError::Config(format!(
+        SparksError::Config(format!(
             "Failed to read dynamic tools dir {}: {}",
             path.display(),
             e
@@ -408,7 +408,7 @@ pub fn discover_host(path: &Path, host_workspace: &str) -> Result<Vec<DynamicToo
     let mut tools = Vec::new();
 
     let entries = std::fs::read_dir(path).map_err(|e| {
-        AthenaError::Config(format!(
+        SparksError::Config(format!(
             "Failed to read dynamic tools dir {}: {}",
             path.display(),
             e
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_discover_empty_dir() {
-        let dir = std::env::temp_dir().join("athena_test_dynamic_tools_empty");
+        let dir = std::env::temp_dir().join("sparks_test_dynamic_tools_empty");
         let _ = std::fs::create_dir_all(&dir);
         let result = discover(&dir, ".");
         assert!(result.is_ok());
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_discover_loads_yaml() {
-        let dir = std::env::temp_dir().join("athena_test_dynamic_tools_load");
+        let dir = std::env::temp_dir().join("sparks_test_dynamic_tools_load");
         let _ = std::fs::create_dir_all(&dir);
 
         let yaml = r#"
@@ -680,7 +680,7 @@ command: "echo Hello {{name}}"
 
     #[test]
     fn test_discover_skips_non_yaml() {
-        let dir = std::env::temp_dir().join("athena_test_dynamic_tools_skip");
+        let dir = std::env::temp_dir().join("sparks_test_dynamic_tools_skip");
         let _ = std::fs::create_dir_all(&dir);
 
         std::fs::write(dir.join("readme.txt"), "not a tool").unwrap();
@@ -694,7 +694,7 @@ command: "echo Hello {{name}}"
 
     #[test]
     fn test_discover_skips_invalid_yaml() {
-        let dir = std::env::temp_dir().join("athena_test_dynamic_tools_invalid");
+        let dir = std::env::temp_dir().join("sparks_test_dynamic_tools_invalid");
         let _ = std::fs::create_dir_all(&dir);
 
         std::fs::write(dir.join("bad.yml"), "this: is\nnot: valid\ntool: def").unwrap();
@@ -831,7 +831,7 @@ command: "git {{subcommand}}"
 
     #[test]
     fn test_discover_host_tool_gets_workspace() {
-        let dir = std::env::temp_dir().join("athena_test_dynamic_tools_host");
+        let dir = std::env::temp_dir().join("sparks_test_dynamic_tools_host");
         let _ = std::fs::create_dir_all(&dir);
 
         let yaml = r#"
@@ -902,7 +902,7 @@ command: "git {{subcommand}}"
 
     #[test]
     fn test_discover_host_filters_docker_tools() {
-        let dir = std::env::temp_dir().join("athena_test_discover_host");
+        let dir = std::env::temp_dir().join("sparks_test_discover_host");
         let _ = std::fs::create_dir_all(&dir);
 
         // Host tool
