@@ -16,6 +16,7 @@ mod feature_contract;
 mod ghost_policy;
 mod heartbeat;
 mod introspect;
+mod leaderboard;
 mod knobs;
 mod kpi;
 mod langfuse;
