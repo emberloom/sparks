@@ -274,6 +274,7 @@ fn meta_path_for(snap_path: &Path) -> PathBuf {
     no_tar.with_extension("json")
 }
 
+
 fn extract_snapshot(archive: &Path, dest: &Path) -> Result<()> {
     let output = Command::new("tar")
         .arg("xzf")
