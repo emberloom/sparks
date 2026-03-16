@@ -155,7 +155,10 @@ impl SonarClient {
             request = request.query(&[("organization", org.as_str())]);
         }
         if let Some(token) = self.token() {
-            request = request.bearer_auth(&token);
+            // SonarQube uses HTTP Basic auth with the token as the username and an
+            // empty password (i.e. "Authorization: Basic base64(token:)").
+            // Bearer auth is NOT supported and will return 401.
+            request = request.basic_auth(&token, Option::<&str>::None);
         }
 
         let resp = request.send().await?;
