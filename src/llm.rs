@@ -1699,7 +1699,7 @@ pub struct OpenAiCompatibleConfig {
 pub struct OpenAiCompatibleClient {
     client: Client,
     config: OpenAiCompatibleConfig,
-    name: String,
+    name: &'static str,
     model_override: std::sync::RwLock<Option<String>>,
 }
 
@@ -1780,11 +1780,11 @@ struct OpenAiUsage {
 }
 
 impl OpenAiCompatibleClient {
-    pub fn new(config: OpenAiCompatibleConfig, name: impl Into<String>) -> Self {
+    pub fn new(config: OpenAiCompatibleConfig, name: &'static str) -> Self {
         Self {
             client: Client::new(),
             config,
-            name: name.into(),
+            name,
             model_override: std::sync::RwLock::new(None),
         }
     }
@@ -2167,7 +2167,7 @@ impl LlmProvider for OpenAiCompatibleClient {
         }
 
         let (tx, rx) = mpsc::channel(64);
-        let provider_name = self.name.clone();
+        let provider_name = self.name;
         let stream_start = Instant::now();
 
         // Spawn a task to read SSE lines and emit StreamEvents

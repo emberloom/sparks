@@ -2106,7 +2106,7 @@ async fn connect_main_llm(config: &Config) -> Result<(Arc<dyn LlmProvider>, Stri
         };
 
         if skip_health {
-            eprintln!( // lgtm[rust/cleartext-logging] -- provider_name() returns a hardcoded display name, not sensitive data
+            eprintln!(
                 "Skipping LLM health check for {} (SPARKS_SKIP_LLM_HEALTHCHECK=1)",
                 candidate.provider_name()
             );
@@ -2155,7 +2155,7 @@ async fn connect_orchestrator(
     }
 
     if llm_health_check_disabled() {
-        eprintln!( // lgtm[rust/cleartext-logging] -- provider_name() returns a hardcoded display name, not sensitive data
+        eprintln!(
             "Skipping orchestrator health check for {} (SPARKS_SKIP_LLM_HEALTHCHECK=1)",
             orchestrator.provider_name()
         );
