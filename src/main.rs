@@ -16,7 +16,6 @@ mod feature_contract;
 mod ghost_policy;
 mod heartbeat;
 mod introspect;
-mod leaderboard;
 mod knobs;
 mod kpi;
 mod langfuse;
@@ -38,6 +37,7 @@ mod scheduler;
 mod secrets;
 mod self_heal;
 mod session_review;
+mod sonarqube;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;

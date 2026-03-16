@@ -69,6 +69,8 @@ pub struct Config {
     pub langfuse: LangfuseConfig,
     #[serde(default)]
     pub alerts: AlertsConfig,
+    #[serde(default)]
+    pub sonarqube: SonarqubeConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -763,6 +765,43 @@ impl Default for AlertsConfig {
     }
 }
 
+// ── SonarQube config ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct SonarqubeConfig {
+    /// SonarQube server URL (e.g. https://sonarcloud.io or http://localhost:9000)
+    #[serde(default = "default_sonar_url")]
+    pub server_url: String,
+    /// Authentication token (or set SPARKS_SONAR_TOKEN env var)
+    pub token: Option<String>,
+    /// Project key (e.g. "myorg_myproject")
+    pub project_key: Option<String>,
+    /// Organisation key (required for SonarCloud, omit for self-hosted)
+    pub organization: Option<String>,
+    /// Quality gate timeout in seconds (default 120)
+    #[serde(default = "default_sonar_timeout")]
+    pub gate_timeout_secs: u64,
+    /// Poll interval in seconds (default 5)
+    #[serde(default = "default_sonar_poll")]
+    pub poll_interval_secs: u64,
+    /// Whether to block PR creation on quality gate failure (default true)
+    #[serde(default = "default_sonar_block")]
+    pub block_on_failure: bool,
+}
+
+fn default_sonar_url() -> String {
+    "https://sonarcloud.io".into()
+}
+fn default_sonar_timeout() -> u64 {
+    120
+}
+fn default_sonar_poll() -> u64 {
+    5
+}
+fn default_sonar_block() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct MoodConfig {
     #[serde(default)]
@@ -1452,6 +1491,7 @@ impl Default for Config {
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
             alerts: AlertsConfig::default(),
+            sonarqube: SonarqubeConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }
