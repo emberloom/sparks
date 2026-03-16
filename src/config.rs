@@ -71,6 +71,8 @@ pub struct Config {
     pub alerts: AlertsConfig,
     #[serde(default)]
     pub sonarqube: SonarqubeConfig,
+    #[serde(default)]
+    pub snapshot: SnapshotConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -950,6 +952,49 @@ impl Default for LangfuseConfig {
     }
 }
 
+// ── Snapshot config ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
+pub struct SnapshotConfig {
+    /// Enable automatic workspace snapshots (default: false - opt-in)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory to store snapshots (default: ~/.sparks/snapshots)
+    pub snapshot_dir: Option<String>,
+    /// Maximum number of snapshots to retain (default: 20, 0 = unlimited)
+    #[serde(default = "default_snapshot_max")]
+    pub max_snapshots: usize,
+    /// Maximum workspace size in MB to snapshot (default: 50, 0 = no limit)
+    #[serde(default = "default_snapshot_max_mb")]
+    pub max_workspace_mb: u64,
+    /// Glob patterns to include (default: ["."])
+    #[serde(default = "default_snapshot_include")]
+    pub include: Vec<String>,
+    /// Glob patterns to exclude (default: ["target/", ".git/", "*.db"])
+    #[serde(default = "default_snapshot_exclude")]
+    pub exclude: Vec<String>,
+}
+
+fn default_snapshot_max() -> usize { 20 }
+fn default_snapshot_max_mb() -> u64 { 50 }
+fn default_snapshot_include() -> Vec<String> { vec![".".into()] }
+fn default_snapshot_exclude() -> Vec<String> {
+    vec!["target/".into(), ".git/".into(), ".worktrees/".into(), "*.db".into(), "*.log".into()]
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            snapshot_dir: None,
+            max_snapshots: default_snapshot_max(),
+            max_workspace_mb: default_snapshot_max_mb(),
+            include: default_snapshot_include(),
+            exclude: default_snapshot_exclude(),
+        }
+    }
+}
+
 fn default_metrics_interval() -> u64 {
     30
 }
@@ -1492,6 +1537,7 @@ impl Default for Config {
             langfuse: LangfuseConfig::default(),
             alerts: AlertsConfig::default(),
             sonarqube: SonarqubeConfig::default(),
+            snapshot: SnapshotConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }
