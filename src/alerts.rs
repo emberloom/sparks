@@ -35,6 +35,11 @@ pub enum DeliveryChannel {
 }
 
 impl DeliveryChannel {
+    /// Build a delivery channel from config strings.
+    ///
+    /// If `channel` is `"webhook"` but `webhook_url` is `None`, the resulting
+    /// `Webhook("")` variant is intentionally invalid; `deliver()` will log a
+    /// warning and skip delivery rather than panicking.
     pub fn from_config(channel: &str, webhook_url: Option<&str>) -> Self {
         match channel {
             "webhook" => DeliveryChannel::Webhook(webhook_url.unwrap_or("").to_string()),
@@ -60,7 +65,13 @@ pub struct AlertEngine {
     #[cfg(feature = "telegram")]
     log: Arc<ActivityLogStore>,
     http: reqwest::Client,
-    /// Last fired: rule_id -> timestamp (for silence window)
+    /// Last fired: rule_id -> Instant (for silence window).
+    ///
+    /// NOTE: `std::time::Instant` is not persisted across process restarts.
+    /// After a restart the silence window resets and each alert rule may fire
+    /// immediately on the first evaluation tick. This is intentional: the
+    /// alternative (persisting wall-clock timestamps to disk) adds complexity
+    /// that is not warranted for the current use case.
     last_fired: Arc<Mutex<HashMap<i64, std::time::Instant>>>,
 }
 
@@ -130,9 +141,14 @@ impl AlertEngine {
                 continue;
             }
 
-            // Check if any entry is within the last check_interval (new activity)
+            // Check if any entry is within the last check_interval (new activity).
+            // We use 1.5x the interval to tolerate minor scheduling jitter without
+            // accumulating a window large enough to re-fire stale entries after a
+            // silence period expires.
             let cutoff = chrono::Utc::now()
-                - chrono::Duration::seconds(self.config.check_interval_secs as i64 * 2);
+                - chrono::Duration::milliseconds(
+                    (self.config.check_interval_secs as f64 * 1.5 * 1000.0) as i64,
+                );
             let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
             let recent: Vec<_> = entries.iter().filter(|e| e.created_at >= cutoff_str).collect();
             if recent.is_empty() {
@@ -257,12 +273,15 @@ impl AlertEngine {
             tracing::debug!("Alert engine disabled");
             return;
         }
+        // Guard against a zero-second interval, which would panic in
+        // `tokio::time::interval`. Clamp to a minimum of 1 second.
+        let interval_secs = self.config.check_interval_secs.max(1);
         tracing::info!(
-            interval_secs = self.config.check_interval_secs,
+            interval_secs,
             "Alert engine started"
         );
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            self.config.check_interval_secs,
+            interval_secs,
         ));
         loop {
             interval.tick().await;
@@ -303,6 +322,17 @@ mod tests {
         assert_eq!(
             DeliveryChannel::from_config("webhook", Some(url)),
             DeliveryChannel::Webhook(url.to_string()),
+        );
+    }
+
+    #[test]
+    fn delivery_channel_from_config_webhook_no_url() {
+        // When channel is "webhook" but no URL is provided, from_config produces
+        // Webhook(""). The deliver() method will log a warning and skip delivery
+        // rather than panicking.
+        assert_eq!(
+            DeliveryChannel::from_config("webhook", None),
+            DeliveryChannel::Webhook("".to_string()),
         );
     }
 
