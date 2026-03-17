@@ -1,4 +1,3 @@
-mod alerts;
 mod ci_monitor;
 mod config;
 mod confirm;
