@@ -2,7 +2,42 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use slack_morphism::prelude::*;
+use slack_morphism::prelude::{
+    SlackActionBlockElement,
+    SlackActionId,
+    SlackActionsBlock,
+    SlackApiChatDeleteRequest,
+    SlackApiChatPostMessageRequest,
+    SlackApiChatUpdateRequest,
+    SlackApiToken,
+    SlackApiTokenValue,
+    SlackAppMentionEvent,
+    SlackBlock,
+    SlackBlockButtonElement,
+    SlackBlockMarkDownText,
+    SlackBlockPlainTextOnly,
+    SlackBlockText,
+    SlackChannelId,
+    SlackClient,
+    SlackClientEventsListenerEnvironment,
+    SlackClientEventsUserState,
+    SlackClientHyperHttpsConnector,
+    SlackClientSession,
+    SlackClientSocketModeConfig,
+    SlackClientSocketModeListener,
+    SlackCommandEvent,
+    SlackCommandEventResponse,
+    SlackEventCallbackBody,
+    SlackHyperClient,
+    SlackInteractionEvent,
+    SlackMessageContent,
+    SlackMessageEvent,
+    SlackPushEventCallback,
+    SlackSectionBlock,
+    SlackSocketModeListenerCallbacks,
+    SlackTs,
+    SlackUserId,
+};
 
 use crate::config::SlackConfig;
 use crate::confirm::Confirmer;
