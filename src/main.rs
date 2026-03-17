@@ -987,7 +987,7 @@ async fn main() -> anyhow::Result<()> {
             match action {
                 SnapshotAction::Create { label } => {
                     let meta = store.create("cli", label.as_deref())?;
-                    println!("Snapshot created: {} ({})", &meta.id[..8], meta.size_human());
+                    println!("Snapshot created: {} ({})", &meta.id[..12], meta.size_human());
                 }
                 SnapshotAction::List => {
                     let snaps = store.list()?;
@@ -996,8 +996,10 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         for s in &snaps {
                             let label = s.label.as_deref().unwrap_or("");
+                            // Show 12 hex chars so users can distinguish snapshots with the same
+                            // 8-char prefix when passing an ID to diff/restore/get.
                             println!("  {} | {} | {} | {} {}",
-                                &s.id[..8], s.created_at, s.size_human(), s.session_key, label);
+                                &s.id[..12], s.created_at, s.size_human(), s.session_key, label);
                         }
                     }
                 }
