@@ -22,6 +22,21 @@ pub struct TaskOutcome {
     pub user_rating: Option<i8>,  // -1 (thumbs down), 0 (neutral), 1 (thumbs up)
 }
 
+impl TaskOutcome {
+    /// Convenience constructor for the common case of no user rating.
+    pub fn new(session_key: impl Into<String>, ghost: impl Into<String>, success: bool, latency_ms: u64, input_tokens: u64, output_tokens: u64) -> Self {
+        Self {
+            session_key: session_key.into(),
+            ghost: ghost.into(),
+            success,
+            latency_ms,
+            input_tokens,
+            output_tokens,
+            user_rating: None,
+        }
+    }
+}
+
 /// Aggregated performance metrics for a ghost.
 #[derive(Debug, Clone, Default)]
 pub struct GhostMetrics {
@@ -57,11 +72,12 @@ impl GhostMetrics {
             _      => "★☆☆☆☆",
         };
         format!(
-            "#{} {:20} {} {:.0}% success  {:.0}ms avg  {} tasks",
+            "#{} {:20} {} {:.0}% success ({}/{})  {:.0}ms avg",
             rank, self.ghost, stars,
             self.success_rate * 100.0,
-            self.avg_latency_ms,
+            self.successful_tasks,
             self.total_tasks,
+            self.avg_latency_ms,
         )
     }
 }
@@ -262,6 +278,8 @@ impl GhostLeaderboard {
         Ok(format!(
             "Ghost Comparison: {} vs {}\n\n\
              {:>30}  {:<30}\n\
+             {}\n\
+             {:>30}  {:<30}\n\
              {:>30}  {:<30}\n\
              {:>30}  {:<30}\n\
              {:>30}  {:<30}\n\
@@ -269,6 +287,8 @@ impl GhostLeaderboard {
              Success rate winner: {}\n\
              Speed winner: {}",
             ghost_a, ghost_b,
+            ghost_a, ghost_b,
+            "-".repeat(63),
             format!("Success: {:.1}%", m_a.success_rate * 100.0),
             format!("Success: {:.1}%", m_b.success_rate * 100.0),
             format!("Avg latency: {:.0}ms", m_a.avg_latency_ms),
@@ -300,19 +320,15 @@ mod tests {
         GhostLeaderboard::new(conn, LeaderboardConfig::default()).unwrap()
     }
 
+    fn make_outcome(ghost: &str, success: bool) -> TaskOutcome {
+        TaskOutcome::new("s", ghost, success, 1000, 500, 200)
+    }
+
     #[test]
     fn record_and_rank() {
         let lb = test_lb();
         for i in 0..10 {
-            lb.record(&TaskOutcome {
-                session_key: "s".into(),
-                ghost: "coder".into(),
-                success: i % 3 != 0,  // ~67% success
-                latency_ms: 1000,
-                input_tokens: 500,
-                output_tokens: 200,
-                user_rating: None,
-            }).unwrap();
+            lb.record(&TaskOutcome::new("s", "coder", i % 3 != 0, 1000, 500, 200)).unwrap();
         }
         let rankings = lb.rankings().unwrap();
         assert_eq!(rankings.len(), 1);
@@ -333,9 +349,22 @@ mod tests {
         config.ab_test_fraction = 0.0;
         let conn = Connection::open_in_memory().unwrap();
         let lb = GhostLeaderboard::new(conn, config).unwrap();
-        // With fraction 0, should always be Control
+        // With fraction 0.0, rand::random::<f64>() is always >= 0.0, never < 0.0.
         for _ in 0..20 {
             assert_eq!(lb.ab_route(), AbRoute::Control);
+        }
+    }
+
+    #[test]
+    fn ab_route_always_challenger_when_fraction_one() {
+        let mut config = LeaderboardConfig::default();
+        config.ab_test_ghost = Some("challenger".into());
+        config.ab_test_fraction = 1.0;
+        let conn = Connection::open_in_memory().unwrap();
+        let lb = GhostLeaderboard::new(conn, config).unwrap();
+        // rand::random::<f64>() returns [0.0, 1.0), so < 1.0 is always true.
+        for _ in 0..20 {
+            assert_eq!(lb.ab_route(), AbRoute::Challenger("challenger".into()));
         }
     }
 
@@ -347,6 +376,16 @@ mod tests {
     }
 
     #[test]
+    fn rank_score_zero_tokens_returns_neutral_efficiency() {
+        // When avg_input_tokens and avg_output_tokens are both 0.0 (Default),
+        // efficiency should fall back to 0.5 (neutral) rather than 1.0 (perfect).
+        let m = GhostMetrics { ghost: "g".into(), success_rate: 0.5, total_tasks: 1, ..Default::default() };
+        // score = 0.6*0.5 + 0.2*0.5 + 0.2*0.5 = 0.5
+        let score = m.rank_score();
+        assert!((score - 0.5).abs() < 1e-9, "expected 0.5, got {score}");
+    }
+
+    #[test]
     fn format_leaderboard_empty() {
         let lb = test_lb();
         let text = lb.format_leaderboard().unwrap();
@@ -354,13 +393,34 @@ mod tests {
     }
 
     #[test]
+    fn format_leaderboard_with_data_shows_ghost_name() {
+        let lb = test_lb();
+        lb.record(&make_outcome("scout", true)).unwrap();
+        let text = lb.format_leaderboard().unwrap();
+        assert!(text.contains("scout"));
+        assert!(text.contains("Ghost Leaderboard"));
+    }
+
+    #[test]
     fn compare_two_ghosts() {
         let lb = test_lb();
-        lb.record(&TaskOutcome { session_key: "s".into(), ghost: "alpha".into(), success: true, latency_ms: 800, input_tokens: 300, output_tokens: 100, user_rating: None }).unwrap();
-        lb.record(&TaskOutcome { session_key: "s".into(), ghost: "beta".into(), success: false, latency_ms: 1200, input_tokens: 600, output_tokens: 200, user_rating: None }).unwrap();
+        lb.record(&TaskOutcome::new("s", "alpha", true, 800, 300, 100)).unwrap();
+        lb.record(&TaskOutcome::new("s", "beta", false, 1200, 600, 200)).unwrap();
         let result = lb.compare("alpha", "beta").unwrap();
         assert!(result.contains("alpha"));
         assert!(result.contains("beta"));
+        // Column headers must appear in the output so each column is identifiable.
+        assert!(result.contains("Success rate winner:"));
+        assert!(result.contains("Speed winner:"));
+    }
+
+    #[test]
+    fn reset_clears_all_data() {
+        let lb = test_lb();
+        lb.record(&make_outcome("ghost-x", true)).unwrap();
+        assert_eq!(lb.rankings().unwrap().len(), 1);
+        lb.reset().unwrap();
+        assert!(lb.rankings().unwrap().is_empty());
     }
 
     #[test]
@@ -370,7 +430,7 @@ mod tests {
         config.min_samples_for_recommendation = 50;
         let conn = Connection::open_in_memory().unwrap();
         let lb = GhostLeaderboard::new(conn, config).unwrap();
-        lb.record(&TaskOutcome { session_key: "s".into(), ghost: "challenger".into(), success: true, latency_ms: 500, input_tokens: 200, output_tokens: 80, user_rating: None }).unwrap();
+        lb.record(&TaskOutcome::new("s", "challenger", true, 500, 200, 80)).unwrap();
         // Only 1 sample, need 50
         assert!(lb.check_promotion().unwrap().is_none());
     }

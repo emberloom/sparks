@@ -379,3 +379,16 @@ include = ["."]
 # Paths/patterns to exclude from the snapshot.
 # (default: target/, .git/, .worktrees/, *.db, *.log)
 exclude = ["target/", ".git/", ".worktrees/", "*.db", "*.log"]
+
+# Ghost performance leaderboard and A/B testing.
+# Run `sparks leaderboard show` to view rankings, or `sparks leaderboard compare ghost-a ghost-b`.
+[leaderboard]
+enabled = true
+# Ghost name to A/B test against the default ghost. Omit or leave empty to disable A/B routing.
+# ab_test_ghost = "experimental-coder"
+# Fraction of requests routed to the challenger ghost (0.0 = never, 1.0 = always).
+ab_test_fraction = 0.1
+# Minimum recorded samples before a promotion recommendation is surfaced.
+min_samples_for_recommendation = 50
+# Success-rate improvement (as a fraction) required to trigger a promotion recommendation.
+promotion_threshold = 0.10
