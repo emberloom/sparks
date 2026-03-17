@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{SparksError, Result};
 use crate::llm::{
@@ -63,6 +63,8 @@ pub struct Config {
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
+    #[serde(default)]
+    pub alerts: AlertsConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -521,6 +523,48 @@ fn default_heartbeat_interval() -> u64 {
 }
 fn default_heartbeat_jitter() -> f64 {
     0.2
+}
+
+// ── Alerts config ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AlertsConfig {
+    /// Enable the alerting engine (default: true)
+    #[serde(default = "default_alerts_enabled")]
+    pub enabled: bool,
+    /// How often to evaluate alert rules, in seconds (default: 30)
+    #[serde(default = "default_alerts_interval")]
+    pub check_interval_secs: u64,
+    /// Default delivery channel: "log", "slack", "teams", "webhook" (default: "log")
+    #[serde(default = "default_alerts_channel")]
+    pub delivery_channel: String,
+    /// Webhook URL for delivery_channel = "webhook"
+    pub webhook_url: Option<String>,
+    /// Minimum severity to deliver: "info", "warning", "critical" (default: "info")
+    #[serde(default = "default_alerts_min_severity")]
+    pub min_severity: String,
+    /// Silence repeated alerts for this many seconds (default: 300)
+    #[serde(default = "default_alerts_silence")]
+    pub silence_secs: u64,
+}
+
+fn default_alerts_enabled() -> bool { true }
+fn default_alerts_interval() -> u64 { 30 }
+fn default_alerts_channel() -> String { "log".into() }
+fn default_alerts_min_severity() -> String { "info".into() }
+fn default_alerts_silence() -> u64 { 300 }
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_alerts_enabled(),
+            check_interval_secs: default_alerts_interval(),
+            delivery_channel: default_alerts_channel(),
+            webhook_url: None,
+            min_severity: default_alerts_min_severity(),
+            silence_secs: default_alerts_silence(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1209,6 +1253,7 @@ impl Default for Config {
             prompt_scanner: PromptScannerConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
+            alerts: AlertsConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }

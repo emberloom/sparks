@@ -1,3 +1,4 @@
+mod alerts;
 mod ci_monitor;
 mod config;
 mod confirm;
@@ -731,6 +732,13 @@ async fn main() -> anyhow::Result<()> {
                 started_at: tokio::time::Instant::now(),
             };
             let handle = SparksCore::start(telegram_config.clone(), memory).await?;
+            if telegram_config.alerts.enabled {
+                let engine = Arc::new(alerts::AlertEngine::new(
+                    telegram_config.alerts.clone(),
+                    handle.activity_log.clone(),
+                ));
+                tokio::spawn(engine.run());
+            }
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
         }
         Some(Commands::Openai { action }) => {
