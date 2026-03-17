@@ -57,6 +57,7 @@ pub fn decay_score(created_at_iso: &str, half_life_days: f64) -> f64 {
 /// Returns 0.0 for empty or mismatched-length slices.
 /// Note: memory.rs normally uses `crate::embeddings::cosine_similarity` which
 /// assumes pre-normalized vectors. This standalone version works on any vector.
+#[allow(dead_code)]
 pub fn cosine_similarity_raw(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -1480,10 +1481,10 @@ impl MemoryStore {
         for m in &memories {
             let score = decay_score(&m.created_at, half_life_days);
             if score < min_score {
-                pruned += 1;
                 if !dry_run {
-                    let _ = self.retire(&m.id);
+                    self.retire(&m.id)?;
                 }
+                pruned += 1;
             }
         }
         Ok(pruned)

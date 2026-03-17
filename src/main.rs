@@ -274,6 +274,9 @@ enum MemoryAction {
         /// Minimum decay score to keep (0.0–1.0); entries below this are pruned
         #[arg(long, default_value_t = 0.1)]
         min_score: f64,
+        /// Half-life for exponential decay in days (score = 0.5 at this age)
+        #[arg(long, default_value_t = 30.0)]
+        half_life_days: f64,
         /// Actually remove entries (default is dry-run)
         #[arg(long)]
         apply: bool,
@@ -5922,17 +5925,16 @@ fn handle_memory(
                 println!("  Newest entry:         {}", newest);
             }
         }
-        MemoryAction::Prune { min_score, apply } => {
-            let half_life = 30.0f64; // default; could expose via flag in future
+        MemoryAction::Prune { min_score, half_life_days, apply } => {
             let dry_run = !apply;
-            let count = memory.prune_decayed(half_life, min_score, dry_run)?;
+            let count = memory.prune_decayed(half_life_days, min_score, dry_run)?;
             if dry_run {
                 println!(
                     "Dry-run: {} entr{} would be pruned (decay score < {:.2}, half-life {}d).",
                     count,
                     if count == 1 { "y" } else { "ies" },
                     min_score,
-                    half_life
+                    half_life_days
                 );
                 println!("Re-run with --apply to actually remove them.");
             } else {
@@ -5941,7 +5943,7 @@ fn handle_memory(
                     count,
                     if count == 1 { "y" } else { "ies" },
                     min_score,
-                    half_life
+                    half_life_days
                 );
             }
         }
