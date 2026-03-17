@@ -104,6 +104,21 @@ timeout_secs = 600
 [db]
 path = "~/.sparks/sparks.db"
 
+# ── Cost tracking ────────────────────────────────────────────────────
+[cost]
+# Set to false to disable all cost tracking
+enabled = true
+# Daily spend budget in USD; 0 means no limit
+daily_budget_usd = 0.0
+# Per-session spend budget in USD; 0 means no limit
+session_budget_usd = 0.0
+# Action when a budget threshold is hit: "warn" (default) or "block"
+on_budget_exceeded = "warn"
+# Optional per-model price overrides: [input_per_1m_usd, output_per_1m_usd]
+# Built-in pricing covers Claude and major OpenAI models automatically.
+# [cost.model_prices]
+# "my-custom-model" = [5.00, 15.00]
+
 [manager]
 max_steps = 15
 # For runtime.profile = "self_dev_trusted", recommended:
@@ -305,3 +320,57 @@ enabled = true  # set to false to disable
 # public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `sparks secrets set langfuse.public_key`
 # secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `sparks secrets set langfuse.secret_key`
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud
+
+
+# ── SonarQube quality gate ───────────────────────────────────────────────────
+# Integrate SonarQube as a mandatory CI gate before PRs are opened.
+# See docs/sonarqube-mcp.md for the 3-phase integration guide.
+[sonarqube]
+# SonarQube server URL.  Use https://sonarcloud.io for SonarCloud or
+# http://localhost:9000 for a self-hosted instance.
+server_url = "https://sonarcloud.io"
+
+# Authentication token.  Prefer the SPARKS_SONAR_TOKEN environment variable
+# or `sparks secrets set sonarqube.token` over setting it inline here.
+# token = "squ_..."
+
+# Project key as shown in SonarQube/SonarCloud (e.g. "myorg_myproject").
+# project_key = "myorg_myproject"
+
+# Organisation key — required for SonarCloud, omit for self-hosted.
+# organization = "myorg"
+
+# How long to wait for an analysis to complete before timing out (seconds).
+gate_timeout_secs = 120
+
+# How often to poll the quality gate API while waiting (seconds).
+poll_interval_secs = 5
+
+# Set to false to log quality gate failures but still allow PR creation.
+block_on_failure = true
+
+
+# ── Workspace snapshots (time-travel debugging) ──────────────────────────────
+# Snapshots are opt-in. Enable to allow 'sparks snapshot create|list|diff|restore'.
+[snapshot]
+# Set to true to enable snapshot commands (default: false).
+enabled = false
+
+# Directory to store snapshots (default: ~/.sparks/snapshots).
+# snapshot_dir = "~/.sparks/snapshots"
+
+# Maximum number of snapshots to retain. Oldest are pruned automatically.
+# Set to 0 for unlimited. (default: 20)
+max_snapshots = 20
+
+# Skip snapshot if the workspace exceeds this size in MB. Set to 0 to disable.
+# (default: 50)
+max_workspace_mb = 50
+
+# Paths to include in the snapshot, relative to the workspace root.
+# (default: ["."] — the whole workspace)
+include = ["."]
+
+# Paths/patterns to exclude from the snapshot.
+# (default: target/, .git/, .worktrees/, *.db, *.log)
+exclude = ["target/", ".git/", ".worktrees/", "*.db", "*.log"]

@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{SparksError, Result};
 use crate::llm::{
@@ -63,6 +63,16 @@ pub struct Config {
     pub self_dev: SelfDevConfig,
     #[serde(default)]
     pub langfuse: LangfuseConfig,
+    #[serde(default)]
+    pub sonarqube: SonarqubeConfig,
+    #[serde(default)]
+    pub alerts: AlertsConfig,
+    #[serde(default)]
+    pub cost: CostConfig,
+    #[serde(default)]
+    pub snapshot: SnapshotConfig,
+    #[serde(default)]
+    pub leaderboard: LeaderboardConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -521,6 +531,164 @@ fn default_heartbeat_interval() -> u64 {
 }
 fn default_heartbeat_jitter() -> f64 {
     0.2
+}
+
+// ── SonarQube config ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct SonarqubeConfig {
+    /// SonarQube server URL (e.g. https://sonarcloud.io or http://localhost:9000)
+    #[serde(default = "default_sonar_url")]
+    pub server_url: String,
+    /// Authentication token (or set SPARKS_SONAR_TOKEN env var)
+    pub token: Option<String>,
+    /// Project key (e.g. "myorg_myproject")
+    pub project_key: Option<String>,
+    /// Organisation key (required for SonarCloud, omit for self-hosted)
+    pub organization: Option<String>,
+    /// Quality gate timeout in seconds (default 120)
+    #[serde(default = "default_sonar_timeout")]
+    pub gate_timeout_secs: u64,
+    /// Poll interval in seconds (default 5)
+    #[serde(default = "default_sonar_poll")]
+    pub poll_interval_secs: u64,
+    /// Whether to block PR creation on quality gate failure (default true)
+    #[serde(default = "default_sonar_block")]
+    pub block_on_failure: bool,
+}
+
+fn default_sonar_url() -> String {
+    "https://sonarcloud.io".into()
+}
+fn default_sonar_timeout() -> u64 {
+    120
+}
+fn default_sonar_poll() -> u64 {
+    5
+}
+fn default_sonar_block() -> bool {
+    true
+}
+
+// ── Alerts config ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AlertsConfig {
+    /// Enable the alerting engine (default: true)
+    #[serde(default = "default_alerts_enabled")]
+    pub enabled: bool,
+    /// How often to evaluate alert rules, in seconds (default: 30)
+    #[serde(default = "default_alerts_interval")]
+    pub check_interval_secs: u64,
+    /// Default delivery channel: "log", "slack", "teams", "webhook" (default: "log")
+    #[serde(default = "default_alerts_channel")]
+    pub delivery_channel: String,
+    /// Webhook URL for delivery_channel = "webhook"
+    pub webhook_url: Option<String>,
+    /// Minimum severity to deliver: "info", "warning", "critical" (default: "info")
+    #[serde(default = "default_alerts_min_severity")]
+    pub min_severity: String,
+    /// Silence repeated alerts for this many seconds (default: 300)
+    #[serde(default = "default_alerts_silence")]
+    pub silence_secs: u64,
+}
+
+fn default_alerts_enabled() -> bool { true }
+fn default_alerts_interval() -> u64 { 30 }
+fn default_alerts_channel() -> String { "log".into() }
+fn default_alerts_min_severity() -> String { "info".into() }
+fn default_alerts_silence() -> u64 { 300 }
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_alerts_enabled(),
+            check_interval_secs: default_alerts_interval(),
+            delivery_channel: default_alerts_channel(),
+            webhook_url: None,
+            min_severity: default_alerts_min_severity(),
+            silence_secs: default_alerts_silence(),
+        }
+    }
+}
+
+// ── Cost tracking config ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CostConfig {
+    /// Enable cost tracking (default: true)
+    #[serde(default = "default_cost_enabled")]
+    pub enabled: bool,
+    /// Daily spend budget in USD (0 = no limit)
+    #[serde(default)]
+    pub daily_budget_usd: f64,
+    /// Per-session spend budget in USD (0 = no limit)
+    #[serde(default)]
+    pub session_budget_usd: f64,
+    /// Action when budget is exceeded: "warn" or "block" (default: "warn")
+    #[serde(default = "default_cost_action")]
+    pub on_budget_exceeded: String,
+    /// Model price overrides: model_name -> (input_per_1m_usd, output_per_1m_usd)
+    #[serde(default)]
+    pub model_prices: std::collections::HashMap<String, [f64; 2]>,
+}
+
+fn default_cost_enabled() -> bool { true }
+fn default_cost_action() -> String { "warn".into() }
+
+impl Default for CostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_cost_enabled(),
+            daily_budget_usd: 0.0,
+            session_budget_usd: 0.0,
+            on_budget_exceeded: default_cost_action(),
+            model_prices: std::collections::HashMap::new(),
+        }
+    }
+}
+
+// ── Snapshot config ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SnapshotConfig {
+    /// Enable automatic workspace snapshots (default: false - opt-in)
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory to store snapshots (default: ~/.sparks/snapshots)
+    pub snapshot_dir: Option<String>,
+    /// Maximum number of snapshots to retain (default: 20, 0 = unlimited)
+    #[serde(default = "default_snapshot_max")]
+    pub max_snapshots: usize,
+    /// Maximum workspace size in MB to snapshot (default: 50, 0 = no limit)
+    #[serde(default = "default_snapshot_max_mb")]
+    pub max_workspace_mb: u64,
+    /// Glob patterns to include (default: ["."])
+    #[serde(default = "default_snapshot_include")]
+    pub include: Vec<String>,
+    /// Glob patterns to exclude (default: ["target/", ".git/", "*.db"])
+    #[serde(default = "default_snapshot_exclude")]
+    pub exclude: Vec<String>,
+}
+
+fn default_snapshot_max() -> usize { 20 }
+fn default_snapshot_max_mb() -> u64 { 50 }
+fn default_snapshot_include() -> Vec<String> { vec![".".into()] }
+fn default_snapshot_exclude() -> Vec<String> {
+    vec!["target/".into(), ".git/".into(), ".worktrees/".into(), "*.db".into(), "*.log".into()]
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            snapshot_dir: None,
+            max_snapshots: default_snapshot_max(),
+            max_workspace_mb: default_snapshot_max_mb(),
+            include: default_snapshot_include(),
+            exclude: default_snapshot_exclude(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1181,6 +1349,43 @@ impl ManagerConfig {
     }
 }
 
+// ── Leaderboard config ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LeaderboardConfig {
+    /// Enable leaderboard tracking (default: true)
+    #[serde(default = "default_lb_enabled")]
+    pub enabled: bool,
+    /// Ghost name to A/B test against the default ghost (None = disabled)
+    pub ab_test_ghost: Option<String>,
+    /// Fraction of requests routed to the challenger ghost (0.0-1.0, default: 0.1)
+    #[serde(default = "default_ab_fraction")]
+    pub ab_test_fraction: f64,
+    /// Minimum samples before auto-promotion recommendation (default: 50)
+    #[serde(default = "default_lb_min_samples")]
+    pub min_samples_for_recommendation: u64,
+    /// Success rate improvement threshold for auto-promotion (default: 0.10 = 10%)
+    #[serde(default = "default_lb_threshold")]
+    pub promotion_threshold: f64,
+}
+
+fn default_lb_enabled() -> bool { true }
+fn default_ab_fraction() -> f64 { 0.1 }
+fn default_lb_min_samples() -> u64 { 50 }
+fn default_lb_threshold() -> f64 { 0.10 }
+
+impl Default for LeaderboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_lb_enabled(),
+            ab_test_ghost: None,
+            ab_test_fraction: default_ab_fraction(),
+            min_samples_for_recommendation: default_lb_min_samples(),
+            promotion_threshold: default_lb_threshold(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1209,6 +1414,11 @@ impl Default for Config {
             prompt_scanner: PromptScannerConfig::default(),
             self_dev: SelfDevConfig::default(),
             langfuse: LangfuseConfig::default(),
+            sonarqube: SonarqubeConfig::default(),
+            alerts: AlertsConfig::default(),
+            cost: CostConfig::default(),
+            snapshot: SnapshotConfig::default(),
+            leaderboard: LeaderboardConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }

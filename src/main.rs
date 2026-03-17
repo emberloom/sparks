@@ -1,8 +1,10 @@
+mod alerts;
 mod ci_monitor;
 mod config;
 mod confirm;
 mod context_budget;
 mod core;
+mod cost;
 mod db;
 mod docker;
 mod doctor;
@@ -34,6 +36,8 @@ mod randomness;
 mod reason_codes;
 mod scheduler;
 mod secrets;
+mod snapshot;
+mod sonarqube;
 mod self_heal;
 mod session_review;
 mod strategy;
@@ -238,6 +242,40 @@ enum Commands {
     SelfBuild {
         #[command(subcommand)]
         action: SelfBuildAction,
+    },
+    /// Show cost and token usage summary
+    Cost {
+        /// Show summary for today (default) or specify 'session:<key>' or 'all'
+        #[arg(default_value = "today")]
+        scope: String,
+    },
+    /// Manage workspace snapshots for time-travel debugging
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Create a new snapshot
+    Create {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List all snapshots
+    List,
+    /// Show diff between two snapshots
+    Diff {
+        id_a: String,
+        id_b: String,
+    },
+    /// Restore a snapshot
+    Restore {
+        id: String,
+        /// Actually restore (default is dry-run)
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -731,6 +769,13 @@ async fn main() -> anyhow::Result<()> {
                 started_at: tokio::time::Instant::now(),
             };
             let handle = SparksCore::start(telegram_config.clone(), memory).await?;
+            if telegram_config.alerts.enabled {
+                let engine = Arc::new(alerts::AlertEngine::new(
+                    telegram_config.alerts.clone(),
+                    handle.activity_log.clone(),
+                ));
+                tokio::spawn(engine.run());
+            }
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
         }
         Some(Commands::Openai { action }) => {
@@ -837,6 +882,53 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Eval { .. }) => unreachable!(),      // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
+        Some(Commands::Cost { scope }) => {
+            let db_path = config.db_path()?;
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let tracker = cost::CostTracker::new(conn, config.cost.clone())?;
+
+            let summary = if scope == "today" {
+                tracker.today_summary()?
+            } else if let Some(key) = scope.strip_prefix("session:") {
+                tracker.session_summary(key)?
+            } else if scope == "all" {
+                tracker.all_summary()?
+            } else {
+                eprintln!("Unknown scope '{}'. Use: today, session:<key>, all", scope);
+                tracker.today_summary()?
+            };
+            println!("{}", summary.format_report().replace("**", ""));
+        }
+        Some(Commands::Snapshot { action }) => {
+            let workspace_root = std::env::current_dir()?;
+            let store = snapshot::SnapshotStore::new(config.snapshot.clone(), workspace_root);
+            match action {
+                SnapshotAction::Create { label } => {
+                    let meta = store.create("cli", label.as_deref())?;
+                    println!("Snapshot created: {} ({})", &meta.id[..8], meta.size_human());
+                }
+                SnapshotAction::List => {
+                    let snaps = store.list()?;
+                    if snaps.is_empty() {
+                        println!("No snapshots found.");
+                    } else {
+                        for s in &snaps {
+                            let label = s.label.as_deref().unwrap_or("");
+                            println!("  {} | {} | {} | {} {}",
+                                &s.id[..8], s.created_at, s.size_human(), s.session_key, label);
+                        }
+                    }
+                }
+                SnapshotAction::Diff { id_a, id_b } => {
+                    let diff = store.diff(&id_a, &id_b)?;
+                    println!("{}", diff);
+                }
+                SnapshotAction::Restore { id, apply } => {
+                    let result = store.restore(&id, !apply)?;
+                    println!("{}", result);
+                }
+            }
+        }
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
