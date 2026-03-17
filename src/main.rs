@@ -267,6 +267,23 @@ enum MemoryAction {
         /// Memory ID
         id: String,
     },
+    /// Show aggregate memory statistics (total entries, duplicates, age distribution)
+    Stats,
+    /// Prune entries whose exponential decay score falls below a threshold
+    Prune {
+        /// Minimum decay score to keep (0.0–1.0); entries below this are pruned
+        #[arg(long, default_value_t = 0.1)]
+        min_score: f64,
+        /// Actually remove entries (default is dry-run)
+        #[arg(long)]
+        apply: bool,
+    },
+    /// List near-duplicate memory pairs by cosine similarity
+    Duplicates {
+        /// Cosine similarity threshold (0.0–1.0) above which entries are flagged as duplicates
+        #[arg(long, default_value_t = 0.92)]
+        threshold: f32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5890,6 +5907,63 @@ fn handle_memory(
                 println!("Retired memory: {}", &full_id[..8]);
             } else {
                 println!("Memory not found: {}", id);
+            }
+        }
+        MemoryAction::Stats => {
+            let stats = memory.stats()?;
+            println!("Memory statistics:");
+            println!("  Total entries:        {}", stats.total_entries);
+            println!("  Estimated duplicates: {}", stats.estimated_duplicates);
+            println!("  Average age (days):   {:.1}", stats.avg_age_days);
+            if let Some(ref oldest) = stats.oldest_entry {
+                println!("  Oldest entry:         {}", oldest);
+            }
+            if let Some(ref newest) = stats.newest_entry {
+                println!("  Newest entry:         {}", newest);
+            }
+        }
+        MemoryAction::Prune { min_score, apply } => {
+            let half_life = 30.0f64; // default; could expose via flag in future
+            let dry_run = !apply;
+            let count = memory.prune_decayed(half_life, min_score, dry_run)?;
+            if dry_run {
+                println!(
+                    "Dry-run: {} entr{} would be pruned (decay score < {:.2}, half-life {}d).",
+                    count,
+                    if count == 1 { "y" } else { "ies" },
+                    min_score,
+                    half_life
+                );
+                println!("Re-run with --apply to actually remove them.");
+            } else {
+                println!(
+                    "Pruned {} entr{} (decay score < {:.2}, half-life {}d).",
+                    count,
+                    if count == 1 { "y" } else { "ies" },
+                    min_score,
+                    half_life
+                );
+            }
+        }
+        MemoryAction::Duplicates { threshold } => {
+            let pairs = memory.find_duplicates(threshold);
+            if pairs.is_empty() {
+                println!("No near-duplicate pairs found (threshold: {:.2}).", threshold);
+            } else {
+                println!(
+                    "{} near-duplicate pair{} (threshold: {:.2}):",
+                    pairs.len(),
+                    if pairs.len() == 1 { "" } else { "s" },
+                    threshold
+                );
+                for (id_a, id_b, sim) in &pairs {
+                    println!(
+                        "  [{}] ~ [{}]  similarity: {:.4}",
+                        &id_a[..8.min(id_a.len())],
+                        &id_b[..8.min(id_b.len())],
+                        sim
+                    );
+                }
             }
         }
     }

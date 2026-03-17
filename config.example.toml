@@ -206,6 +206,11 @@ enabled = true
 # hnsw_ef_construction = 200
 # HNSW query breadth (higher is slower query, better recall).
 # hnsw_ef_search = 64
+# Half-life (days) for exponential decay scoring used by 'sparks memory prune' (0 = no decay).
+# score = exp(-ln(2) / decay_half_life_days * age_days)
+# decay_half_life_days = 30.0
+# Soft cap on total active memories (0 = unlimited). Used as guidance for pruning.
+# max_entries = 10000
 
 [telegram]
 # token = "your-bot-token"   # discouraged; use SPARKS_TELEGRAM_TOKEN env var, .env, or `sparks secrets set telegram.token`

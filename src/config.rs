@@ -452,6 +452,13 @@ pub struct MemoryConfig {
     pub hnsw_ef_construction: usize,
     #[serde(default = "default_hnsw_ef_search")]
     pub hnsw_ef_search: usize,
+    /// Half-life for exponential decay scoring expressed as f64 for higher precision.
+    /// 0 = no decay. Default: 30 days.
+    #[serde(default = "default_decay_half_life_days")]
+    pub decay_half_life_days: f64,
+    /// Soft cap on total active memories (0 = unlimited). Default: 10000.
+    #[serde(default = "default_max_entries")]
+    pub max_entries: usize,
 }
 
 impl Default for MemoryConfig {
@@ -465,6 +472,8 @@ impl Default for MemoryConfig {
             hnsw_m: default_hnsw_m(),
             hnsw_ef_construction: default_hnsw_ef_construction(),
             hnsw_ef_search: default_hnsw_ef_search(),
+            decay_half_life_days: default_decay_half_life_days(),
+            max_entries: default_max_entries(),
         }
     }
 }
@@ -492,6 +501,12 @@ fn default_hnsw_ef_construction() -> usize {
 }
 fn default_hnsw_ef_search() -> usize {
     64
+}
+fn default_decay_half_life_days() -> f64 {
+    30.0
+}
+fn default_max_entries() -> usize {
+    10000
 }
 
 #[derive(Debug, Deserialize, Clone)]
