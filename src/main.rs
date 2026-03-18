@@ -16,6 +16,7 @@ mod feature_contract;
 mod ghost_policy;
 mod heartbeat;
 mod introspect;
+mod leaderboard;
 mod knobs;
 mod kpi;
 mod langfuse;
@@ -257,6 +258,11 @@ enum Commands {
         #[command(subcommand)]
         action: SnapshotAction,
     },
+    /// View ghost performance leaderboard and A/B test results
+    Leaderboard {
+        #[command(subcommand)]
+        action: LeaderboardAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -280,6 +286,19 @@ enum SnapshotAction {
         #[arg(long)]
         apply: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum LeaderboardAction {
+    /// Show the full leaderboard
+    Show,
+    /// Compare two ghosts head-to-head
+    Compare {
+        ghost_a: String,
+        ghost_b: String,
+    },
+    /// Reset all leaderboard data
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -1010,6 +1029,24 @@ async fn main() -> anyhow::Result<()> {
                 SnapshotAction::Restore { id, apply } => {
                     let result = store.restore(&id, !apply)?;
                     println!("{}", result);
+                }
+            }
+        }
+        Some(Commands::Leaderboard { action }) => {
+            let db_path = config.db_path()?;
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let lb = leaderboard::GhostLeaderboard::new(conn, config.leaderboard.clone())?;
+            match action {
+                LeaderboardAction::Show => println!("{}", lb.format_leaderboard()?),
+                LeaderboardAction::Compare { ghost_a, ghost_b } => println!("{}", lb.compare(&ghost_a, &ghost_b)?),
+                LeaderboardAction::Reset => {
+                    println!("This will delete all leaderboard data. Are you sure? [y/N]");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    if line.trim().eq_ignore_ascii_case("y") {
+                        lb.reset()?;
+                        println!("Leaderboard reset.");
+                    }
                 }
             }
         }

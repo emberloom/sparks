@@ -73,6 +73,8 @@ pub struct Config {
     pub sonarqube: SonarqubeConfig,
     #[serde(default)]
     pub snapshot: SnapshotConfig,
+    #[serde(default)]
+    pub leaderboard: LeaderboardConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -1505,6 +1507,43 @@ impl ManagerConfig {
     }
 }
 
+// ── Leaderboard config ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LeaderboardConfig {
+    /// Enable leaderboard tracking (default: true)
+    #[serde(default = "default_lb_enabled")]
+    pub enabled: bool,
+    /// Ghost name to A/B test against the default ghost (None = disabled)
+    pub ab_test_ghost: Option<String>,
+    /// Fraction of requests routed to the challenger ghost (0.0-1.0, default: 0.1)
+    #[serde(default = "default_ab_fraction")]
+    pub ab_test_fraction: f64,
+    /// Minimum samples before auto-promotion recommendation (default: 50)
+    #[serde(default = "default_lb_min_samples")]
+    pub min_samples_for_recommendation: u64,
+    /// Success rate improvement threshold for auto-promotion (default: 0.10 = 10%)
+    #[serde(default = "default_lb_threshold")]
+    pub promotion_threshold: f64,
+}
+
+fn default_lb_enabled() -> bool { true }
+fn default_ab_fraction() -> f64 { 0.1 }
+fn default_lb_min_samples() -> u64 { 50 }
+fn default_lb_threshold() -> f64 { 0.10 }
+
+impl Default for LeaderboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_lb_enabled(),
+            ab_test_ghost: None,
+            ab_test_fraction: default_ab_fraction(),
+            min_samples_for_recommendation: default_lb_min_samples(),
+            promotion_threshold: default_lb_threshold(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1538,6 +1577,7 @@ impl Default for Config {
             alerts: AlertsConfig::default(),
             sonarqube: SonarqubeConfig::default(),
             snapshot: SnapshotConfig::default(),
+            leaderboard: LeaderboardConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }
