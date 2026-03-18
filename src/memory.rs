@@ -14,6 +14,64 @@ use crate::error::{SparksError, Result};
 /// Minimum cosine similarity to keep a semantic result.
 pub const SEMANTIC_THRESHOLD: f32 = 0.25;
 
+/// Aggregate statistics about the active memory store.
+#[derive(Debug, Default)]
+pub struct MemoryStats {
+    pub total_entries: usize,
+    pub estimated_duplicates: usize,
+    pub oldest_entry: Option<String>,
+    pub newest_entry: Option<String>,
+    pub avg_age_days: f64,
+}
+
+/// Compute the exponential decay multiplier for a memory entry.
+///
+/// Uses: `score = exp(-ln(2) / half_life_days * age_days)`
+///
+/// Returns 1.0 when `half_life_days <= 0` (no decay).
+pub fn decay_score(created_at_iso: &str, half_life_days: f64) -> f64 {
+    if half_life_days <= 0.0 {
+        return 1.0;
+    }
+    let age_days = {
+        let now = chrono::Utc::now();
+        let parsed = chrono::NaiveDateTime::parse_from_str(created_at_iso, "%Y-%m-%d %H:%M:%S")
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(created_at_iso, "%Y-%m-%dT%H:%M:%SZ")
+            })
+            .ok()
+            .map(|dt| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+            });
+        match parsed {
+            Some(t) => (now - t).num_seconds().max(0) as f64 / 86400.0,
+            None => 0.0,
+        }
+    };
+    let lambda = std::f64::consts::LN_2 / half_life_days;
+    (-lambda * age_days).exp()
+}
+
+/// Cosine similarity between two arbitrary (non-normalized) vectors.
+///
+/// Returns 0.0 for empty or mismatched-length slices.
+/// Note: memory.rs normally uses `crate::embeddings::cosine_similarity` which
+/// assumes pre-normalized vectors. This standalone version works on any vector.
+#[allow(dead_code)]
+pub fn cosine_similarity_raw(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub id: String,
@@ -1353,6 +1411,104 @@ impl MemoryStore {
             Err(e) => Err(SparksError::Db(e)),
         }
     }
+
+    /// Return aggregate statistics about the active memory store.
+    pub fn stats(&self) -> Result<MemoryStats> {
+        let conn = self.conn()?;
+
+        // Total active entries
+        let total_entries: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE active = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+
+        // Oldest and newest created_at
+        let oldest_entry: Option<String> = conn
+            .query_row(
+                "SELECT MIN(created_at) FROM memories WHERE active = 1",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+
+        let newest_entry: Option<String> = conn
+            .query_row(
+                "SELECT MAX(created_at) FROM memories WHERE active = 1",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+
+        // Average age in days
+        let avg_age_days: f64 = conn
+            .query_row(
+                "SELECT AVG((julianday('now') - julianday(created_at))) FROM memories WHERE active = 1",
+                [],
+                |r| r.get::<_, Option<f64>>(0),
+            )
+            .ok()
+            .flatten()
+            .unwrap_or(0.0);
+
+        // Estimated duplicates: check pairs in the embedding cache (capped at 1000)
+        let estimated_duplicates = {
+            let pairs = self.find_duplicates(self.dedup_threshold);
+            pairs.len()
+        };
+
+        Ok(MemoryStats {
+            total_entries,
+            estimated_duplicates,
+            oldest_entry,
+            newest_entry,
+            avg_age_days,
+        })
+    }
+
+    /// Remove active memories whose exponential decay score falls below `min_score`.
+    /// Returns the number of entries pruned (or that would be pruned in dry-run mode).
+    pub fn prune_decayed(&self, half_life_days: f64, min_score: f64, dry_run: bool) -> Result<usize> {
+        if half_life_days <= 0.0 {
+            return Ok(0);
+        }
+        let memories = self.list()?;
+        let mut pruned = 0usize;
+        for m in &memories {
+            let score = decay_score(&m.created_at, half_life_days);
+            if score < min_score {
+                if !dry_run {
+                    self.retire(&m.id)?;
+                }
+                pruned += 1;
+            }
+        }
+        Ok(pruned)
+    }
+
+    /// Return pairs of active memory IDs whose embeddings have cosine similarity >= threshold.
+    /// Limited to the first 1000 entries to keep complexity manageable (O(n²)).
+    pub fn find_duplicates(&self, threshold: f32) -> Vec<(String, String, f32)> {
+        let cache = match self.embedding_cache.read() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let entries: Vec<(&String, &Vec<f32>)> = cache.iter().take(1000).collect();
+        let mut pairs = Vec::new();
+        for i in 0..entries.len() {
+            for j in (i + 1)..entries.len() {
+                let sim = cosine_similarity(entries[i].1, entries[j].1);
+                if sim >= threshold {
+                    pairs.push((entries[i].0.clone(), entries[j].0.clone(), sim));
+                }
+            }
+        }
+        pairs
+    }
 }
 
 struct JobRow {
@@ -2405,5 +2561,58 @@ mod tests {
             report.delta.p50_improvement_pct,
             report.delta.p95_improvement_pct,
         )
+    }
+
+    // --- decay_score and cosine_similarity_raw unit tests ---
+
+    #[test]
+    fn decay_score_no_decay() {
+        assert_eq!(decay_score("2026-01-01 00:00:00", 0.0), 1.0);
+    }
+
+    #[test]
+    fn decay_score_at_half_life() {
+        // At exactly half_life_days, score should be ~0.5
+        let half_life = 30.0;
+        let date_30_days_ago = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let score = decay_score(&date_30_days_ago, half_life);
+        assert!(
+            (score - 0.5).abs() < 0.01,
+            "Expected ~0.5, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn decay_score_recent_near_one() {
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let score = decay_score(&now, 30.0);
+        assert!(
+            score > 0.99,
+            "Recent entry should have score near 1.0, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_raw_identical() {
+        let v = vec![1.0_f32, 0.0, 0.0];
+        assert!((cosine_similarity_raw(&v, &v) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cosine_similarity_raw_orthogonal() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![0.0_f32, 1.0];
+        assert!(cosine_similarity_raw(&a, &b).abs() < 0.001);
+    }
+
+    #[test]
+    fn cosine_similarity_raw_empty() {
+        assert_eq!(cosine_similarity_raw(&[], &[]), 0.0);
     }
 }
