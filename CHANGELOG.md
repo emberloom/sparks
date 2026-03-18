@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+## [0.3.0] - 2026-03-18
+
+### Added
+
+- **Slack integration** (`--features slack`) — Socket Mode bot with slash commands (`/sparks help|status|plan|implement|review|explain|search|alerts|ghosts|memories|dispatch|model|jobs|mood|knobs|session|cli|set|watch`), Block Kit planning interview (5-step), streaming responses, per-channel auth and rate limiting, confirmations with approve/deny buttons, and pulse delivery.
+- **Microsoft Teams integration** (`--features teams`) — Bot Framework REST API with JWT RS256 signature verification, `serviceUrl` validation, tenant authorization, Adaptive Cards for confirmations and planning interview, bearer token cache, and all equivalent commands.
+- **Proactive alerting engine** — Rule-based alert evaluation against the activity log with multi-channel delivery (`log`, `slack`, `teams`, `webhook`), configurable severity thresholds, and silence windows (`[alerts]` config section).
+- **Semantic memory deduplication and decay scoring** — Exponential decay scoring with configurable half-life, soft entry cap, and deduplication pass to prune near-duplicate memories.
+- **SonarQube MCP quality gate integration** — `sonarqube_gate.py` script and `SonarqubeConfig` for polling SonarCloud/self-hosted quality gates; optionally blocks on failure (`[sonarqube]` config section).
+- **Workspace snapshot and time-travel debugging** — `sparks snapshot create|list|diff|restore` with configurable retention, size guard, include/exclude globs, and atomic restore (`[snapshot]` config section).
+- **Ghost performance leaderboard and A/B testing** — `sparks leaderboard show|compare` with success-rate ranking, configurable A/B routing fraction, and promotion recommendations (`[leaderboard]` config section).
+
+### Changed
+
+- `SPARKS_SLACK_BOT_TOKEN`, `SPARKS_SLACK_APP_TOKEN`, `SPARKS_SLACK_SIGNING_SECRET` added to the secrets registry (keyring + env var support via `sparks secrets set slack.*`).
+- Complete Athena→Sparks rebrand pass: env vars, binary references, config paths (`~/.sparks/`), CLI contract tag (`[sparks_cli_contract]`), and model names across all docs and configs.
+
 ## [0.2.0] - 2026-03-13
 
 ### Changed
