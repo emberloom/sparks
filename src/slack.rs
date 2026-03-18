@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use slack_morphism::prelude::*;
+use slack_morphism::prelude::*; // hygiene: allow — prelude glob is the intended usage pattern for slack-morphism
 
 use crate::config::SlackConfig;
 use crate::confirm::Confirmer;
