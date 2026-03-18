@@ -35,6 +35,7 @@ mod randomness;
 mod reason_codes;
 mod scheduler;
 mod secrets;
+mod snapshot;
 mod self_heal;
 mod session_review;
 mod sonarqube;
@@ -250,6 +251,34 @@ enum Commands {
     SelfBuild {
         #[command(subcommand)]
         action: SelfBuildAction,
+    },
+    /// Manage workspace snapshots for time-travel debugging
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Create a new snapshot
+    Create {
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List all snapshots
+    List,
+    /// Show diff between two snapshots
+    Diff {
+        id_a: String,
+        id_b: String,
+    },
+    /// Restore a snapshot
+    Restore {
+        id: String,
+        /// Actually restore (default is dry-run)
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -952,6 +981,38 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Eval { .. }) => unreachable!(),      // handled above
         Some(Commands::Feature { action }) => handle_feature(action, config, memory).await?,
         Some(Commands::SelfBuild { action }) => handle_self_build(action, config, memory).await?,
+        Some(Commands::Snapshot { action }) => {
+            let workspace_root = std::env::current_dir()?;
+            let store = snapshot::SnapshotStore::new(config.snapshot.clone(), workspace_root);
+            match action {
+                SnapshotAction::Create { label } => {
+                    let meta = store.create("cli", label.as_deref())?;
+                    println!("Snapshot created: {} ({})", &meta.id[..12], meta.size_human());
+                }
+                SnapshotAction::List => {
+                    let snaps = store.list()?;
+                    if snaps.is_empty() {
+                        println!("No snapshots found.");
+                    } else {
+                        for s in &snaps {
+                            let label = s.label.as_deref().unwrap_or("");
+                            // Show 12 hex chars so users can distinguish snapshots with the same
+                            // 8-char prefix when passing an ID to diff/restore/get.
+                            println!("  {} | {} | {} | {} {}",
+                                &s.id[..12], s.created_at, s.size_human(), s.session_key, label);
+                        }
+                    }
+                }
+                SnapshotAction::Diff { id_a, id_b } => {
+                    let diff = store.diff(&id_a, &id_b)?;
+                    println!("{}", diff);
+                }
+                SnapshotAction::Restore { id, apply } => {
+                    let result = store.restore(&id, !apply)?;
+                    println!("{}", result);
+                }
+            }
+        }
         Some(Commands::Chat) | None => run_chat(config, memory, auto_approve).await?,
     }
 
