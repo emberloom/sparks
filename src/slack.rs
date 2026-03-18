@@ -3166,4 +3166,22 @@ mod tests {
         assert!(bar.contains("█████"));
         assert!(bar.contains("░░░░░"));
     }
+
+    #[test]
+    fn slash_command_help_uses_sparks_not_athena() {
+        // Regression: commands were using the old bot name instead of sparks.
+        // Scan for the old prefix but exclude this test's own source lines.
+        let old_cmd = format!("/{}", "athena"); // avoid matching this line itself
+        let source = include_str!("slack.rs");
+        let violations: Vec<_> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&old_cmd) && !line.contains("old_cmd"))
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "Found leftover old command references: {:?}",
+            violations
+        );
+    }
 }

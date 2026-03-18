@@ -241,4 +241,15 @@ mod tests {
             assert_eq!(found.key, spec.key);
         }
     }
+
+    #[test]
+    fn slack_tokens_are_registered_in_known_secrets() {
+        let bot = find_spec("slack.bot_token").expect("slack.bot_token should be in KNOWN_SECRETS");
+        assert_eq!(bot.env, "ATHENA_SLACK_BOT_TOKEN");
+        let app = find_spec("slack.app_token").expect("slack.app_token should be in KNOWN_SECRETS");
+        assert_eq!(app.env, "ATHENA_SLACK_APP_TOKEN");
+        let sig =
+            find_spec("slack.signing_secret").expect("slack.signing_secret should be in KNOWN_SECRETS");
+        assert_eq!(sig.env, "ATHENA_SLACK_SIGNING_SECRET");
+    }
 }

@@ -2020,6 +2020,10 @@ fn is_loopback_host(host: &str) -> bool {
 mod tests {
     use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile};
     use std::path::Path;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate env vars to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn runtime_profile_name_maps_standard_to_container_strict() {
@@ -2108,6 +2112,62 @@ strategy = "react"
         assert!(bundle.contains("alpha"));
         assert!(bundle.contains("## SKILL: skills/b.md"));
         assert!(bundle.contains("beta"));
+    }
+
+    #[test]
+    fn apply_env_overrides_loads_slack_tokens_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("ATHENA_SLACK_BOT_TOKEN", "xoxb-test-bot");
+        std::env::set_var("ATHENA_SLACK_APP_TOKEN", "xapp-test-app");
+        std::env::set_var("ATHENA_SLACK_SIGNING_SECRET", "test-signing-secret");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        assert_eq!(config.slack.bot_token.as_deref(), Some("xoxb-test-bot"));
+        assert_eq!(config.slack.app_token.as_deref(), Some("xapp-test-app"));
+        assert_eq!(
+            config.slack.signing_secret.as_deref(),
+            Some("test-signing-secret")
+        );
+
+        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
+        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
+        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+    }
+
+    #[test]
+    fn collect_inline_secret_labels_flags_slack_tokens_not_in_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
+        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
+        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+
+        let mut config = Config::default();
+        config.slack.bot_token = Some("xoxb-inline".to_string());
+        config.slack.app_token = Some("xapp-inline".to_string());
+        config.slack.signing_secret = Some("inline-secret".to_string());
+
+        let labels = config.collect_inline_secret_labels();
+        assert!(labels.contains(&"slack.bot_token".to_string()));
+        assert!(labels.contains(&"slack.app_token".to_string()));
+        assert!(labels.contains(&"slack.signing_secret".to_string()));
+    }
+
+    #[test]
+    fn collect_inline_secret_labels_skips_slack_token_when_env_is_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("ATHENA_SLACK_BOT_TOKEN", "xoxb-from-env");
+        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
+        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+
+        let mut config = Config::default();
+        config.slack.bot_token = Some("xoxb-inline".to_string());
+
+        let labels = config.collect_inline_secret_labels();
+        assert!(!labels.contains(&"slack.bot_token".to_string()));
+
+        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
     }
 
     fn temp_config_path(prefix: &str) -> String {
