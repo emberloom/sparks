@@ -47,8 +47,8 @@ pub enum Urgency {
 /// Where to deliver.
 #[derive(Debug, Clone)]
 pub enum PulseTarget {
-    // SessionContext is read by the telegram feature (telegram.rs)
-    #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
+    // SessionContext is read by the telegram/slack features
+    #[cfg_attr(not(any(feature = "telegram", feature = "slack")), allow(dead_code))]
     Session(SessionContext),
     Broadcast,
 }

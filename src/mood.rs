@@ -161,13 +161,13 @@ impl MoodState {
     }
 
     /// Get current energy level (used by telegram feature).
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn energy(&self) -> f32 {
         self.inner.read().map(|i| i.energy).unwrap_or(0.5)
     }
 
     /// Get current modifier (used by telegram feature).
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack"))]
     pub fn modifier(&self) -> String {
         self.inner
             .read()

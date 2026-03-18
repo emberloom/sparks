@@ -4,9 +4,9 @@ use rusqlite::Connection;
 
 use crate::error::{SparksError, Result};
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 use crate::llm::{ChatRole, LlmProvider, Message};
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 use serde::Serialize;
 
 // ── Event types for the activity log ────────────────────────────────
@@ -37,7 +37,7 @@ impl ActivityEventType {
 
 // ── Stored activity entry ───────────────────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivityEntry {
     pub id: i64,
@@ -57,7 +57,7 @@ pub struct ActivityEntry {
 
 // ── Alert rules ─────────────────────────────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertRule {
     pub id: i64,
@@ -69,7 +69,7 @@ pub struct AlertRule {
     pub chat_id: Option<String>,
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertMatch {
     pub rule: AlertRule,
@@ -78,7 +78,7 @@ pub struct AlertMatch {
 
 // ── Detail levels for review rendering ──────────────────────────────
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewDetail {
     /// One-paragraph executive summary.
@@ -89,7 +89,7 @@ pub enum ReviewDetail {
     Detailed,
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 impl ReviewDetail {
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().trim() {
@@ -113,7 +113,7 @@ fn lock_conn(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Conne
 }
 
 /// Helper to build an ActivityEntry from a row that selects all 13 columns.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
     Ok(ActivityEntry {
         id: row.get(0)?,
@@ -132,7 +132,7 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEntry> {
     })
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 const SELECT_COLS: &str =
     "id, session_key, event_type, summary, detail, ghost, tool_name, task_id, \
      duration_ms, tool_input, tool_output, parent_id, created_at";
@@ -211,7 +211,7 @@ impl ActivityLogStore {
     }
 
     /// Get recent activity entries for a session, newest first.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn recent(&self, session_key: &str, limit: usize) -> Result<Vec<ActivityEntry>> {
         let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(&format!(
@@ -231,7 +231,7 @@ impl ActivityLogStore {
     }
 
     /// Search across all sessions for entries matching a text pattern.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn search(
         &self,
         query: &str,
@@ -262,7 +262,7 @@ impl ActivityLogStore {
 
     // ── Alert rule management ───────────────────────────────────────
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn add_alert_rule(
         &self,
         name: &str,
@@ -280,7 +280,7 @@ impl ActivityLogStore {
         Ok(conn.last_insert_rowid())
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn list_alert_rules(&self) -> Result<Vec<AlertRule>> {
         let conn = lock_conn(&self.conn)?;
         let mut stmt = conn.prepare(
@@ -302,7 +302,7 @@ impl ActivityLogStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn remove_alert_rule(&self, rule_id: i64) -> Result<bool> {
         let conn = lock_conn(&self.conn)?;
         let deleted = conn.execute(
@@ -312,7 +312,7 @@ impl ActivityLogStore {
         Ok(deleted > 0)
     }
 
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn toggle_alert_rule(&self, rule_id: i64, enabled: bool) -> Result<bool> {
         let conn = lock_conn(&self.conn)?;
         let updated = conn.execute(
@@ -323,7 +323,7 @@ impl ActivityLogStore {
     }
 
     /// Check a new entry against all enabled alert rules.
-    #[cfg(feature = "telegram")]
+    #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub fn check_alerts(&self, entry: &ActivityEntry) -> Result<Vec<AlertMatch>> {
         let rules = self.list_alert_rules()?;
         let mut matches = Vec::new();
@@ -373,7 +373,7 @@ impl ActivityLogStore {
 // ── Review rendering ────────────────────────────────────────────────
 
 /// Render a structured review of session activity (no LLM needed).
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 pub fn render_review(entries: &[ActivityEntry], detail: ReviewDetail) -> String {
     if entries.is_empty() {
         return "No activity recorded for this session yet.".to_string();
@@ -386,7 +386,7 @@ pub fn render_review(entries: &[ActivityEntry], detail: ReviewDetail) -> String 
     }
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn render_summary(entries: &[ActivityEntry]) -> String {
     let chat_in = entries.iter().filter(|e| e.event_type == "chat_in").count();
     let chat_out = entries.iter().filter(|e| e.event_type == "chat_out").count();
@@ -462,7 +462,7 @@ fn render_summary(entries: &[ActivityEntry]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn render_standard(entries: &[ActivityEntry]) -> String {
     let mut out = render_summary(entries);
     out.push_str("\n<b>📜 Timeline</b>\n");
@@ -496,7 +496,7 @@ fn render_standard(entries: &[ActivityEntry]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn render_detailed(entries: &[ActivityEntry]) -> String {
     let mut out = render_summary(entries);
     out.push_str("\n<b>📜 Detailed Log</b>\n\n");
@@ -537,7 +537,7 @@ fn render_detailed(entries: &[ActivityEntry]) -> String {
 }
 
 /// Render search results.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
     if entries.is_empty() {
         return format!("No results found for \"{}\".", escape_html(query));
@@ -570,7 +570,7 @@ pub fn render_search_results(entries: &[ActivityEntry], query: &str) -> String {
 }
 
 /// Render alert rules list.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 pub fn render_alert_rules(rules: &[AlertRule]) -> String {
     if rules.is_empty() {
         return "<b>🔔 Alert Rules</b>\n\nNo alert rules configured.\n\nUsage:\n<code>/alerts add &lt;name&gt; &lt;pattern&gt; [target] [severity]</code>\n<code>/alerts remove &lt;id&gt;</code>".to_string();
@@ -590,7 +590,184 @@ pub fn render_alert_rules(rules: &[AlertRule]) -> String {
     out
 }
 
-#[cfg(feature = "telegram")]
+// ── mrkdwn rendering (Slack-native format) ──────────────────────────
+
+/// Render activity review in Slack mrkdwn format.
+#[cfg(any(feature = "slack", feature = "teams"))]
+pub fn render_review_mrkdwn(entries: &[ActivityEntry], detail: ReviewDetail) -> String {
+    if entries.is_empty() {
+        return "No activity recorded for this session yet.".to_string();
+    }
+    match detail {
+        ReviewDetail::Summary => render_summary_mrkdwn(entries),
+        ReviewDetail::Standard => render_standard_mrkdwn(entries),
+        ReviewDetail::Detailed => render_detailed_mrkdwn(entries),
+    }
+}
+
+#[cfg(any(feature = "slack", feature = "teams"))]
+fn render_summary_mrkdwn(entries: &[ActivityEntry]) -> String {
+    let chat_in = entries.iter().filter(|e| e.event_type == "chat_in").count();
+    let chat_out = entries.iter().filter(|e| e.event_type == "chat_out").count();
+    let tools = entries.iter().filter(|e| e.event_type == "tool_run").count();
+    let tasks_started = entries.iter().filter(|e| e.event_type == "task_start").count();
+    let tasks_ok = entries.iter().filter(|e| e.event_type == "task_finish").count();
+    let tasks_fail = entries.iter().filter(|e| e.event_type == "task_fail").count();
+    let total_duration_ms: i64 = entries.iter().filter_map(|e| e.duration_ms).sum();
+
+    let time_range = if entries.len() >= 2 {
+        format!("{} → {}", &entries[0].created_at, &entries[entries.len() - 1].created_at)
+    } else {
+        entries[0].created_at.clone()
+    };
+
+    let unique_tools: Vec<String> = {
+        let mut t: Vec<String> = entries.iter().filter_map(|e| e.tool_name.clone()).collect();
+        t.sort(); t.dedup(); t
+    };
+    let unique_ghosts: Vec<String> = {
+        let mut g: Vec<String> = entries.iter().filter_map(|e| e.ghost.clone()).collect();
+        g.sort(); g.dedup(); g
+    };
+
+    let mut out = String::new();
+    out.push_str("*📋 Session Summary*\n");
+    out.push_str(&format!("⏱ {}\n\n", time_range));
+    out.push_str(&format!("💬 {} messages in, {} responses out\n", chat_in, chat_out));
+    out.push_str(&format!("🔧 {} tool executions\n", tools));
+    if tasks_started > 0 {
+        out.push_str(&format!("🚀 {} tasks dispatched (✅{} ❌{})\n", tasks_started, tasks_ok, tasks_fail));
+    }
+    if total_duration_ms > 0 {
+        out.push_str(&format!("⏱ Total processing: {}ms\n", total_duration_ms));
+    }
+    if !unique_tools.is_empty() {
+        out.push_str(&format!("🛠 Tools: {}\n", escape_mrkdwn_sr(&unique_tools.join(", "))));
+    }
+    if !unique_ghosts.is_empty() {
+        out.push_str(&format!("👻 Ghosts: {}\n", escape_mrkdwn_sr(&unique_ghosts.join(", "))));
+    }
+    out
+}
+
+#[cfg(any(feature = "slack", feature = "teams"))]
+fn render_standard_mrkdwn(entries: &[ActivityEntry]) -> String {
+    let mut out = render_summary_mrkdwn(entries);
+    out.push_str("\n*📜 Timeline*\n");
+    for entry in entries {
+        let emoji = type_emoji(&entry.event_type);
+        let time = entry.created_at.split_whitespace().nth(1).unwrap_or(&entry.created_at);
+        let mut line = format!("`{}` {} {}", time, emoji, escape_mrkdwn_sr(&entry.summary));
+        if let Some(ref ghost) = entry.ghost {
+            line.push_str(&format!(" [{}]", escape_mrkdwn_sr(ghost)));
+        }
+        if let Some(ms) = entry.duration_ms {
+            line.push_str(&format!(" ({}ms)", ms));
+        }
+        if entry.event_type == "tool_run" {
+            if let Some(ref input) = entry.tool_input {
+                let preview = truncate_str(input, 80);
+                line.push_str(&format!("\n  → `{}`", escape_mrkdwn_sr(&preview)));
+            }
+        }
+        if entry.parent_id.is_some() {
+            line = format!("  ↳ {}", line);
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(any(feature = "slack", feature = "teams"))]
+fn render_detailed_mrkdwn(entries: &[ActivityEntry]) -> String {
+    let mut out = render_summary_mrkdwn(entries);
+    out.push_str("\n*📜 Detailed Log*\n\n");
+    for entry in entries {
+        let emoji = type_emoji(&entry.event_type);
+        let indent = if entry.parent_id.is_some() { "  ↳ " } else { "" };
+        out.push_str(&format!("{} *{} [{}]* {}\n", indent, emoji, escape_mrkdwn_sr(&entry.created_at), escape_mrkdwn_sr(&entry.summary)));
+        if let Some(ref ghost) = entry.ghost {
+            out.push_str(&format!("{}  👻 Ghost: {}\n", indent, escape_mrkdwn_sr(ghost)));
+        }
+        if let Some(ref tool) = entry.tool_name {
+            out.push_str(&format!("{}  🛠 Tool: {}\n", indent, escape_mrkdwn_sr(tool)));
+        }
+        if let Some(ref task_id) = entry.task_id {
+            out.push_str(&format!("{}  🆔 Task: {}\n", indent, escape_mrkdwn_sr(task_id)));
+        }
+        if let Some(ms) = entry.duration_ms {
+            out.push_str(&format!("{}  ⏱ Duration: {}ms\n", indent, ms));
+        }
+        if let Some(ref input) = entry.tool_input {
+            let truncated = truncate_str(input, 300);
+            out.push_str(&format!("{}  📥 Input: `{}`\n", indent, escape_mrkdwn_sr(&truncated)));
+        }
+        if let Some(ref output) = entry.tool_output {
+            let truncated = truncate_str(output, 500);
+            out.push_str(&format!("{}  📤 Output: `{}`\n", indent, escape_mrkdwn_sr(&truncated)));
+        }
+        if let Some(ref detail) = entry.detail {
+            let truncated = truncate_str(detail, 500);
+            out.push_str(&format!("{}  📝 {}\n", indent, escape_mrkdwn_sr(&truncated)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Render search results in Slack mrkdwn format.
+#[cfg(any(feature = "slack", feature = "teams"))]
+pub fn render_search_results_mrkdwn(entries: &[ActivityEntry], query: &str) -> String {
+    if entries.is_empty() {
+        return format!("No results found for \"{}\".", escape_mrkdwn_sr(query));
+    }
+    let mut out = format!("*🔍 Search results for \"{}\"* ({} matches)\n\n", escape_mrkdwn_sr(query), entries.len());
+    for entry in entries.iter().take(30) {
+        let emoji = type_emoji(&entry.event_type);
+        let time = entry.created_at.split_whitespace().nth(1).unwrap_or(&entry.created_at);
+        out.push_str(&format!("`{}` {} {} [{}]\n", time, emoji, escape_mrkdwn_sr(&entry.summary), escape_mrkdwn_sr(&entry.session_key)));
+        if let Some(ref tool) = entry.tool_name {
+            out.push_str(&format!("  🛠 {}", escape_mrkdwn_sr(tool)));
+            if let Some(ref input) = entry.tool_input {
+                out.push_str(&format!(": `{}`", escape_mrkdwn_sr(&truncate_str(input, 60))));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Render alert rules in Slack mrkdwn format.
+#[cfg(any(feature = "slack", feature = "teams"))]
+pub fn render_alert_rules_mrkdwn(rules: &[AlertRule]) -> String {
+    if rules.is_empty() {
+        return "*🔔 Alert Rules*\n\nNo alert rules configured.\n\nUsage:\n`/alerts add <name> <pattern> [target] [severity]`\n`/alerts remove <id>`".to_string();
+    }
+    let mut out = format!("*🔔 Alert Rules* ({} total)\n\n", rules.len());
+    for rule in rules {
+        let status = if rule.enabled { "✅" } else { "⏸" };
+        out.push_str(&format!(
+            "{} *#{}* {} — `{}` on _{}_  [{}]\n",
+            status, rule.id, escape_mrkdwn_sr(&rule.name), escape_mrkdwn_sr(&rule.pattern),
+            escape_mrkdwn_sr(&rule.target), escape_mrkdwn_sr(&rule.severity)
+        ));
+    }
+    out.push_str("\n`/alerts add <name> <pattern> [target] [severity]`\n");
+    out.push_str("`/alerts remove <id>`\n");
+    out.push_str("`/alerts toggle <id>`");
+    out
+}
+
+/// Escape special mrkdwn characters. Named differently from escape_html to avoid confusion.
+#[cfg(any(feature = "slack", feature = "teams"))]
+fn escape_mrkdwn_sr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn type_emoji(event_type: &str) -> &'static str {
     match event_type {
         "chat_in" => "💬",
@@ -604,14 +781,14 @@ fn type_emoji(event_type: &str) -> &'static str {
 }
 
 /// Escape HTML special characters for safe embedding in Telegram HTML messages.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -627,7 +804,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 // ── LLM-powered conceptual explanation ──────────────────────────────
 
 /// Generate a conceptual explanation of recent activity using LLM.
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 pub async fn generate_explanation(
     entries: &[ActivityEntry],
     llm: &dyn LlmProvider,
@@ -648,7 +825,7 @@ pub async fn generate_explanation(
     Ok(response)
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> String {
     let activity_dump = build_activity_dump(entries);
     match detail {
@@ -689,7 +866,7 @@ fn build_explanation_prompt(entries: &[ActivityEntry], detail: ReviewDetail) -> 
     }
 }
 
-#[cfg(feature = "telegram")]
+#[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
 fn build_activity_dump(entries: &[ActivityEntry]) -> String {
     entries
         .iter()
@@ -720,7 +897,7 @@ fn build_activity_dump(entries: &[ActivityEntry]) -> String {
         .join("\n")
 }
 
-#[cfg(all(test, feature = "telegram"))]
+#[cfg(all(test, any(feature = "telegram", feature = "slack")))]
 mod tests {
     use super::*;
 

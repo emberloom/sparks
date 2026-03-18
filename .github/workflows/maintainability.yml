@@ -32,6 +32,18 @@ jobs:
       - name: Cargo test (telegram feature)
         run: cargo test -q --features telegram
 
+      - name: Cargo check (slack feature)
+        run: cargo check -q --features slack
+
+      - name: Cargo test (slack feature)
+        run: cargo test -q --features slack
+
+      - name: Cargo check (teams feature)
+        run: cargo check -q --features teams
+
+      - name: Cargo test (teams feature)
+        run: cargo test -q --features teams
+
       - name: Doctor guard
         env:
           SPARKS_DISABLE_HOME_PROFILES: "1"

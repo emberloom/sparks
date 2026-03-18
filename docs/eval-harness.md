@@ -36,7 +36,7 @@ Current lanes covered:
 
 CI smoke suite:
 
-- `eval/benchmark-mini-ci.json` (uses `scripts/mock_athena_dispatch.py`)
+- `eval/benchmark-mini-ci.json` (uses `scripts/mock_sparks_dispatch.py`)
 
 ## Run
 
@@ -61,7 +61,7 @@ Scenario library manifest (used in scorecard metadata):
 Raw harness invocation:
 
 ```bash
-python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --athena-bin target/debug/athena
+python3 scripts/eval_harness.py --suite eval/benchmark-suite.json --config config.toml --sparks-bin target/debug/sparks
 ```
 
 Optional:
@@ -152,7 +152,7 @@ Inspect progress:
 
 ```bash
 tail -f "<run_dir>/soak.log"
-screen -ls | rg athena_soak
+screen -ls | rg sparks_soak
 ```
 
 On completion, a summary is generated at:
@@ -206,13 +206,13 @@ Gate passes when:
 Render combined KPI + eval trend dashboard:
 
 ```bash
-cargo run -- dashboard --repo athena
+cargo run -- dashboard --repo sparks
 ```
 
 Equivalent script invocation (used by soak/gate scripts):
 
 ```bash
-python3 scripts/eval_dashboard.py --config config.toml --repo athena
+python3 scripts/eval_dashboard.py --config config.toml --repo sparks
 ```
 
 Output:

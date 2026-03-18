@@ -43,7 +43,7 @@ Use one task contract per executable task in a feature DAG.
 Example:
 
 - `required_commands`:
-  - `cargo test -p athena --test test_eval_harness`
+  - `cargo test -p sparks --test test_eval_harness`
   - `python3 scripts/test_eval_harness.py`
 
 ## Done Criteria

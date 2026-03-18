@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{SparksError, Result};
 use crate::llm::{
@@ -39,6 +39,10 @@ pub struct Config {
     pub persona: PersonaConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub slack: SlackConfig,
+    #[serde(default)]
+    pub teams: TeamsConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
     #[serde(default)]
@@ -394,6 +398,97 @@ impl Default for TelegramConfig {
     }
 }
 
+// ── Slack config ─────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct SlackConfig {
+    /// Bot token (xoxb-...) or set SPARKS_SLACK_BOT_TOKEN env var
+    pub bot_token: Option<String>,
+    /// App-level token (xapp-...) for Socket Mode, or set SPARKS_SLACK_APP_TOKEN env var
+    pub app_token: Option<String>,
+    /// Signing secret for Events API verification, or set SPARKS_SLACK_SIGNING_SECRET env var
+    pub signing_secret: Option<String>,
+    /// Connection mode: "socket" (default) or "events_api"
+    #[serde(default = "default_slack_mode")]
+    pub mode: String,
+    /// Bind address for Events API HTTP server (only used when mode = "events_api")
+    #[serde(default = "default_slack_events_bind")]
+    pub events_api_bind: String,
+    /// Optional LLM provider override for Slack (default: "openai")
+    pub provider: Option<String>,
+    /// Allowed channel IDs (empty = deny all unless allow_all = true)
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    /// Allow all channels (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all: bool,
+    /// Confirmation timeout in seconds
+    #[serde(default = "default_confirm_timeout")]
+    pub confirm_timeout_secs: u64,
+    /// Always reply in threads (default: true)
+    #[serde(default = "default_slack_thread_replies")]
+    pub thread_replies: bool,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview for planning-like messages
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackConfig")
+            .field("bot_token", &"[REDACTED]")
+            .field("app_token", &"[REDACTED]")
+            .field("signing_secret", &"[REDACTED]")
+            .field("mode", &self.mode)
+            .field("events_api_bind", &self.events_api_bind)
+            .field("provider", &self.provider)
+            .field("allowed_channels", &self.allowed_channels)
+            .field("allow_all", &self.allow_all)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("thread_replies", &self.thread_replies)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
+            .finish()
+    }
+}
+
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: None,
+            app_token: None,
+            signing_secret: None,
+            mode: default_slack_mode(),
+            events_api_bind: default_slack_events_bind(),
+            provider: None,
+            allowed_channels: vec![],
+            allow_all: false,
+            confirm_timeout_secs: default_confirm_timeout(),
+            thread_replies: default_slack_thread_replies(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
+        }
+    }
+}
+
+fn default_slack_mode() -> String {
+    "socket".into()
+}
+fn default_slack_events_bind() -> String {
+    "127.0.0.1:3000".into()
+}
+fn default_slack_thread_replies() -> bool {
+    true
+}
+
 fn default_confirm_timeout() -> u64 {
     300
 }
@@ -408,6 +503,92 @@ fn default_planning_auto() -> bool {
 
 fn default_planning_timeout() -> u64 {
     900
+}
+
+// ── Teams config ──────────────────────────────────────────────────────
+
+/// Microsoft Teams Bot Framework configuration.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct TeamsConfig {
+    /// Azure AD App ID (bot's application ID), or set SPARKS_TEAMS_APP_ID env var
+    pub app_id: Option<String>,
+    /// Azure AD App Password (client secret), or set SPARKS_TEAMS_APP_PASSWORD env var
+    pub app_password: Option<String>,
+    /// HTTP bind address for the Bot Framework webhook endpoint
+    #[serde(default = "default_teams_bind")]
+    pub bind_addr: String,
+    /// Optional LLM provider override
+    pub provider: Option<String>,
+    /// Allowed Azure AD tenant IDs (empty = deny all unless allow_all_tenants = true)
+    #[serde(default)]
+    pub allowed_tenants: Vec<String>,
+    /// Allow all tenants (must be explicitly set to true)
+    #[serde(default)]
+    pub allow_all_tenants: bool,
+    /// Rate limit cooldown in seconds (per user+conversation)
+    #[serde(default = "default_teams_rate_limit")]
+    pub rate_limit_secs: u64,
+    /// Confirmation timeout in seconds
+    #[serde(default = "default_confirm_timeout")]
+    pub confirm_timeout_secs: u64,
+    /// Enable planning interview flow
+    #[serde(default = "default_planning_enabled")]
+    pub planning_enabled: bool,
+    /// Auto-start planning interview for planning-like messages
+    #[serde(default = "default_planning_auto")]
+    pub planning_auto: bool,
+    /// Planning interview timeout in seconds
+    #[serde(default = "default_planning_timeout")]
+    pub planning_timeout_secs: u64,
+    /// Skip JWT signature verification (development only - NEVER use in production)
+    #[serde(default)]
+    pub skip_auth: bool,
+}
+
+impl std::fmt::Debug for TeamsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeamsConfig")
+            .field("app_id", &self.app_id.as_deref().map(|_| "[REDACTED]"))
+            .field("app_password", &"[REDACTED]")
+            .field("bind_addr", &self.bind_addr)
+            .field("provider", &self.provider)
+            .field("allowed_tenants", &self.allowed_tenants)
+            .field("allow_all_tenants", &self.allow_all_tenants)
+            .field("rate_limit_secs", &self.rate_limit_secs)
+            .field("confirm_timeout_secs", &self.confirm_timeout_secs)
+            .field("planning_enabled", &self.planning_enabled)
+            .field("planning_auto", &self.planning_auto)
+            .field("planning_timeout_secs", &self.planning_timeout_secs)
+            .field("skip_auth", &self.skip_auth)
+            .finish()
+    }
+}
+
+impl Default for TeamsConfig {
+    fn default() -> Self {
+        Self {
+            app_id: None,
+            app_password: None,
+            bind_addr: default_teams_bind(),
+            provider: None,
+            allowed_tenants: vec![],
+            allow_all_tenants: false,
+            rate_limit_secs: default_teams_rate_limit(),
+            confirm_timeout_secs: default_confirm_timeout(),
+            planning_enabled: default_planning_enabled(),
+            planning_auto: default_planning_auto(),
+            planning_timeout_secs: default_planning_timeout(),
+            skip_auth: false,
+        }
+    }
+}
+
+fn default_teams_bind() -> String {
+    "0.0.0.0:3979".into()
+}
+
+fn default_teams_rate_limit() -> u64 {
+    5
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1197,6 +1378,8 @@ impl Default for Config {
             ghosts: default_ghosts(),
             persona: PersonaConfig::default(),
             telegram: TelegramConfig::default(),
+            slack: SlackConfig::default(),
+            teams: TeamsConfig::default(),
             embedding: EmbeddingConfig::default(),
             memory: MemoryConfig::default(),
             heartbeat: HeartbeatConfig::default(),
@@ -1354,6 +1537,17 @@ impl Config {
         if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
             labels.push("langfuse.secret_key".to_string());
         }
+        if self.slack.bot_token.is_some() && std::env::var("SPARKS_SLACK_BOT_TOKEN").is_err() {
+            labels.push("slack.bot_token".to_string());
+        }
+        if self.slack.app_token.is_some() && std::env::var("SPARKS_SLACK_APP_TOKEN").is_err() {
+            labels.push("slack.app_token".to_string());
+        }
+        if self.slack.signing_secret.is_some()
+            && std::env::var("SPARKS_SLACK_SIGNING_SECRET").is_err()
+        {
+            labels.push("slack.signing_secret".to_string());
+        }
         labels
     }
 
@@ -1385,6 +1579,15 @@ impl Config {
         }
         if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
             self.langfuse.base_url = Some(url);
+        }
+        if let Ok(token) = std::env::var("SPARKS_SLACK_BOT_TOKEN") {
+            self.slack.bot_token = Some(token);
+        }
+        if let Ok(token) = std::env::var("SPARKS_SLACK_APP_TOKEN") {
+            self.slack.app_token = Some(token);
+        }
+        if let Ok(secret) = std::env::var("SPARKS_SLACK_SIGNING_SECRET") {
+            self.slack.signing_secret = Some(secret);
         }
         if self.langfuse.enabled == false
             && self.langfuse.public_key.is_some()
@@ -1817,6 +2020,10 @@ fn is_loopback_host(host: &str) -> bool {
 mod tests {
     use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile};
     use std::path::Path;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate env vars to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn runtime_profile_name_maps_standard_to_container_strict() {
@@ -1905,6 +2112,62 @@ strategy = "react"
         assert!(bundle.contains("alpha"));
         assert!(bundle.contains("## SKILL: skills/b.md"));
         assert!(bundle.contains("beta"));
+    }
+
+    #[test]
+    fn apply_env_overrides_loads_slack_tokens_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("SPARKS_SLACK_BOT_TOKEN", "xoxb-test-bot");
+        std::env::set_var("SPARKS_SLACK_APP_TOKEN", "xapp-test-app");
+        std::env::set_var("SPARKS_SLACK_SIGNING_SECRET", "test-signing-secret");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        assert_eq!(config.slack.bot_token.as_deref(), Some("xoxb-test-bot"));
+        assert_eq!(config.slack.app_token.as_deref(), Some("xapp-test-app"));
+        assert_eq!(
+            config.slack.signing_secret.as_deref(),
+            Some("test-signing-secret")
+        );
+
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
+    }
+
+    #[test]
+    fn collect_inline_secret_labels_flags_slack_tokens_not_in_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
+
+        let mut config = Config::default();
+        config.slack.bot_token = Some("xoxb-inline".to_string());
+        config.slack.app_token = Some("xapp-inline".to_string());
+        config.slack.signing_secret = Some("inline-secret".to_string());
+
+        let labels = config.collect_inline_secret_labels();
+        assert!(labels.contains(&"slack.bot_token".to_string()));
+        assert!(labels.contains(&"slack.app_token".to_string()));
+        assert!(labels.contains(&"slack.signing_secret".to_string()));
+    }
+
+    #[test]
+    fn collect_inline_secret_labels_skips_slack_token_when_env_is_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("SPARKS_SLACK_BOT_TOKEN", "xoxb-from-env");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
+
+        let mut config = Config::default();
+        config.slack.bot_token = Some("xoxb-inline".to_string());
+
+        let labels = config.collect_inline_secret_labels();
+        assert!(!labels.contains(&"slack.bot_token".to_string()));
+
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
     }
 
     fn temp_config_path(prefix: &str) -> String {

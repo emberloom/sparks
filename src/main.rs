@@ -39,6 +39,10 @@ mod session_review;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
+#[cfg(feature = "slack")]
+mod slack;
+#[cfg(feature = "teams")]
+mod teams;
 mod ticket_intake;
 mod tool_usage;
 mod tools;
@@ -95,6 +99,12 @@ enum Commands {
     /// Run as a Telegram bot (requires --features telegram)
     #[cfg(feature = "telegram")]
     Telegram,
+    /// Run as a Slack bot (requires --features slack)
+    #[cfg(feature = "slack")]
+    Slack,
+    /// Run as a Microsoft Teams bot (requires --features teams)
+    #[cfg(feature = "teams")]
+    Teams,
     /// Authenticate with OpenAI subscription (OAuth flow)
     #[command(alias = "ouath")]
     Openai {
@@ -732,6 +742,82 @@ async fn main() -> anyhow::Result<()> {
             };
             let handle = SparksCore::start(telegram_config.clone(), memory).await?;
             telegram::run_telegram(handle, telegram_config.telegram, system_info).await?;
+        }
+        #[cfg(feature = "slack")]
+        Some(Commands::Slack) => {
+            let mut slack_config = config.clone();
+            let slack_provider = slack_config
+                .slack
+                .provider
+                .clone()
+                .unwrap_or_else(|| "openai".into());
+            slack_config.llm.provider = slack_provider.clone();
+            let openai_cfg = slack_config.openai.clone().unwrap_or_default();
+
+            let system_info = slack::SystemInfo {
+                provider: slack_provider.clone(),
+                temperature: match slack_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.temperature,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.temperature)
+                        .unwrap_or(0.3),
+                    "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    _ => config.ollama.temperature,
+                },
+                max_tokens: match slack_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.max_tokens,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.max_tokens)
+                        .unwrap_or(4096),
+                    "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    _ => config.ollama.max_tokens,
+                },
+                started_at: tokio::time::Instant::now(),
+            };
+            let handle = SparksCore::start(slack_config.clone(), memory).await?;
+            slack::run_slack(handle, slack_config.slack, system_info).await?;
+        }
+        #[cfg(feature = "teams")]
+        Some(Commands::Teams) => {
+            let mut teams_config = config.clone();
+            let teams_provider = teams_config
+                .teams
+                .provider
+                .clone()
+                .unwrap_or_else(|| "openai".into());
+            teams_config.llm.provider = teams_provider.clone();
+            let openai_cfg = teams_config.openai.clone().unwrap_or_default();
+
+            let system_info = teams::SystemInfo {
+                provider: teams_provider.clone(),
+                temperature: match teams_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.temperature,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.temperature)
+                        .unwrap_or(0.3),
+                    "zen" => config.zen.as_ref().map(|c| c.temperature).unwrap_or(0.3),
+                    _ => config.ollama.temperature,
+                },
+                max_tokens: match teams_provider.as_str() {
+                    "openai" | "ouath" => openai_cfg.max_tokens,
+                    "openrouter" => config
+                        .openrouter
+                        .as_ref()
+                        .map(|c| c.max_tokens)
+                        .unwrap_or(4096),
+                    "zen" => config.zen.as_ref().map(|c| c.max_tokens).unwrap_or(4096),
+                    _ => config.ollama.max_tokens,
+                },
+                started_at: tokio::time::Instant::now(),
+            };
+            let handle = SparksCore::start(teams_config.clone(), memory).await?;
+            teams::run_teams(handle, teams_config.teams, system_info).await?;
         }
         Some(Commands::Openai { action }) => {
             let openai_config = config.openai.clone().unwrap_or_default();

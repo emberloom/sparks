@@ -65,6 +65,18 @@ pub const KNOWN_SECRETS: &[SecretSpec] = &[
         key: "langfuse.secret_key",
         env: "LANGFUSE_SECRET_KEY",
     },
+    SecretSpec {
+        key: "slack.bot_token",
+        env: "SPARKS_SLACK_BOT_TOKEN",
+    },
+    SecretSpec {
+        key: "slack.app_token",
+        env: "SPARKS_SLACK_APP_TOKEN",
+    },
+    SecretSpec {
+        key: "slack.signing_secret",
+        env: "SPARKS_SLACK_SIGNING_SECRET",
+    },
 ];
 
 pub fn load_keyring_into_env() -> Result<()> {
@@ -228,5 +240,16 @@ mod tests {
             let found = find_spec(spec.key).expect("every KNOWN_SECRETS entry should be findable");
             assert_eq!(found.key, spec.key);
         }
+    }
+
+    #[test]
+    fn slack_tokens_are_registered_in_known_secrets() {
+        let bot = find_spec("slack.bot_token").expect("slack.bot_token should be in KNOWN_SECRETS");
+        assert_eq!(bot.env, "SPARKS_SLACK_BOT_TOKEN");
+        let app = find_spec("slack.app_token").expect("slack.app_token should be in KNOWN_SECRETS");
+        assert_eq!(app.env, "SPARKS_SLACK_APP_TOKEN");
+        let sig =
+            find_spec("slack.signing_secret").expect("slack.signing_secret should be in KNOWN_SECRETS");
+        assert_eq!(sig.env, "SPARKS_SLACK_SIGNING_SECRET");
     }
 }

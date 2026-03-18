@@ -20,6 +20,9 @@ pub enum SparksError {
     #[error("Operation cancelled by user")]
     Cancelled,
 
+    #[error("Operation denied by user")]
+    Denied,
+
     #[error("Step limit exceeded ({0} steps)")]
     StepLimitExceeded(usize),
 

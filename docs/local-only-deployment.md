@@ -10,7 +10,7 @@ When `[runtime].profile = "local_only"`, operator intent is:
 - external outbound integrations are disabled (`langfuse`, ticket intake sources/webhook)
 - state is stored on local filesystem paths (`db.path`, `embedding.model_dir`)
 
-`athena doctor` includes **Funnel 5: Local-Only Deployment Readiness** to verify these invariants.
+`sparks doctor` includes **Funnel 5: Local-Only Deployment Readiness** to verify these invariants.
 
 ## Minimal Config
 
@@ -29,11 +29,11 @@ model = "qwen2.5:7b"
 classifier_model = "qwen2.5:3b"
 
 [db]
-path = "~/.athena/athena.db"
+path = "~/.sparks/sparks.db"
 
 [embedding]
 enabled = true
-model_dir = "~/.athena/models/all-MiniLM-L6-v2"
+model_dir = "~/.sparks/models/all-MiniLM-L6-v2"
 
 [ticket_intake]
 enabled = false
@@ -53,13 +53,13 @@ enabled = false
 3. Run local-only doctor checks:
 
 ```bash
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
 ```
 
 4. Run reachability check (without `--skip-llm`) after Ollama is up:
 
 ```bash
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --ci --fail-on-warn
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --ci --fail-on-warn
 ```
 
 Expected: `Overall: PASS` and all checks in Funnel 5 are `PASS`.
@@ -72,7 +72,7 @@ Use these checks to detect accidental outbound behavior or profile drift.
 
 ```bash
 # Change llm.provider -> "openai" and rerun doctor
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
 ```
 
 Expected: fail at `Local model provider`.
@@ -81,7 +81,7 @@ Expected: fail at `Local model provider`.
 
 ```bash
 # Change ollama.url -> "http://example.com:11434" and rerun doctor
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
 ```
 
 Expected: fail at `Ollama endpoint loopback`.
@@ -90,7 +90,7 @@ Expected: fail at `Ollama endpoint loopback`.
 
 ```bash
 # Enable [langfuse] or configure ticket_intake.sources and rerun doctor
-ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
+SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- --config config.local-only.toml doctor --skip-llm --ci --fail-on-warn
 ```
 
 Expected: fail at `Outbound integration toggles`.
@@ -108,7 +108,7 @@ For local-only runs, expected outbound traffic is none.
 
 See `.github/workflows/doctor.yml` for a local-only smoke + negative-drift example:
 
-- validates a local-only config passes `athena doctor --skip-llm --ci --fail-on-warn`
+- validates a local-only config passes `sparks doctor --skip-llm --ci --fail-on-warn`
 - intentionally enables `langfuse` in a copy and verifies doctor fails
 
 ## Mode Interactions

@@ -11,13 +11,13 @@ Run multi-task feature delivery with explicit dependency DAGs and auditable run 
 Create a template with defaults:
 
 ```bash
-athena feature init --file feature-contract.toml --pattern fanout-fanin
+sparks feature init --file feature-contract.toml --pattern fanout-fanin
 ```
 
 Alternative pattern:
 
 ```bash
-athena feature init --file feature-contract-linear.toml --pattern linear
+sparks feature init --file feature-contract-linear.toml --pattern linear
 ```
 
 Accepted input formats for runtime commands:
@@ -28,9 +28,9 @@ Accepted input formats for runtime commands:
 ## 2. Validate/Lint (Fail Fast)
 
 ```bash
-athena feature validate --file feature-contract.toml
+sparks feature validate --file feature-contract.toml
 # alias:
-athena feature lint --file feature-contract.toml
+sparks feature lint --file feature-contract.toml
 ```
 
 Validation exits non-zero on any contract error and prints deterministic diagnostics with field paths, cycle traces, and unknown-ID suggestions.
@@ -46,7 +46,7 @@ Invalid feature contract (my-feature):
 ## 3. Inspect DAG Plan
 
 ```bash
-athena feature plan --file feature-contract.toml
+sparks feature plan --file feature-contract.toml
 ```
 
 This prints:
@@ -57,7 +57,7 @@ This prints:
 ## 4. Dispatch Tasks
 
 ```bash
-athena feature dispatch --file feature-contract.toml --wait-secs 240
+sparks feature dispatch --file feature-contract.toml --wait-secs 240
 ```
 
 Useful options:
@@ -86,7 +86,7 @@ CI autopilot behavior for dispatch:
 ## 5. Run Verification
 
 ```bash
-athena feature verify --file feature-contract.toml --profile strict
+sparks feature verify --file feature-contract.toml --profile strict
 ```
 
 Profile behavior:
@@ -99,7 +99,7 @@ Verify emits:
 ## 6. Gate (Dispatch + Verify + Promote)
 
 ```bash
-athena feature gate \
+sparks feature gate \
   --file feature-contract.toml \
   --wait-secs 240 \
   --verify-profile strict
@@ -115,13 +115,13 @@ Gate emits:
 ## 7. Promote (Supervised Decision)
 
 ```bash
-athena feature promote --file feature-contract.toml
+sparks feature promote --file feature-contract.toml
 ```
 
 Optional explicit ledgers:
 
 ```bash
-athena feature promote \
+sparks feature promote \
   --file feature-contract.toml \
   --dispatch-ledger eval/results/feature-<feature_id>-<timestamp>.json \
   --verify-ledger eval/results/feature-verify-<feature_id>-<timestamp>.json

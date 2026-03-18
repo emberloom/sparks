@@ -46,7 +46,7 @@ Documentation index for the Emberloom multi-agent orchestration system.
 | [hygiene-baseline.json](hygiene-baseline.json) | Hygiene check baseline (machine-generated, updated by `hygiene_check.py`) |
 | [maintainability-baseline.json](maintainability-baseline.json) | Maintainability baseline (machine-generated) |
 | [rust-audit-2026-03-02.md](rust-audit-2026-03-02.md) | Rust dependency security audit — 2026-03-02 |
-| [security-attestation.md](security-attestation.md) | `athena doctor --security` attestation schema, samples, and CI interpretation guide |
+| [security-attestation.md](security-attestation.md) | `sparks doctor --security` attestation schema, samples, and CI interpretation guide |
 | [openai-compatible-api.md](openai-compatible-api.md) | OpenAI-compatible API setup, supported fields, and documented deviations |
 | [mcp-integration.md](mcp-integration.md) | MCP server/tool configuration, namespacing, allowlists, and troubleshooting |
 | [session-review-explainability.md](session-review-explainability.md) | Session activity log, explainability workflow, and Telegram activity commands |

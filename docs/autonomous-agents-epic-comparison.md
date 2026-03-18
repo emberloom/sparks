@@ -152,7 +152,7 @@ Does the agent use multiple specialized sub-agents, and how does it coordinate t
 
 **Multi-phase pipelines** — Does the system decompose work into phases (explore → plan → code → verify → heal)? Explicit phases improve quality by separating concerns. Most agents run a single loop.
 
-**Custom agent profiles** — Can users define new agent types with custom tools, prompts, and configurations? Emberloom loads profiles from `~/.athena/ghosts/*.toml`. Codex uses its Skills library. Claude Code supports markdown agent definitions.
+**Custom agent profiles** — Can users define new agent types with custom tools, prompts, and configurations? Emberloom loads profiles from `~/.sparks/ghosts/*.toml`. Codex uses its Skills library. Claude Code supports markdown agent definitions.
 
 | Capability | Emberloom | Pilot | Devin | OpenHands | Factory | Conductor | Claude Code | Codex | Intent | Cursor |
 |------------|--------|-------|-------|-----------|---------|-----------|-------------|-------|--------|--------|
@@ -161,7 +161,7 @@ Does the agent use multiple specialized sub-agents, and how does it coordinate t
 | Agent isolation | **Strong** (Docker containers) | -- | **Strong** (sandbox) | **Strong** (Docker) | **Good** | **Best-in-class** (git worktrees) | **Good** (worktrees) | **Strong** (worktrees + sandbox) | **Good** (per-agent workspace) | **Basic** (session-level) |
 | Spark/agent routing | **Strong** (classifier model) | -- | **Strong** (model routing) | **Basic** (user-selected) | **Good** (Droid selection) | -- | **Basic** (task-based subagent dispatch) | -- | **Strong** (coordinator delegates to specialists) | -- |
 | Multi-phase pipelines | **Strong** (EXPLORE, EXECUTE, VERIFY, HEAL) | **Good** (plan, code, gate) | **Good** (plan, code, review) | **Basic** (loop-based) | **Good** | -- | **Basic** (plan mode → execute) | -- | **Good** (spec, delegate, verify) | -- |
-| Custom agent profiles | **Strong** (~/.athena/ghosts/) | -- | -- | **Good** (custom config) | -- | -- | **Good** (markdown agents) | **Strong** (Skills library) | -- | -- |
+| Custom agent profiles | **Strong** (~/.sparks/ghosts/) | -- | -- | **Good** (custom config) | -- | -- | **Good** (markdown agents) | **Strong** (Skills library) | -- | -- |
 
 Emberloom has the deepest multi-agent architecture among self-hosted tools with configurable spark personas and classifier-based routing. Codex and Intent both offer strong parallel agent execution — Codex via worktree-isolated threads, Intent via a coordinator that delegates to specialist agents. Conductor leads on parallel isolation with git worktrees.
 
@@ -402,7 +402,7 @@ This category covers capabilities that are novel but not primary adoption driver
 
 **Quiet hours & rate limiting** — Does the agent respect the human's off-hours? Emberloom suppresses non-urgent pulses during configurable quiet hours (timezone-aware) and limits pulse delivery to 4/hour for non-urgent messages.
 
-**Soul files** — Can the agent's personality and identity be customized via configuration files? Emberloom loads soul files from `~/.athena/souls/`. Claude Code uses `CLAUDE.md` for a simpler version of the same concept.
+**Soul files** — Can the agent's personality and identity be customized via configuration files? Emberloom loads soul files from `~/.sparks/souls/`. Claude Code uses `CLAUDE.md` for a simpler version of the same concept.
 
 **Relationship tracking** — Does the agent track per-user interaction patterns? Emberloom has the database schema (`relationship_stats` table) but the sentiment computation pipeline is not fully implemented.
 
@@ -412,7 +412,7 @@ This category covers capabilities that are novel but not primary adoption driver
 | Idle musings & conversation re-entry | **Implemented** (proactive follow-ups from memory) | -- | -- | -- | No competitor has this |
 | Cron/interval scheduling | **Implemented** (POSIX cron + interval with jitter + one-shot) | **Implemented** (Automations: scheduled tasks with review queue) | -- | -- | -- |
 | Quiet hours & rate limiting | **Implemented** (timezone-aware, 4/hr for non-urgent) | -- | -- | -- | No competitor has this |
-| Soul files (persona customization) | **Implemented** (~/.athena/souls/) | -- | **Basic** (CLAUDE.md) | **Basic** (Rules for AI) | Copilot has custom instructions |
+| Soul files (persona customization) | **Implemented** (~/.sparks/souls/) | -- | **Basic** (CLAUDE.md) | **Basic** (Rules for AI) | Copilot has custom instructions |
 | Relationship tracking | **Partial** (schema exists, sentiment not computed) | -- | -- | -- | No competitor has this |
 
 These features distinguish Emberloom from task-only agents. Codex's Automations feature is the closest competitor to Emberloom's scheduling — both support recurring background work, though Emberloom's quiet hours and rate limiting are unique. Rated as "Implemented" rather than competitive grades since most features have no peer to compare against.
