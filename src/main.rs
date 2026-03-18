@@ -37,6 +37,7 @@ mod scheduler;
 mod secrets;
 mod self_heal;
 mod session_review;
+mod sonarqube;
 mod strategy;
 #[cfg(feature = "telegram")]
 mod telegram;
