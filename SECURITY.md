@@ -33,10 +33,10 @@ Emberloom supports an explicit local runtime profile:
 - set `[llm].provider = "ollama"` with loopback URL (`localhost`, `127.0.0.1`, or `::1`)
 - disable outbound integrations (`langfuse`, ticket intake sources/webhook)
 
-Use `athena doctor` to verify readiness and detect drift:
+Use `sparks doctor` to verify readiness and detect drift:
 
-- `athena doctor --skip-llm --ci --fail-on-warn` for config/invariant checks
-- `athena doctor --ci --fail-on-warn` for live local Ollama reachability
+- `sparks doctor --skip-llm --ci --fail-on-warn` for config/invariant checks
+- `sparks doctor --ci --fail-on-warn` for live local Ollama reachability
 
 Reference guide: `docs/local-only-deployment.md`
 

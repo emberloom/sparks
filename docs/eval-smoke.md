@@ -12,7 +12,7 @@ Use this runbook for a fast integration check of Emberloom benchmark plumbing.
 
 - Python 3.11+
 - Emberloom repo checkout
-- optional: built `target/debug/athena` (not required for mock smoke)
+- optional: built `target/debug/sparks` (not required for mock smoke)
 
 ## Local Smoke (Mock Dispatch)
 
@@ -20,9 +20,9 @@ Use this runbook for a fast integration check of Emberloom benchmark plumbing.
 python3 scripts/eval_harness.py \
   --suite eval/benchmark-mini-ci.json \
   --config config.example.toml \
-  --athena-bin scripts/mock_athena_dispatch.py \
+  --sparks-bin scripts/mock_sparks_dispatch.py \
   --no-use-worktree \
-  --history-file /tmp/athena-history.jsonl
+  --history-file /tmp/sparks-history.jsonl
 ```
 
 Expected output artifacts:

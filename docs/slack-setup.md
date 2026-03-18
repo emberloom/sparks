@@ -1,17 +1,17 @@
 # Slack Integration Setup
 
-Guide for connecting Athena to Slack via the `--features slack` build flag.
+Guide for connecting Sparks to Slack via the `--features slack` build flag.
 
 ## Prerequisites
 
 - A Slack workspace where you have admin or app-creation permissions
-- Rust toolchain (Athena builds with `cargo`)
-- A running Athena instance (database, LLM provider configured)
+- Rust toolchain (Sparks builds with `cargo`)
+- A running Sparks instance (database, LLM provider configured)
 
 ## 1. Create a Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App**
-2. Choose **From scratch**, name it (e.g. "Athena"), and select your workspace
+2. Choose **From scratch**, name it (e.g. "Sparks"), and select your workspace
 
 ### Bot Token Scopes
 
@@ -58,7 +58,7 @@ Under **Slash Commands**, create:
 |-------|-------|
 | Command | `/sparks` |
 | Request URL | (auto-handled in Socket Mode) |
-| Short Description | Chat with Athena |
+| Short Description | Chat with Sparks |
 | Usage Hint | `[help\|status\|plan\|implement\|...]` |
 
 ### Interactivity
@@ -73,14 +73,14 @@ In Socket Mode the request URL is handled automatically.
 2. Authorize the requested permissions
 3. Copy the **Bot User OAuth Token** (`xoxb-...`)
 
-## 3. Configure Athena
+## 3. Configure Sparks
 
 ### Environment Variables (Recommended)
 
 ```bash
-export ATHENA_SLACK_BOT_TOKEN="xoxb-your-bot-token"
-export ATHENA_SLACK_APP_TOKEN="xapp-your-app-level-token"  # Socket Mode only
-export ATHENA_SLACK_SIGNING_SECRET="your-signing-secret"   # Events API only
+export SPARKS_SLACK_BOT_TOKEN="xoxb-your-bot-token"
+export SPARKS_SLACK_APP_TOKEN="xapp-your-app-level-token"  # Socket Mode only
+export SPARKS_SLACK_SIGNING_SECRET="your-signing-secret"   # Events API only
 ```
 
 ### Config File
@@ -89,8 +89,8 @@ Add to your `config.toml`:
 
 ```toml
 [slack]
-# bot_token = "xoxb-..."        # prefer env var ATHENA_SLACK_BOT_TOKEN
-# app_token = "xapp-..."        # prefer env var ATHENA_SLACK_APP_TOKEN
+# bot_token = "xoxb-..."        # prefer env var SPARKS_SLACK_BOT_TOKEN
+# app_token = "xapp-..."        # prefer env var SPARKS_SLACK_APP_TOKEN
 mode = "socket"                  # "socket" (default) or "events_api"
 # events_api_bind = "127.0.0.1:3000"  # bind address for Events API mode
 # provider = "openai"            # LLM provider override (optional)
@@ -119,7 +119,7 @@ planning_timeout_secs = 900      # stale interview cleanup (15 minutes)
 | `mode` | `"socket"` | Connection mode: `socket` or `events_api` |
 | `events_api_bind` | `"127.0.0.1:3000"` | HTTP bind address for Events API mode |
 | `provider` | (from CLI) | LLM provider override |
-| `allowed_channels` | `[]` | Channel IDs allowed to interact with Athena |
+| `allowed_channels` | `[]` | Channel IDs allowed to interact with Sparks |
 | `allow_all` | `false` | Allow all channels (overrides `allowed_channels`) |
 | `confirm_timeout_secs` | `300` | Seconds before confirmation buttons expire |
 | `thread_replies` | `true` | Reply in threads |
@@ -142,7 +142,7 @@ cargo build --release --features telegram,slack
 
 ## 5. Channel Access Control
 
-By default, Athena ignores all channels. You must explicitly allow channels:
+By default, Sparks ignores all channels. You must explicitly allow channels:
 
 **Option A — Allow specific channels:**
 ```toml
@@ -192,15 +192,15 @@ You can also send regular messages in allowed channels or @mention the bot.
 
 ### Thread-Based Conversations
 
-When `thread_replies = true` (default), Athena replies in threads. Each thread maintains its own session context, planning state, and confirmation buttons.
+When `thread_replies = true` (default), Sparks replies in threads. Each thread maintains its own session context, planning state, and confirmation buttons.
 
 ### Streaming Responses
 
-Athena posts a status message on dispatch, then updates it in-place as streaming chunks arrive (throttled to ~800ms). The final response replaces the status message.
+Sparks posts a status message on dispatch, then updates it in-place as streaming chunks arrive (throttled to ~800ms). The final response replaces the status message.
 
 ### Confirmations
 
-When Athena needs approval for a tool action, it sends Block Kit buttons (Approve / Deny). Buttons expire after `confirm_timeout_secs`.
+When Sparks needs approval for a tool action, it sends Block Kit buttons (Approve / Deny). Buttons expire after `confirm_timeout_secs`.
 
 ### Planning Interview
 
@@ -214,12 +214,12 @@ Background pulses (heartbeat, memory insights, idle thoughts, mood shifts, auton
 
 ## Troubleshooting
 
-**"Socket Mode requires app_token"** — Set `ATHENA_SLACK_APP_TOKEN` or `[slack].app_token` in config. Generate one under Socket Mode in your app settings.
+**"Socket Mode requires app_token"** — Set `SPARKS_SLACK_APP_TOKEN` or `[slack].app_token` in config. Generate one under Socket Mode in your app settings.
 
 **Bot doesn't respond** — Check `allowed_channels` includes the channel ID, or set `allow_all = true`. Check logs for authorization denials.
 
-**"Events API requires signing_secret"** — Only needed when `mode = "events_api"`. Set `ATHENA_SLACK_SIGNING_SECRET` or the config field.
+**"Events API requires signing_secret"** — Only needed when `mode = "events_api"`. Set `SPARKS_SLACK_SIGNING_SECRET` or the config field.
 
 **Buttons not working** — Ensure **Interactivity** is enabled in your Slack app settings. Socket Mode handles the request URL automatically.
 
-**Rate limiting** — Athena applies a 5-second per-channel cooldown on incoming messages. If messages are being dropped, this is intentional to prevent spam loops.
+**Rate limiting** — Sparks applies a 5-second per-channel cooldown on incoming messages. If messages are being dropped, this is intentional to prevent spam loops.

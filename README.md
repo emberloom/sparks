@@ -70,7 +70,7 @@ Recent additions — see [CHANGELOG.md](CHANGELOG.md) for the full list:
   - [OpenAI-Compatible API](#openai-compatible-api)
   - [Configuration & Runtime Control](#configuration--runtime-control)
   - [Proactive & Personality](#proactive--personality-experimental)
-  - [What Emberloom Does Not Do (Yet)](#what-athena-does-not-do-yet)
+  - [What Emberloom Does Not Do (Yet)](#what-emberloom-does-not-do-yet)
 - [Architecture](#architecture)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -100,9 +100,9 @@ cargo run --quiet -- doctor --skip-llm
 cargo run -- chat
 ```
 
-> **Deterministic local mode** (no `~/.athena` overrides, no LLM required for listing):
+> **Deterministic local mode** (no `~/.sparks` overrides, no LLM required for listing):
 > ```bash
-> ATHENA_DISABLE_HOME_PROFILES=1 cargo run -- ghosts
+> SPARKS_DISABLE_HOME_PROFILES=1 cargo run -- ghosts
 > ```
 
 Fully local deployment profile + verification: [`docs/local-only-deployment.md`](docs/local-only-deployment.md)
@@ -144,7 +144,7 @@ Emberloom's Docker sandbox applies layered hardening beyond a typical `docker ru
 - **Multi-phase pipeline** — EXPLORE → EXECUTE → VERIFY → HEAL phases per task
 - **Async dispatch** — tasks run concurrently via an internal mpsc task queue
 - **Docker isolation** — each spark execution gets a fresh container; no shared state between runs
-- **Custom profiles** — define new spark types in `config.toml` or `~/.athena/ghosts/*.toml`
+- **Custom profiles** — define new spark types in `config.toml` or `~/.sparks/ghosts/*.toml`
 
 ### Planning & Orchestration
 
@@ -195,7 +195,7 @@ Emberloom's Docker sandbox applies layered hardening beyond a typical `docker ru
   - Sensitive pattern blocklist, auto-approve patterns per spark
 - **LLM providers** — OpenAI, Ollama (local), OpenRouter, Zen — swap via config with no code changes
 - **Cron scheduling** — POSIX cron, interval-with-jitter, and one-shot scheduling for background tasks
-- **Secret management** — OS keyring via `athena secrets set <key>`; inline secrets in config are blocked by default
+- **Secret management** — OS keyring via `sparks secrets set <key>`; inline secrets in config are blocked by default
 
 ### Proactive & Personality (Experimental)
 
@@ -347,7 +347,7 @@ tools       = ["file_read", "file_write", "shell", "git", "gh"]
 strategy    = "code"
 ```
 
-Secrets (API keys, tokens) go in a gitignored `.env` file or the OS keyring (`athena secrets set <key>`).
+Secrets (API keys, tokens) go in a gitignored `.env` file or the OS keyring (`sparks secrets set <key>`).
 Inline credentials in `config.toml` are blocked by default. See [`config.example.toml`](config.example.toml) for all sections.
 
 ---

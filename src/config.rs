@@ -402,11 +402,11 @@ impl Default for TelegramConfig {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct SlackConfig {
-    /// Bot token (xoxb-...) or set ATHENA_SLACK_BOT_TOKEN env var
+    /// Bot token (xoxb-...) or set SPARKS_SLACK_BOT_TOKEN env var
     pub bot_token: Option<String>,
-    /// App-level token (xapp-...) for Socket Mode, or set ATHENA_SLACK_APP_TOKEN env var
+    /// App-level token (xapp-...) for Socket Mode, or set SPARKS_SLACK_APP_TOKEN env var
     pub app_token: Option<String>,
-    /// Signing secret for Events API verification, or set ATHENA_SLACK_SIGNING_SECRET env var
+    /// Signing secret for Events API verification, or set SPARKS_SLACK_SIGNING_SECRET env var
     pub signing_secret: Option<String>,
     /// Connection mode: "socket" (default) or "events_api"
     #[serde(default = "default_slack_mode")]
@@ -1537,14 +1537,14 @@ impl Config {
         if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
             labels.push("langfuse.secret_key".to_string());
         }
-        if self.slack.bot_token.is_some() && std::env::var("ATHENA_SLACK_BOT_TOKEN").is_err() {
+        if self.slack.bot_token.is_some() && std::env::var("SPARKS_SLACK_BOT_TOKEN").is_err() {
             labels.push("slack.bot_token".to_string());
         }
-        if self.slack.app_token.is_some() && std::env::var("ATHENA_SLACK_APP_TOKEN").is_err() {
+        if self.slack.app_token.is_some() && std::env::var("SPARKS_SLACK_APP_TOKEN").is_err() {
             labels.push("slack.app_token".to_string());
         }
         if self.slack.signing_secret.is_some()
-            && std::env::var("ATHENA_SLACK_SIGNING_SECRET").is_err()
+            && std::env::var("SPARKS_SLACK_SIGNING_SECRET").is_err()
         {
             labels.push("slack.signing_secret".to_string());
         }
@@ -1580,13 +1580,13 @@ impl Config {
         if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
             self.langfuse.base_url = Some(url);
         }
-        if let Ok(token) = std::env::var("ATHENA_SLACK_BOT_TOKEN") {
+        if let Ok(token) = std::env::var("SPARKS_SLACK_BOT_TOKEN") {
             self.slack.bot_token = Some(token);
         }
-        if let Ok(token) = std::env::var("ATHENA_SLACK_APP_TOKEN") {
+        if let Ok(token) = std::env::var("SPARKS_SLACK_APP_TOKEN") {
             self.slack.app_token = Some(token);
         }
-        if let Ok(secret) = std::env::var("ATHENA_SLACK_SIGNING_SECRET") {
+        if let Ok(secret) = std::env::var("SPARKS_SLACK_SIGNING_SECRET") {
             self.slack.signing_secret = Some(secret);
         }
         if self.langfuse.enabled == false
@@ -2117,9 +2117,9 @@ strategy = "react"
     #[test]
     fn apply_env_overrides_loads_slack_tokens_from_env() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("ATHENA_SLACK_BOT_TOKEN", "xoxb-test-bot");
-        std::env::set_var("ATHENA_SLACK_APP_TOKEN", "xapp-test-app");
-        std::env::set_var("ATHENA_SLACK_SIGNING_SECRET", "test-signing-secret");
+        std::env::set_var("SPARKS_SLACK_BOT_TOKEN", "xoxb-test-bot");
+        std::env::set_var("SPARKS_SLACK_APP_TOKEN", "xapp-test-app");
+        std::env::set_var("SPARKS_SLACK_SIGNING_SECRET", "test-signing-secret");
 
         let mut config = Config::default();
         config.apply_env_overrides();
@@ -2131,17 +2131,17 @@ strategy = "react"
             Some("test-signing-secret")
         );
 
-        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
-        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
-        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
     }
 
     #[test]
     fn collect_inline_secret_labels_flags_slack_tokens_not_in_env() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
-        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
-        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
 
         let mut config = Config::default();
         config.slack.bot_token = Some("xoxb-inline".to_string());
@@ -2157,9 +2157,9 @@ strategy = "react"
     #[test]
     fn collect_inline_secret_labels_skips_slack_token_when_env_is_set() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("ATHENA_SLACK_BOT_TOKEN", "xoxb-from-env");
-        std::env::remove_var("ATHENA_SLACK_APP_TOKEN");
-        std::env::remove_var("ATHENA_SLACK_SIGNING_SECRET");
+        std::env::set_var("SPARKS_SLACK_BOT_TOKEN", "xoxb-from-env");
+        std::env::remove_var("SPARKS_SLACK_APP_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_SIGNING_SECRET");
 
         let mut config = Config::default();
         config.slack.bot_token = Some("xoxb-inline".to_string());
@@ -2167,7 +2167,7 @@ strategy = "react"
         let labels = config.collect_inline_secret_labels();
         assert!(!labels.contains(&"slack.bot_token".to_string()));
 
-        std::env::remove_var("ATHENA_SLACK_BOT_TOKEN");
+        std::env::remove_var("SPARKS_SLACK_BOT_TOKEN");
     }
 
     fn temp_config_path(prefix: &str) -> String {

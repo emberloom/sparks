@@ -15,17 +15,17 @@ Configure in `config.toml`:
 [openai_api]
 enabled = true
 bind = "127.0.0.1:8787"
-api_key_env = "ATHENA_OPENAI_API_KEY"
+api_key_env = "SPARKS_OPENAI_API_KEY"
 principal = "self"
 requests_per_minute = 120
 burst = 30
-# advertised_models = ["athena", "athena/coder", "athena/scout"]
+# advertised_models = ["sparks", "sparks/coder", "sparks/scout"]
 ```
 
 Set the bearer token:
 
 ```bash
-export ATHENA_OPENAI_API_KEY="change-me"
+export SPARKS_OPENAI_API_KEY="change-me"
 ```
 
 ## Supported Request Fields (`/v1/chat/completions`)
@@ -53,10 +53,10 @@ export ATHENA_OPENAI_API_KEY="change-me"
 
 ```bash
 curl -sS http://127.0.0.1:8787/v1/chat/completions \
-  -H "Authorization: Bearer $ATHENA_OPENAI_API_KEY" \
+  -H "Authorization: Bearer $SPARKS_OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"athena",
+    "model":"sparks",
     "messages":[{"role":"user","content":"Summarize latest KPI trends"}],
     "user":"ide-local"
   }'

@@ -220,9 +220,9 @@ planning_timeout_secs = 900
 
 [slack]
 # mode = "socket"                      # "socket" (default, no public URL) or "events_api"
-# bot_token = "xoxb-..."               # discouraged; use ATHENA_SLACK_BOT_TOKEN env var, .env, or `athena secrets set slack.bot_token`
-# app_token = "xapp-..."               # required for Socket Mode; use ATHENA_SLACK_APP_TOKEN env var
-# signing_secret = ""                   # required for Events API; use ATHENA_SLACK_SIGNING_SECRET env var
+# bot_token = "xoxb-..."               # discouraged; use SPARKS_SLACK_BOT_TOKEN env var, .env, or `sparks secrets set slack.bot_token`
+# app_token = "xapp-..."               # required for Socket Mode; use SPARKS_SLACK_APP_TOKEN env var
+# signing_secret = ""                   # required for Events API; use SPARKS_SLACK_SIGNING_SECRET env var
 # events_api_bind = "127.0.0.1:3000"   # HTTP bind for Events API mode
 # provider = "openai"                   # optional LLM provider override
 # allowed_channels = ["C0123456789"]    # list of allowed Slack channel IDs

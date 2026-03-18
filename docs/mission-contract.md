@@ -128,14 +128,14 @@ Phase 3 (mission-ready):
 
 ## Tracking Current State vs Evolution
 
-Use `athena kpi`:
+Use `sparks kpi`:
 
 - Current state:
-  - `athena kpi status --lane self_improvement --repo athena --risk medium`
+  - `sparks kpi status --lane self_improvement --repo sparks --risk medium`
 - Persist snapshot:
-  - `athena kpi snapshot --lane self_improvement --repo athena --risk medium`
+  - `sparks kpi snapshot --lane self_improvement --repo sparks --risk medium`
 - Snapshot history (evolution):
-  - `athena kpi history --lane self_improvement --repo athena --limit 30`
+  - `sparks kpi history --lane self_improvement --repo sparks --limit 30`
 
 Recommended cadence:
 
@@ -146,7 +146,7 @@ Tagged attribution source:
 
 - KPI values are derived from lane/risk-tagged autonomous task outcomes when available.
 - Dispatch metadata can be set explicitly from CLI:
-  - `athena dispatch --goal "<...>" --lane delivery --risk medium --repo athena`
+  - `sparks dispatch --goal "<...>" --lane delivery --risk medium --repo sparks`
 - Background autonomous loops emit tagged outcomes under `self_improvement` by default.
 
 ## Langfuse Tracking
@@ -154,7 +154,7 @@ Tagged attribution source:
 KPI evolution can be tracked in Langfuse.
 
 - Command:
-  - `athena kpi snapshot --lane self_improvement --repo athena --risk medium --langfuse`
+  - `sparks kpi snapshot --lane self_improvement --repo sparks --risk medium --langfuse`
 - Export shape:
   - trace event `mission:kpi_snapshot`
   - tags include `mission`, `kpi`, lane, risk tier

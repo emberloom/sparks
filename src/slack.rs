@@ -2788,10 +2788,10 @@ pub async fn run_slack(
     let bot_token_str = config
         .bot_token
         .clone()
-        .or_else(|| std::env::var("ATHENA_SLACK_BOT_TOKEN").ok())
+        .or_else(|| std::env::var("SPARKS_SLACK_BOT_TOKEN").ok())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Slack bot token not set. Set [slack].bot_token or ATHENA_SLACK_BOT_TOKEN env var"
+                "Slack bot token not set. Set [slack].bot_token or SPARKS_SLACK_BOT_TOKEN env var"
             )
         })?;
 
@@ -2885,10 +2885,10 @@ async fn run_socket_mode(
     let app_token_str = config
         .app_token
         .clone()
-        .or_else(|| std::env::var("ATHENA_SLACK_APP_TOKEN").ok())
+        .or_else(|| std::env::var("SPARKS_SLACK_APP_TOKEN").ok())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Socket Mode requires app_token. Set [slack].app_token or ATHENA_SLACK_APP_TOKEN env var"
+                "Socket Mode requires app_token. Set [slack].app_token or SPARKS_SLACK_APP_TOKEN env var"
             )
         })?;
     let app_token = SlackApiToken::new(SlackApiTokenValue::from(app_token_str));

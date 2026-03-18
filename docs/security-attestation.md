@@ -1,4 +1,4 @@
-# Security Attestation (`athena doctor --security`)
+# Security Attestation (`sparks doctor --security`)
 
 Emberloom can emit a falsifiable security posture report for each configured spark.
 
