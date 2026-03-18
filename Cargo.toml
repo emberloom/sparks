@@ -7,7 +7,7 @@ description = "Secure autonomous multi-agent system"
 [features]
 default = []
 telegram = ["teloxide"]
-slack = ["slack-morphism"]
+slack = ["slack-morphism", "tokio-tungstenite/rustls-tls-native-roots"]
 teams = ["jsonwebtoken"]
 webhook = ["tower", "hmac"]
 
@@ -54,4 +54,5 @@ keyring = "3"
 rpassword = "7"
 hnsw_rs = "0.3.2"
 slack-morphism = { version = "2.18", features = ["hyper"], optional = true }
+tokio-tungstenite = { version = "0.28", optional = true }
 jsonwebtoken = { version = "9", optional = true }

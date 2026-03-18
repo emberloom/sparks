@@ -1537,6 +1537,17 @@ impl Config {
         if self.langfuse.secret_key.is_some() && std::env::var("LANGFUSE_SECRET_KEY").is_err() {
             labels.push("langfuse.secret_key".to_string());
         }
+        if self.slack.bot_token.is_some() && std::env::var("ATHENA_SLACK_BOT_TOKEN").is_err() {
+            labels.push("slack.bot_token".to_string());
+        }
+        if self.slack.app_token.is_some() && std::env::var("ATHENA_SLACK_APP_TOKEN").is_err() {
+            labels.push("slack.app_token".to_string());
+        }
+        if self.slack.signing_secret.is_some()
+            && std::env::var("ATHENA_SLACK_SIGNING_SECRET").is_err()
+        {
+            labels.push("slack.signing_secret".to_string());
+        }
         labels
     }
 
@@ -1568,6 +1579,15 @@ impl Config {
         }
         if let Ok(url) = std::env::var("LANGFUSE_BASE_URL") {
             self.langfuse.base_url = Some(url);
+        }
+        if let Ok(token) = std::env::var("ATHENA_SLACK_BOT_TOKEN") {
+            self.slack.bot_token = Some(token);
+        }
+        if let Ok(token) = std::env::var("ATHENA_SLACK_APP_TOKEN") {
+            self.slack.app_token = Some(token);
+        }
+        if let Ok(secret) = std::env::var("ATHENA_SLACK_SIGNING_SECRET") {
+            self.slack.signing_secret = Some(secret);
         }
         if self.langfuse.enabled == false
             && self.langfuse.public_key.is_some()

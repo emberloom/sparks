@@ -1029,30 +1029,30 @@ async fn command_help(
     channel: &SlackChannelId,
     thread_ts: Option<&SlackTs>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let help = "*Athena*\n\n\
+    let help = "*Sparks*\n\n\
         *Commands:*\n\
-        `/athena help` — Show this help\n\
-        `/athena plan [goal]` — Start a planning interview\n\
-        `/athena implement <goal>` — Implement with CLI tool\n\
-        `/athena status` — System status & uptime\n\
-        `/athena model [name]` — Show/switch LLM model\n\
-        `/athena models` — List available models\n\
-        `/athena ghosts` — List active ghosts\n\
-        `/athena memories [query]` — List saved memories\n\
-        `/athena dispatch <ghost> <goal>` — Run an autonomous task\n\
-        `/athena review [summary|detailed] [hours]` — Review session activity\n\
-        `/athena explain [summary|detailed] [hours]` — Conceptual explanation\n\
-        `/athena watch [seconds]` — Real-time activity stream\n\
-        `/athena search <query>` — Search across all sessions\n\
-        `/athena alerts` — Manage alert rules\n\
-        `/athena knobs` — Display all runtime knobs\n\
-        `/athena mood` — Detailed mood state\n\
-        `/athena jobs` — List scheduled cron jobs\n\
-        `/athena session` — Current session info\n\
-        `/athena cli` — Switch CLI tool\n\
-        `/athena set <key> <value>` — Modify runtime knob\n\
-        `/athena cli_model [name]` — Show/switch CLI model\n\n\
-        Send any message to chat with Athena.";
+        `/sparks help` — Show this help\n\
+        `/sparks plan [goal]` — Start a planning interview\n\
+        `/sparks implement <goal>` — Implement with CLI tool\n\
+        `/sparks status` — System status & uptime\n\
+        `/sparks model [name]` — Show/switch LLM model\n\
+        `/sparks models` — List available models\n\
+        `/sparks ghosts` — List active ghosts\n\
+        `/sparks memories [query]` — List saved memories\n\
+        `/sparks dispatch <ghost> <goal>` — Run an autonomous task\n\
+        `/sparks review [summary|detailed] [hours]` — Review session activity\n\
+        `/sparks explain [summary|detailed] [hours]` — Conceptual explanation\n\
+        `/sparks watch [seconds]` — Real-time activity stream\n\
+        `/sparks search <query>` — Search across all sessions\n\
+        `/sparks alerts` — Manage alert rules\n\
+        `/sparks knobs` — Display all runtime knobs\n\
+        `/sparks mood` — Detailed mood state\n\
+        `/sparks jobs` — List scheduled cron jobs\n\
+        `/sparks session` — Current session info\n\
+        `/sparks cli` — Switch CLI tool\n\
+        `/sparks set <key> <value>` — Modify runtime knob\n\
+        `/sparks cli_model [name]` — Show/switch CLI model\n\n\
+        Send any message to chat with Sparks.";
     send_mrkdwn(session, channel, thread_ts, help).await
 }
 
@@ -1231,7 +1231,7 @@ async fn command_dispatch(
             session,
             channel,
             thread_ts,
-            "_Usage: /athena dispatch <ghost> <goal>_",
+            "_Usage: /sparks dispatch <ghost> <goal>_",
         )
         .await;
     }
@@ -1386,7 +1386,7 @@ async fn command_search(
             session,
             channel,
             thread_ts,
-            "*Usage:* `/athena search <query>`\n\nSearch across all sessions.",
+            "*Usage:* `/sparks search <query>`\n\nSearch across all sessions.",
         )
         .await;
     }
@@ -1417,7 +1417,7 @@ async fn command_alerts(
                     session,
                     channel,
                     thread_ts,
-                    "*Usage:* `/athena alerts add <name> <pattern> [target] [severity]`",
+                    "*Usage:* `/sparks alerts add <name> <pattern> [target] [severity]`",
                 )
                 .await;
             }
@@ -1456,7 +1456,7 @@ async fn command_alerts(
                         session,
                         channel,
                         thread_ts,
-                        "*Usage:* `/athena alerts remove <id>`",
+                        "*Usage:* `/sparks alerts remove <id>`",
                     )
                     .await;
                 }
@@ -1502,7 +1502,7 @@ async fn command_alerts(
                         session,
                         channel,
                         thread_ts,
-                        "*Usage:* `/athena alerts toggle <id>`",
+                        "*Usage:* `/sparks alerts toggle <id>`",
                     )
                     .await;
                 }
@@ -1933,7 +1933,7 @@ async fn command_set(
             session,
             channel,
             thread_ts,
-            "_Usage:_ `/athena set` _or_ `/athena set <key> <value>`",
+            "_Usage:_ `/sparks set` _or_ `/sparks set <key> <value>`",
         )
         .await
     }
@@ -2094,7 +2094,7 @@ async fn handle_slash_command(
                     &session,
                     &channel,
                     None,
-                    "*Usage:* `/athena implement <goal>`\n\nDescribe what you want to implement.",
+                    "*Usage:* `/sparks implement <goal>`\n\nDescribe what you want to implement.",
                 )
                 .await
             } else {

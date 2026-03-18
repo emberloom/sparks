@@ -65,6 +65,18 @@ pub const KNOWN_SECRETS: &[SecretSpec] = &[
         key: "langfuse.secret_key",
         env: "LANGFUSE_SECRET_KEY",
     },
+    SecretSpec {
+        key: "slack.bot_token",
+        env: "ATHENA_SLACK_BOT_TOKEN",
+    },
+    SecretSpec {
+        key: "slack.app_token",
+        env: "ATHENA_SLACK_APP_TOKEN",
+    },
+    SecretSpec {
+        key: "slack.signing_secret",
+        env: "ATHENA_SLACK_SIGNING_SECRET",
+    },
 ];
 
 pub fn load_keyring_into_env() -> Result<()> {

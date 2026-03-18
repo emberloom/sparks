@@ -23,7 +23,7 @@ Under **OAuth & Permissions > Bot Token Scopes**, add:
 | `channels:history` | Read messages in public channels |
 | `channels:read` | List channels for authorization |
 | `chat:write` | Send messages and updates |
-| `commands` | Register `/athena` slash command |
+| `commands` | Register `/sparks` slash command |
 | `files:read` | Download shared files |
 | `files:write` | Upload files |
 | `groups:history` | Read messages in private channels |
@@ -56,7 +56,7 @@ Under **Slash Commands**, create:
 
 | Field | Value |
 |-------|-------|
-| Command | `/athena` |
+| Command | `/sparks` |
 | Request URL | (auto-handled in Socket Mode) |
 | Short Description | Chat with Athena |
 | Usage Hint | `[help\|status\|plan\|implement\|...]` |
@@ -104,7 +104,7 @@ thread_replies = true            # always reply in threads (default: true)
 confirm_timeout_secs = 300       # confirmation button timeout (5 minutes)
 
 # Planning interview
-planning_enabled = true          # enable /athena plan (default: true)
+planning_enabled = true          # enable /sparks plan (default: true)
 planning_auto = true             # auto-detect planning requests (default: true)
 planning_timeout_secs = 900      # stale interview cleanup (15 minutes)
 ```
@@ -134,7 +134,7 @@ planning_timeout_secs = 900      # stale interview cleanup (15 minutes)
 cargo build --release --features slack
 
 # Run the Slack bot
-./target/release/athena slack
+./target/release/sparks slack
 
 # Or with both Telegram and Slack
 cargo build --release --features telegram,slack
@@ -160,31 +160,31 @@ Use with caution in large workspaces.
 
 ## 6. Available Commands
 
-All commands go through the `/athena` slash command:
+All commands go through the `/sparks` slash command:
 
 | Command | Description |
 |---------|-------------|
-| `/athena help` | Show help |
-| `/athena status` | System status, uptime, model info |
-| `/athena plan [goal]` | Start interactive planning interview |
-| `/athena implement <goal>` | Implement with CLI tool |
-| `/athena model [name]` | Show or switch LLM model |
-| `/athena models` | List available models |
-| `/athena ghosts` | List active ghosts |
-| `/athena memories [query]` | List saved memories |
-| `/athena dispatch <ghost> <goal>` | Run autonomous task |
-| `/athena review [summary\|detailed] [hours]` | Activity review |
-| `/athena explain [summary\|detailed] [hours]` | Conceptual explanation |
-| `/athena watch [seconds]` | Real-time activity stream |
-| `/athena search <query>` | Search across sessions |
-| `/athena alerts` | Manage alert rules |
-| `/athena knobs` | Display runtime knobs |
-| `/athena mood` | Mood state with energy |
-| `/athena jobs` | List cron jobs |
-| `/athena session` | Current session info |
-| `/athena cli` | Switch CLI tool (interactive) |
-| `/athena set <key> <value>` | Modify a runtime knob |
-| `/athena cli_model [name]` | Show/switch CLI model |
+| `/sparks help` | Show help |
+| `/sparks status` | System status, uptime, model info |
+| `/sparks plan [goal]` | Start interactive planning interview |
+| `/sparks implement <goal>` | Implement with CLI tool |
+| `/sparks model [name]` | Show or switch LLM model |
+| `/sparks models` | List available models |
+| `/sparks ghosts` | List active ghosts |
+| `/sparks memories [query]` | List saved memories |
+| `/sparks dispatch <ghost> <goal>` | Run autonomous task |
+| `/sparks review [summary\|detailed] [hours]` | Activity review |
+| `/sparks explain [summary\|detailed] [hours]` | Conceptual explanation |
+| `/sparks watch [seconds]` | Real-time activity stream |
+| `/sparks search <query>` | Search across sessions |
+| `/sparks alerts` | Manage alert rules |
+| `/sparks knobs` | Display runtime knobs |
+| `/sparks mood` | Mood state with energy |
+| `/sparks jobs` | List cron jobs |
+| `/sparks session` | Current session info |
+| `/sparks cli` | Switch CLI tool (interactive) |
+| `/sparks set <key> <value>` | Modify a runtime knob |
+| `/sparks cli_model [name]` | Show/switch CLI model |
 
 You can also send regular messages in allowed channels or @mention the bot.
 
