@@ -334,3 +334,18 @@ enabled = true  # set to false to disable
 # public_key = "pk-..."    # discouraged; prefer LANGFUSE_PUBLIC_KEY env var, .env, or `sparks secrets set langfuse.public_key`
 # secret_key = "sk-..."    # discouraged; prefer LANGFUSE_SECRET_KEY env var, .env, or `sparks secrets set langfuse.secret_key`
 # base_url = "http://localhost:3000"  # for self-hosted, defaults to cloud
+
+# Proactive alerting engine — evaluates alert rules against the activity log
+# and delivers notifications via the configured channel.
+[alerts]
+enabled = true
+# How often to evaluate alert rules, in seconds
+check_interval_secs = 30
+# Delivery channel: "log" (default), "webhook", "slack", "teams"
+delivery_channel = "log"
+# Minimum severity to deliver: "info" (default), "warning", "critical"
+min_severity = "info"
+# Silence window: suppress repeated alerts for this many seconds (default 5 min)
+silence_secs = 300
+# Webhook URL (required when delivery_channel = "webhook")
+# webhook_url = "https://hooks.example.com/your-token"
