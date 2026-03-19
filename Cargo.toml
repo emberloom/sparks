@@ -55,4 +55,4 @@ rpassword = "7"
 hnsw_rs = "0.3.2"
 slack-morphism = { version = "2.18", features = ["hyper"], optional = true }
 tokio-tungstenite = { version = "0.28", optional = true }
-jsonwebtoken = { version = "9", optional = true }
+jsonwebtoken = { version = "10.3", optional = true }
