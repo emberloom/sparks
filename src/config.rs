@@ -75,6 +75,8 @@ pub struct Config {
     pub snapshot: SnapshotConfig,
     #[serde(default)]
     pub leaderboard: LeaderboardConfig,
+    #[serde(default)]
+    pub middleware: MiddlewareConfig,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -1544,6 +1546,27 @@ impl Default for LeaderboardConfig {
     }
 }
 
+// ── Middleware config ──────────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MiddlewareConfig {
+    /// Enable the activity-log flush safety net (default: true)
+    #[serde(default = "default_true")]
+    pub activity_log_flush: bool,
+}
+
+impl Default for MiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            activity_log_flush: default_true(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1578,6 +1601,7 @@ impl Default for Config {
             sonarqube: SonarqubeConfig::default(),
             snapshot: SnapshotConfig::default(),
             leaderboard: LeaderboardConfig::default(),
+            middleware: MiddlewareConfig::default(),
             inline_secret_labels: Vec::new(),
         }
     }
@@ -2204,12 +2228,18 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile};
+    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, MiddlewareConfig, RuntimeProfile};
     use std::path::Path;
     use std::sync::Mutex;
 
     // Serialize tests that mutate env vars to prevent parallel races.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn middleware_config_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.middleware.activity_log_flush); // on by default
+    }
 
     #[test]
     fn runtime_profile_name_maps_standard_to_container_strict() {
