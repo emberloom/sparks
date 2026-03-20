@@ -23,6 +23,7 @@ mod langfuse;
 mod llm;
 mod manager;
 mod mcp;
+mod middleware;
 mod memory;
 mod mood;
 mod observer;
