@@ -21,6 +21,7 @@ pub struct ExecutorInjectHandle {
     queue: InjectQueue,
     active: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     max_queued: usize,
+    todo_sessions: crate::todo::TodoSessions,
 }
 
 impl ExecutorInjectHandle {
@@ -35,6 +36,10 @@ impl ExecutorInjectHandle {
     }
     pub fn is_active(&self, session_id: &str) -> bool {
         self.active.lock().unwrap_or_else(|p| p.into_inner()).contains(session_id)
+    }
+    pub fn todo_render(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.render_progress()).unwrap_or_default()
     }
 }
 
@@ -300,6 +305,7 @@ impl Executor {
             queue: self.inject_queue.clone(),
             active: self.active_sessions.clone(),
             max_queued: self.max_queued_messages,
+            todo_sessions: self.todo_sessions.clone(),
         }
     }
 
@@ -462,6 +468,21 @@ impl Executor {
 
     async fn close_session(&self, session: DockerSession) {
         self.loop_guard.clear_session(session.session_id());
+        let todos_json = self.todo_json(session.session_id());
+        if todos_json != "[]" {
+            let session_key = Self::current_activity_context()
+                .map(|c| c.session_key.clone())
+                .unwrap_or_else(|| session.session_id().to_string());
+            let ghost_name = Self::current_activity_context()
+                .map(|c| c.ghost.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::info!(
+                session_key = %session_key,
+                ghost = %ghost_name,
+                items = %todos_json,
+                "spark_todos persisted"
+            );
+        }
         self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner()).remove(session.session_id());
         if let Err(e) = session.close().await {
             tracing::warn!("Failed to close container: {}", e);
