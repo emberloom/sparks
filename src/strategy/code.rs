@@ -518,6 +518,9 @@ impl CodeStrategy {
         for step in 0..MAX_EXPLORE_STEPS {
             tracing::debug!(step, path = "native", "EXPLORE step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
             // Get response (streaming or non-streaming)
             let (text_accum, tool_calls, usage) = if use_streaming {
                 let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
@@ -675,6 +678,9 @@ impl CodeStrategy {
 
         for step in 0..MAX_EXPLORE_STEPS {
             tracing::debug!(step, path = "text", "EXPLORE step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
 
             let response = llm.chat(&history).await?;
             history.push(Message::assistant(&response));
@@ -941,6 +947,9 @@ impl CodeStrategy {
         for step in 0..MAX_VERIFY_STEPS {
             tracing::debug!(step, path = "native", "VERIFY step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
             // Get response (streaming or non-streaming)
             let (text_accum, tool_calls, usage) = if use_streaming {
                 let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
@@ -1070,6 +1079,9 @@ impl CodeStrategy {
 
         for step in 0..MAX_VERIFY_STEPS {
             tracing::debug!(step, path = "text", "VERIFY step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
 
             let response = llm.chat(&history).await?;
             history.push(Message::assistant(&response));

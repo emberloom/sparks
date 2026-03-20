@@ -73,6 +73,9 @@ impl ReactStrategy {
         for step in 0..max_steps {
             tracing::debug!(step, path = "native", stream = use_streaming, "ReAct step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "react").await;
+
             let gen =
                 trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));
 
@@ -282,6 +285,9 @@ impl ReactStrategy {
 
         for step in 0..max_steps {
             tracing::debug!(step, path = "text", "ReAct step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "react").await;
 
             let gen =
                 trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));
