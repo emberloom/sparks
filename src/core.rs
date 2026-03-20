@@ -685,6 +685,8 @@ fn spawn_housekeeping_loops(
                         auto_tx.clone(),
                         provider_list,
                         store.clone(),
+                        config.ticket_intake.inject_full_context,
+                        config.ticket_intake.rich_context_char_cap,
                     );
                 }
 

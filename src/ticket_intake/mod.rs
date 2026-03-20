@@ -25,6 +25,8 @@ pub fn spawn_ticket_intake(
     auto_tx: mpsc::Sender<AutonomousTask>,
     providers: Vec<Arc<dyn TicketProvider>>,
     store: Arc<TicketIntakeStore>,
+    inject_full_context: bool,
+    rich_context_char_cap: usize,
 ) {
     if providers.is_empty() {
         observer.log(
@@ -109,7 +111,26 @@ pub fn spawn_ticket_intake(
                         continue;
                     }
 
-                    let task = ticket.to_autonomous_task();
+                    let mut task = ticket.to_autonomous_task();
+
+                    if inject_full_context {
+                        match provider.fetch_full_context(&ticket).await {
+                            Ok(ctx) => {
+                                let formatted = ctx.format(rich_context_char_cap);
+                                if !formatted.is_empty() {
+                                    task.context.push_str("\n\n### Full Ticket Context\n");
+                                    task.context.push_str(&formatted);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "fetch_full_context failed, continuing without it: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
                     match auto_tx.send(task).await {
                         Ok(_) => dispatched += 1,
                         Err(e) => {

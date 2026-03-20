@@ -1042,6 +1042,12 @@ pub struct TicketIntakeConfig {
     pub webhook: TicketIntakeWebhookConfig,
     #[serde(default)]
     pub ci_autopilot: TicketIntakeCiAutopilotConfig,
+    /// Fetch full issue context (comments, PR diff) and inject into task context.
+    #[serde(default)]
+    pub inject_full_context: bool,
+    /// Char cap for injected rich context block (default: 4000).
+    #[serde(default = "default_rich_context_char_cap")]
+    pub rich_context_char_cap: usize,
 }
 
 impl Default for TicketIntakeConfig {
@@ -1053,12 +1059,18 @@ impl Default for TicketIntakeConfig {
             sources: Vec::new(),
             webhook: TicketIntakeWebhookConfig::default(),
             ci_autopilot: TicketIntakeCiAutopilotConfig::default(),
+            inject_full_context: false,
+            rich_context_char_cap: default_rich_context_char_cap(),
         }
     }
 }
 
 fn default_ticket_intake_interval() -> u64 {
     300
+}
+
+fn default_rich_context_char_cap() -> usize {
+    4_000
 }
 
 fn default_ticket_ci_autopilot_enabled() -> bool {
@@ -2228,7 +2240,7 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, MiddlewareConfig, RuntimeProfile};
+    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile, TicketIntakeConfig};
     use std::path::Path;
     use std::sync::Mutex;
 
@@ -2239,6 +2251,13 @@ mod tests {
     fn middleware_config_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.middleware.activity_log_flush); // on by default
+    }
+
+    #[test]
+    fn ticket_intake_config_rich_context_defaults() {
+        let config: TicketIntakeConfig = toml::from_str("").unwrap();
+        assert!(!config.inject_full_context); // off by default
+        assert_eq!(config.rich_context_char_cap, 4_000);
     }
 
     #[test]
