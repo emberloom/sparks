@@ -145,6 +145,11 @@ impl CoreHandle {
         self.executor_inject.is_active(session_key)
     }
 
+    /// Returns the rendered todo list for the given session key, or empty string if none.
+    pub fn session_todos(&self, session_key: &str) -> String {
+        self.executor_inject.todo_render(session_key)
+    }
+
     /// Queue a message for injection into the next LLM step of a running session.
     /// Returns true if the session is active and the message was queued,
     /// false if no session is running (caller should start a new session instead).

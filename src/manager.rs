@@ -278,6 +278,10 @@ impl Manager {
         self.executor.inject_handle()
     }
 
+    pub fn session_todos(&self, session_key: &str) -> String {
+        self.executor.todo_render(session_key)
+    }
+
     pub async fn with_activity_context_base<F, Fut, T>(
         &self,
         session_key: &str,

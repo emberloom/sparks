@@ -1843,7 +1843,7 @@ async fn command_session(
         })
         .unwrap_or_else(|| "none".to_string());
 
-    let text = format!(
+    let mut text = format!(
         "*Session*\n\n\
          *Key:* `{}`\n\
          *Model:* `{}`\n\
@@ -1859,6 +1859,11 @@ async fn command_session(
         format_tokens(context_window),
         escape_mrkdwn(&last_preview),
     );
+    let todos = state.handle.session_todos(&session_key);
+    if !todos.is_empty() {
+        text.push_str("\n\n*Todo List:*\n");
+        text.push_str(&format!("```\n{}\n```", todos));
+    }
     send_mrkdwn(session, channel, thread_ts, &text).await
 }
 
