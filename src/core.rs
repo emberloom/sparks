@@ -136,9 +136,22 @@ pub struct CoreHandle {
     pub metrics: SharedMetrics,
     #[cfg(any(feature = "telegram", feature = "slack", feature = "teams"))]
     pub activity_log: Arc<ActivityLogStore>,
+    executor_inject: crate::executor::ExecutorInjectHandle,
 }
 
 impl CoreHandle {
+    /// Returns true if a spark is actively running for the given session key.
+    pub fn is_session_active(&self, session_key: &str) -> bool {
+        self.executor_inject.is_active(session_key)
+    }
+
+    /// Queue a message for injection into the next LLM step of a running session.
+    /// Returns true if the session is active and the message was queued,
+    /// false if no session is running (caller should start a new session instead).
+    pub fn inject(&self, session_key: &str, message: String) -> bool {
+        self.executor_inject.inject_message(session_key, message)
+    }
+
     /// Submit an autonomous task for background execution by a ghost.
     /// Results are delivered as pulses to the specified target.
     pub async fn dispatch_task(&self, mut task: AutonomousTask) -> Result<String> {
@@ -251,6 +264,7 @@ impl SparksCore {
         );
         let (tx, rx) = init_core_channel();
         let llm_for_reentry = manager.llm_ref();
+        let executor_inject = manager.inject_handle();
         spawn_core_loops(
             rx,
             manager,
@@ -285,6 +299,7 @@ impl SparksCore {
             auto_tx,
             metrics,
             activity_log,
+            executor_inject,
         );
 
         maybe_spawn_openai_api(&config, &handle).await?;
@@ -309,6 +324,7 @@ fn build_core_handle_for_runtime(
     auto_tx: mpsc::Sender<AutonomousTask>,
     metrics: SharedMetrics,
     activity_log: Arc<ActivityLogStore>,
+    executor_inject: crate::executor::ExecutorInjectHandle,
 ) -> CoreHandle {
     build_core_handle(
         tx,
@@ -325,6 +341,7 @@ fn build_core_handle_for_runtime(
         auto_tx,
         metrics,
         activity_log,
+        executor_inject,
     )
 }
 
@@ -344,6 +361,7 @@ fn build_core_handle_for_runtime(
     auto_tx: mpsc::Sender<AutonomousTask>,
     metrics: SharedMetrics,
     activity_log: Arc<ActivityLogStore>,
+    executor_inject: crate::executor::ExecutorInjectHandle,
 ) -> CoreHandle {
     let _ = activity_log;
     build_core_handle(
@@ -360,6 +378,7 @@ fn build_core_handle_for_runtime(
         delivered_rx,
         auto_tx,
         metrics,
+        executor_inject,
     )
 }
 
@@ -379,6 +398,7 @@ fn build_core_handle(
     auto_tx: mpsc::Sender<AutonomousTask>,
     metrics: SharedMetrics,
     activity_log: Arc<ActivityLogStore>,
+    executor_inject: crate::executor::ExecutorInjectHandle,
 ) -> CoreHandle {
     CoreHandle {
         tx,
@@ -395,6 +415,7 @@ fn build_core_handle(
         auto_tx,
         metrics,
         activity_log,
+        executor_inject,
     }
 }
 
@@ -413,6 +434,7 @@ fn build_core_handle(
     delivered_rx: mpsc::Receiver<Pulse>,
     auto_tx: mpsc::Sender<AutonomousTask>,
     metrics: SharedMetrics,
+    executor_inject: crate::executor::ExecutorInjectHandle,
 ) -> CoreHandle {
     CoreHandle {
         tx,
@@ -428,6 +450,7 @@ fn build_core_handle(
         delivered_rx: Arc::new(tokio::sync::Mutex::new(delivered_rx)),
         auto_tx,
         metrics,
+        executor_inject,
     }
 }
 

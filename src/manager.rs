@@ -273,6 +273,10 @@ impl Manager {
         &self.host_workspace
     }
 
+    pub fn inject_handle(&self) -> crate::executor::ExecutorInjectHandle {
+        self.executor.inject_handle()
+    }
+
     pub async fn with_activity_context_base<F, Fut, T>(
         &self,
         session_key: &str,
