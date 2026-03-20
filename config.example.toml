@@ -260,6 +260,11 @@ enabled = false
 poll_interval_secs = 300
 # When true, ticket intake tasks are auto-completed without executing a ghost (useful for CI).
 mock_dispatch = false
+# Fetch full issue context (comments, PR diff) and inject into task context.
+# Increases token usage per task but significantly improves task quality.
+# inject_full_context = false
+# Maximum characters to inject from rich ticket context (default: 4000).
+# rich_context_char_cap = 4000
 
 [ticket_intake.ci_autopilot]
 # End-to-end bridge used by ticket intake and feature-contract dispatch:
