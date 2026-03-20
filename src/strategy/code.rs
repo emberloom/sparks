@@ -640,6 +640,7 @@ impl CodeStrategy {
              {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}"
                 .to_string(),
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         if let ChatResponse::Text(text) = &response {
             if let Some(plan) = extract_plan(text) {
@@ -733,6 +734,7 @@ impl CodeStrategy {
             "You've used all exploration steps. Output your plan NOW as JSON:\n\
              {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}",
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
         let response = llm.chat(&history).await?;
         if let Some(plan) = extract_plan(&response) {
             return Ok(plan);
@@ -1042,6 +1044,7 @@ impl CodeStrategy {
         history.push(ChatMessage::User(
             "Verification step limit reached. Provide your final summary now.".to_string(),
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         match response {
             ChatResponse::Text(text) => Ok(text),
@@ -1123,6 +1126,7 @@ impl CodeStrategy {
         history.push(Message::user(
             "Verification step limit reached. Provide your final summary now.",
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
         let response = llm.chat(&history).await?;
         Ok(response)
     }
