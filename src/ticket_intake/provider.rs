@@ -158,7 +158,7 @@ impl TicketContext {
 
         // Hard truncate as last resort.
         let mut s = no_diff;
-        s.truncate(char_cap);
+        s.truncate(s.floor_char_boundary(char_cap));
         s
     }
 

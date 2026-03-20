@@ -188,10 +188,10 @@ pub struct Executor {
     langfuse: SharedLangfuse,
     activity_log: Option<Arc<ActivityLogStore>>,
     middlewares: SharedMiddlewares,
-    pub inject_queue: InjectQueue,
-    pub active_sessions: Arc<Mutex<HashSet<String>>>,
+    pub(crate) inject_queue: InjectQueue,
+    pub(crate) active_sessions: Arc<Mutex<HashSet<String>>>,
     max_queued_messages: usize,
-    pub todo_sessions: TodoSessions,
+    pub(crate) todo_sessions: TodoSessions,
 }
 
 #[derive(Debug, Clone)]
