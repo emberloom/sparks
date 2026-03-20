@@ -7845,6 +7845,7 @@ mod tests {
                 soul: None,
                 skill: None,
                 image: None,
+                profile: None,
             },
             crate::config::GhostConfig {
                 name: "architect".to_string(),
@@ -7859,6 +7860,7 @@ mod tests {
                 soul: None,
                 skill: None,
                 image: None,
+                profile: None,
             },
         ];
         let selected = select_self_build_dispatch_ghost(&config).unwrap();

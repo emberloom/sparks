@@ -218,6 +218,7 @@ fn build_ghost_from_profile(
         soul,
         skill,
         image: normalize_profile_image(profile.image, fallback_image),
+        profile: None,
     }
 }
 

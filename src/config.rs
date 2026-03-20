@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// Named tool lists — map of profile_name → Vec<tool_name>.
+pub type ToolProfiles = std::collections::HashMap<String, Vec<String>>;
+
 use crate::error::{SparksError, Result};
 use crate::llm::{
     LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
@@ -77,6 +80,8 @@ pub struct Config {
     pub leaderboard: LeaderboardConfig,
     #[serde(default)]
     pub middleware: MiddlewareConfig,
+    #[serde(default)]
+    pub tool_profiles: ToolProfiles,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -1311,6 +1316,11 @@ pub struct GhostConfig {
     pub skill: Option<String>,
     /// Docker image override (uses global docker.image if None)
     pub image: Option<String>,
+    /// Optional named tool profile. Resolved at startup by `profiles.rs`.
+    /// If set, the profile's tool list is merged into `tools` (profile tools appended
+    /// for any tool not already in `tools`; inline `tools` list takes precedence).
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -1621,6 +1631,7 @@ impl Default for Config {
             snapshot: SnapshotConfig::default(),
             leaderboard: LeaderboardConfig::default(),
             middleware: MiddlewareConfig::default(),
+            tool_profiles: ToolProfiles::default(),
             inline_secret_labels: Vec::new(),
         }
     }
@@ -1646,6 +1657,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             soul: None,
             skill: None,
             image: None,
+            profile: None,
         },
         GhostConfig {
             name: "scout".into(),
@@ -1665,6 +1677,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             soul: None,
             skill: None,
             image: None,
+            profile: None,
         },
     ]
 }
@@ -2242,6 +2255,44 @@ fn is_loopback_host(host: &str) -> bool {
     match host.parse::<IpAddr>() {
         Ok(ip) => ip.is_loopback(),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tool_profile_tests {
+    use super::*;
+
+    #[test]
+    fn tool_profiles_deserialize_correctly() {
+        let toml = r#"
+[tool_profiles]
+researcher = ["web_search", "file_read", "memory_search"]
+devops = ["shell", "docker", "git"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.tool_profiles.get("researcher"),
+            Some(&vec!["web_search".to_string(), "file_read".to_string(), "memory_search".to_string()])
+        );
+        assert_eq!(config.tool_profiles.get("devops").map(|v| v.len()), Some(3));
+    }
+
+    #[test]
+    fn ghost_config_profile_field_deserializes() {
+        let toml = r#"
+[[ghosts]]
+name = "researcher"
+description = "Research ghost"
+profile = "researcher"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ghosts[0].profile.as_deref(), Some("researcher"));
+    }
+
+    #[test]
+    fn tool_profiles_default_to_empty_map() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.tool_profiles.is_empty());
     }
 }
 
