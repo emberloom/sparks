@@ -1,7 +1,42 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+
+pub type InjectQueue = Arc<Mutex<HashMap<String, VecDeque<String>>>>;
+
+pub fn drain_inject_queue(queue: &InjectQueue, session_id: &str) -> Vec<String> {
+    let mut q = match queue.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    q.get_mut(session_id)
+        .map(|vq| vq.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Thin handle to the executor's inject capability — safe to clone onto CoreHandle.
+#[derive(Clone)]
+pub struct ExecutorInjectHandle {
+    queue: InjectQueue,
+    active: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    max_queued: usize,
+}
+
+impl ExecutorInjectHandle {
+    pub fn inject_message(&self, session_id: &str, message: String) -> bool {
+        let is_active = self.active.lock().unwrap_or_else(|p| p.into_inner()).contains(session_id);
+        if !is_active { return false; }
+        let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let vq = q.entry(session_id.to_string()).or_default();
+        vq.push_back(message);
+        while vq.len() > self.max_queued { vq.pop_front(); }
+        true
+    }
+    pub fn is_active(&self, session_id: &str) -> bool {
+        self.active.lock().unwrap_or_else(|p| p.into_inner()).contains(session_id)
+    }
+}
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -147,6 +182,8 @@ pub struct Executor {
     langfuse: SharedLangfuse,
     activity_log: Option<Arc<ActivityLogStore>>,
     middlewares: SharedMiddlewares,
+    pub inject_queue: InjectQueue,
+    pub active_sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +240,8 @@ impl Executor {
             langfuse,
             activity_log,
             middlewares,
+            inject_queue: Arc::new(Mutex::new(HashMap::new())),
+            active_sessions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -247,6 +286,14 @@ impl Executor {
     ) {
         for mw in &self.middlewares {
             mw.after_spark_complete(session_id, ghost, outcome).await;
+        }
+    }
+
+    pub fn inject_handle(&self) -> ExecutorInjectHandle {
+        ExecutorInjectHandle {
+            queue: self.inject_queue.clone(),
+            active: self.active_sessions.clone(),
+            max_queued: 10, // hard-coded for now; Task 5 makes this configurable
         }
     }
 
@@ -329,6 +376,10 @@ impl Executor {
 
                 // Run the strategy loop
                 let session_id = session.session_id().to_string();
+                {
+                    let mut active = self.active_sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    active.insert(session_id.clone());
+                }
                 let result = strategy
                     .run(
                         contract,
@@ -345,6 +396,11 @@ impl Executor {
 
                 // Always clean up the container
                 self.close_session(session).await;
+                {
+                    let mut active = self.active_sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    active.remove(&session_id);
+                    self.inject_queue.lock().unwrap_or_else(|p| p.into_inner()).remove(&session_id);
+                }
 
                 let spark_outcome = match &result {
                     Ok(o) => SparkOutcome::Success(o.clone()),
@@ -770,5 +826,30 @@ mod tests {
         assert!(guard
             .observe("session-e", "shell", &json!({ "command": "cargo check" }))
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod inject_tests {
+    use super::*;
+
+    #[test]
+    fn inject_queue_push_and_drain() {
+        let queue: InjectQueue = Arc::new(Mutex::new(HashMap::new()));
+        let session = "sess:user:chat";
+
+        // Push a message
+        {
+            let mut q = queue.lock().unwrap();
+            q.entry(session.to_string()).or_default().push_back("hello".to_string());
+        }
+
+        // Drain it
+        let msgs = drain_inject_queue(&queue, session);
+        assert_eq!(msgs, vec!["hello".to_string()]);
+
+        // Queue should be empty now
+        let msgs2 = drain_inject_queue(&queue, session);
+        assert!(msgs2.is_empty());
     }
 }
