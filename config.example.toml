@@ -152,6 +152,15 @@ discovery_ttl_secs = 60
 [persona]
 # soul_file = "~/.sparks/souls/sparks.md"
 
+# Named tool profiles — reference from a ghost with profile = "name"
+# All tools in a profile must be registered (built-in or MCP).
+# Inline [[ghosts]] tools list takes precedence over profile tools.
+#
+# [tool_profiles]
+# researcher = ["web_search", "file_read", "grep", "memory_search"]
+# devops     = ["shell", "git", "gh", "docker_exec"]
+# reviewer   = ["file_read", "grep", "glob", "git"]
+
 # Ghosts are sub-agents that execute tasks inside Docker containers.
 # Each ghost can have its own soul file for personality/identity.
 # For deterministic CI/local runs, set SPARKS_DISABLE_HOME_PROFILES=1 to ignore ~/.sparks/ghosts overrides.
@@ -161,6 +170,7 @@ description = "Complex multi-file coding tasks: refactoring, new features, bug f
 tools = ["file_read", "file_write", "shell", "git", "gh"]
 role = "coder"
 strategy = "code"
+# profile = "researcher"   # use a named tool profile instead of or alongside tools = [...]
 # soul_file = "~/.sparks/souls/coder.md"
 # skill_file = "~/.sparks/skills/coder.md"
 # skill_files = ["~/.sparks/skills/rust-core.md", "~/.sparks/skills/secure-coding.md"]
