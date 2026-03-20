@@ -34,7 +34,11 @@ safety net without requiring LLM cooperation.
   `after_spark_complete(&self, ctx: &SessionContext, outcome: &TaskOutcome)`.
 - Implementations registered at startup and stored on the executor.
 - Built-in middlewares to ship first: memory flush, KPI snapshot, activity log close.
-- `before_model_call` runs inside the `executor.rs` loop before each LLM call.
+- `before_model_call` runs inside each strategy's execution loop before each LLM call.
+  `executor.rs` delegates to strategy implementations (`strategy/react.rs`, `strategy/code.rs`)
+  which contain the actual per-turn model calls — those are the hook sites, not `executor.rs`
+  itself. The cleanest path is a shared helper that both strategies call instead of calling the
+  LLM provider directly.
 - `after_spark_complete` runs in `manager.rs` after the task contract resolves — including on
   error paths, so guarantees hold even when a spark panics or times out.
 - Per-middleware enable/disable via config to allow staged rollout.
@@ -44,7 +48,8 @@ safety net without requiring LLM cooperation.
 | File | Change |
 |------|--------|
 | `src/middleware.rs` | New — trait definition + built-in implementations |
-| `src/executor.rs` | Call `before_model_call` before each LLM invocation |
+| `src/strategy/react.rs` | Call `before_model_call` before each LLM invocation |
+| `src/strategy/code.rs` | Same as react.rs |
 | `src/manager.rs` | Call `after_spark_complete` in post-run cleanup path |
 | `src/config.rs` | Add `[middleware]` section with per-middleware toggles |
 
@@ -87,7 +92,7 @@ without risk of blowing the context window.
 | `src/ticket_intake/linear.rs` | Implement: fetch issue body + comments |
 | `src/manager.rs` | Assemble and prepend rich context at `TaskContract` build |
 | `src/context_budget.rs` | Add trim strategy for injected context blocks |
-| `src/strategy.rs` | Add `rich_context: Option<String>` field to `TaskContract` |
+| `src/strategy/mod.rs` | Add `rich_context: Option<String>` field to `TaskContract` |
 
 ### Effort
 
@@ -110,10 +115,16 @@ the next turn, letting operators steer a running spark without interrupting it.
 ### Key Design Decisions
 
 - Queue type: `Arc<Mutex<VecDeque<InjectMessage>>>` where `InjectMessage` holds the text and
-  source platform. Lives on `SessionContext` in `core.rs` — frontends already hold a reference.
-- Frontend routing logic: if session is active → push to queue; if idle → start new session
+  source platform. Lives on `Executor`, keyed by session ID
+  (`HashMap<String, VecDeque<InjectMessage>>`), mirroring how `loop_guard` tracks per-session
+  state. `SessionContext` in `core.rs` is a lightweight three-field value type constructed
+  per-request — it is not a durable object and is not the right owner.
+- Frontends hold a `CoreHandle` and construct a new `SessionContext` per call. To push to the
+  queue, frontends call a new `CoreHandle::inject(session_id, message)` method rather than
+  going through `SessionContext` directly.
+- Frontend routing logic: if session is active → call `inject()`; if idle → start new session
   (existing behavior unchanged).
-- Inject point in `executor.rs`: drain the queue before each LLM call and prepend as
+- Inject point in strategy loop: drain the queue before each LLM call and prepend as
   user-role messages to the message history.
 - `max_queued_messages` config cap (default: 5) to prevent unbounded injection on busy sessions.
 - Queue is cleared on spark completion to avoid leaking messages into the next run.
@@ -122,9 +133,11 @@ the next turn, letting operators steer a running spark without interrupting it.
 
 | File | Change |
 |------|--------|
-| `src/core.rs` | Add `inject_queue` field to `SessionContext` |
-| `src/executor.rs` | Drain queue and prepend messages before each LLM call |
-| `src/slack.rs` | Route mid-run messages to queue instead of rejecting |
+| `src/executor.rs` | Add per-session inject queue (`HashMap<String, VecDeque<InjectMessage>>`) |
+| `src/core.rs` | Add `CoreHandle::inject(session_id, message)` method |
+| `src/strategy/react.rs` | Drain inject queue and prepend messages before each LLM call |
+| `src/strategy/code.rs` | Same as react.rs |
+| `src/slack.rs` | Route mid-run messages to `inject()` instead of rejecting |
 | `src/teams.rs` | Same as slack |
 | `src/telegram.rs` | Same as slack |
 | `src/config.rs` | Add `max_queued_messages` to execution config |
@@ -142,15 +155,15 @@ files and handling edge cases (queue drain on timeout, queue visibility in `/ses
 
 ### Fit Analysis
 
-`GhostConfig` already has a `tool_allowlist` field per spark. As the MCP registry grows,
+`GhostConfig` already has a `tools` field per spark. As the MCP registry grows,
 copying the same list across multiple ghost configs becomes error-prone. Named profiles let
 operators define a list once and reference it by name, without changing any runtime behavior —
-profiles resolve to the existing allowlist at startup.
+profiles resolve to the existing `tools` list at startup.
 
 ### Key Design Decisions
 
 - New `[tool_profiles]` config section: a map of `profile_name → Vec<String>` (tool names).
-- `GhostConfig.tool_allowlist` accepts either an inline list or a `profile = "name"` reference.
+- `GhostConfig.tools` accepts either an inline list or a `profile = "name"` reference.
   Inline list takes precedence if both are present.
 - `doctor` validates: all referenced profiles exist, all tools in a profile are registered in
   the MCP registry or built-in tool set. Unknown tools emit a warning, not an error, to
@@ -163,6 +176,7 @@ profiles resolve to the existing allowlist at startup.
 | File | Change |
 |------|--------|
 | `src/config.rs` | Add `ToolProfiles` type, update `GhostConfig` to accept profile ref |
+| `src/profiles.rs` | Resolve profile references when loading ghost configs at startup |
 | `src/doctor.rs` | Validate profile existence and tool registration |
 | `config.example.toml` | Add `[tool_profiles]` section with example profiles |
 
@@ -219,7 +233,7 @@ Medium — ~3–4 days. New tool + persistence + display across frontends.
 | 1 | Middleware safety net | ~3–5 days | — |
 | 2 | Rich context injection | ~2–3 days | `ticket_intake/` |
 | 3 | Mid-run message injection | ~4–5 days | All frontends |
-| 4 | Tool curation profiles | ~1–2 days | `GhostConfig.tool_allowlist` |
+| 4 | Tool curation profiles | ~1–2 days | `GhostConfig.tools` |
 | 5 | Per-spark todo lists | ~3–4 days | `session_review`, `db` |
 
 Total estimated effort: **~13–19 days** across 5 sequential features.
