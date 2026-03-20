@@ -191,6 +191,7 @@ impl Manager {
             langfuse.clone(),
             Some(activity_log),
             middlewares,
+            config.manager.max_queued_messages,
         );
 
         // Discover host tools for direct execution fast path

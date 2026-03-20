@@ -110,6 +110,8 @@ max_steps = 15
 # max_steps = 30
 # Sensitive patterns have comprehensive defaults — uncomment to override:
 # sensitive_patterns = ["rm\\s", "sudo", "curl.*\\|.*sh", "chmod.*777"]
+# Max messages queued per session for mid-run injection (default: 5).
+# max_queued_messages = 5
 
 [manager.loop_guard]
 # Detect repeated identical tool calls and break loops early.

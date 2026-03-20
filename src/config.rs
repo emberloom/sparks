@@ -1217,6 +1217,9 @@ pub struct ManagerConfig {
     pub loop_guard: LoopGuardConfig,
     /// Directory containing dynamic tool YAML definitions (default: ~/.sparks/dynamic_tools/)
     pub dynamic_tools_path: Option<String>,
+    /// Max messages queued per session for mid-run injection. Oldest are dropped first.
+    #[serde(default = "default_max_queued_messages")]
+    pub max_queued_messages: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1392,6 +1395,9 @@ fn default_db_path() -> String {
 fn default_max_steps() -> usize {
     15
 }
+fn default_max_queued_messages() -> usize {
+    5
+}
 fn default_loop_guard_enabled() -> bool {
     true
 }
@@ -1478,6 +1484,7 @@ impl Default for ManagerConfig {
             sensitive_patterns: default_sensitive_patterns(),
             loop_guard: LoopGuardConfig::default(),
             dynamic_tools_path: None,
+            max_queued_messages: default_max_queued_messages(),
         }
     }
 }

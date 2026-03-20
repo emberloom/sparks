@@ -184,6 +184,7 @@ pub struct Executor {
     middlewares: SharedMiddlewares,
     pub inject_queue: InjectQueue,
     pub active_sessions: Arc<Mutex<HashSet<String>>>,
+    max_queued_messages: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +223,7 @@ impl Executor {
         langfuse: SharedLangfuse,
         activity_log: Option<Arc<ActivityLogStore>>,
         middlewares: SharedMiddlewares,
+        max_queued_messages: usize,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
@@ -242,6 +244,7 @@ impl Executor {
             middlewares,
             inject_queue: Arc::new(Mutex::new(HashMap::new())),
             active_sessions: Arc::new(Mutex::new(HashSet::new())),
+            max_queued_messages,
         }
     }
 
@@ -293,7 +296,7 @@ impl Executor {
         ExecutorInjectHandle {
             queue: self.inject_queue.clone(),
             active: self.active_sessions.clone(),
-            max_queued: 10, // hard-coded for now; Task 5 makes this configurable
+            max_queued: self.max_queued_messages,
         }
     }
 
@@ -832,6 +835,12 @@ mod tests {
 #[cfg(test)]
 mod inject_tests {
     use super::*;
+
+    #[test]
+    fn manager_config_default_max_queued() {
+        let cfg: crate::config::ManagerConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.max_queued_messages, 5);
+    }
 
     #[test]
     fn inject_queue_push_and_drain() {
