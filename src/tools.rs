@@ -2066,6 +2066,7 @@ impl ToolRegistry {
         knobs: SharedKnobs,
         github_token: Option<String>,
         usage_store: Option<Arc<crate::tool_usage::ToolUsageStore>>,
+        todo_sessions: crate::todo::TodoSessions,
     ) -> Self {
         // Resolve host workspace for CLI tools (first writable mount, or ".")
         let host_workspace = ghost
@@ -2122,6 +2123,9 @@ impl ToolRegistry {
             // Add manage_tools meta-tool (available if dynamic_tools_path is configured)
             all_tools.push(Box::new(ManageToolsTool::new(path.to_path_buf())));
         }
+
+        all_tools.push(Box::new(crate::todo::TodoWriteTool { sessions: todo_sessions.clone() }));
+        all_tools.push(Box::new(crate::todo::TodoCheckTool { sessions: todo_sessions }));
 
         let tools: HashMap<String, Box<dyn Tool>> = all_tools
             .into_iter()
@@ -2485,6 +2489,10 @@ mod tests {
         ))
     }
 
+    fn test_todo_sessions() -> crate::todo::TodoSessions {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
     fn make_ghost(tools: Vec<&str>) -> GhostConfig {
         GhostConfig {
             name: "test".into(),
@@ -2535,7 +2543,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         let names = reg.tool_names();
         assert_eq!(names.len(), 11);
         assert!(reg.get("codebase_map").is_some());
@@ -2554,7 +2562,7 @@ mod tests {
             "codebase_map",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         let names = reg.tool_names();
         assert_eq!(names.len(), 6);
         assert!(reg.get("codebase_map").is_some());
@@ -2570,7 +2578,7 @@ mod tests {
     #[test]
     fn test_registry_filters_unknown_tools() {
         let ghost = make_ghost(vec!["shell", "nonexistent_tool"]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         assert_eq!(reg.tool_names().len(), 1);
         assert!(reg.get("shell").is_some());
         assert!(reg.get("nonexistent_tool").is_none());
@@ -2579,7 +2587,7 @@ mod tests {
     #[test]
     fn test_registry_empty_tools() {
         let ghost = make_ghost(vec![]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         assert_eq!(reg.tool_names().len(), 0);
     }
 
@@ -2593,6 +2601,7 @@ mod tests {
             test_knobs(),
             None,
             None,
+            test_todo_sessions(),
         );
         assert!(reg.get("mcp:linear:search_docs").is_some());
         assert!(reg
@@ -2611,6 +2620,7 @@ mod tests {
             test_knobs(),
             None,
             None,
+            test_todo_sessions(),
         );
         assert!(reg.get("mcp:linear:search_docs").is_none());
     }
@@ -2630,7 +2640,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         assert_eq!(reg.tool_names().len(), 11);
     }
 
@@ -2651,7 +2661,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         // Every registered tool name must match what the tool reports
         for name in reg.tool_names() {
             let tool = reg.get(name).unwrap();
@@ -2674,7 +2684,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         let desc = reg.descriptions();
         assert!(!desc.is_empty());
         // Each tool should have a description line
@@ -2708,7 +2718,7 @@ mod tests {
             "lint",
             "diff",
         ]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
 
         // No tools require confirmation (Docker sandbox is the safety boundary)
         assert!(!reg.get("file_write").unwrap().needs_confirmation());
@@ -2731,7 +2741,7 @@ mod tests {
     #[test]
     fn test_coding_cli_schemas_require_prompt() {
         let ghost = make_ghost(vec!["claude_code", "codex", "opencode"]);
-        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None);
+        let reg = ToolRegistry::for_ghost(&ghost, None, None, test_knobs(), None, None, test_todo_sessions());
         let schemas = reg.tool_schemas();
 
         for name in ["claude_code", "codex", "opencode"] {

@@ -368,6 +368,7 @@ impl Executor {
                     self.knobs.clone(),
                     self.github_token.clone(),
                     Some(self.usage_store.clone()),
+                    self.todo_sessions.clone(),
                 );
                 let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
@@ -716,8 +717,6 @@ impl Executor {
 
 #[cfg(test)]
 mod todo_executor_tests {
-    use super::*;
-
     #[test]
     fn executor_todo_write_and_render() {
         use crate::todo::TodoList;
