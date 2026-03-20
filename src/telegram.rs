@@ -1970,19 +1970,34 @@ async fn dispatch_to_core_with_followup(
     tracing::debug!(msg_id = %status_msg.id, "Status message sent");
 
     tracing::debug!("Sending to core via handle.chat()");
-    let events = match state.handle.chat(session, &text, confirmer).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "handle.chat() failed");
-            let _ = bot
-                .edit_message_text(
-                    chat_id,
-                    status_msg.id,
-                    "<i>An error occurred while processing your request.</i>",
-                )
-                .parse_mode(ParseMode::Html)
-                .await;
-            return Ok(());
+    let session_key = session.session_key();
+    let events = if state.handle.is_session_active(&session_key) {
+        state.handle.inject(&session_key, text.clone());
+        tracing::debug!(session_key = %session_key, "Mid-run message injected into active session");
+        let _ = bot
+            .edit_message_text(
+                chat_id,
+                status_msg.id,
+                "<i>Your message has been noted and will be picked up in the next step.</i>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await;
+        return Ok(());
+    } else {
+        match state.handle.chat(session, &text, confirmer).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(error = %e, "handle.chat() failed");
+                let _ = bot
+                    .edit_message_text(
+                        chat_id,
+                        status_msg.id,
+                        "<i>An error occurred while processing your request.</i>",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await;
+                return Ok(());
+            }
         }
     };
 

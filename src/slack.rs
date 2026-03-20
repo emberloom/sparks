@@ -841,20 +841,36 @@ async fn dispatch_to_core_with_followup(
         .map_err(|e| format!("Failed to send status: {}", e))?;
     let status_ts = status_resp.ts;
 
-    let events = match state.handle.chat(session_ctx, &text, confirmer).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "Core dispatch failed");
-            let content = SlackMessageContent::new()
-                .with_text("_An internal error occurred._".to_string());
-            let _ = api_session
-                .chat_update(&SlackApiChatUpdateRequest::new(
-                    channel.clone(),
-                    content,
-                    status_ts,
-                ))
-                .await;
-            return Ok(());
+    let session_key = session_ctx.session_key();
+    let events = if state.handle.is_session_active(&session_key) {
+        state.handle.inject(&session_key, text.clone());
+        tracing::debug!(session_key = %session_key, "Mid-run message injected into active session");
+        let content = SlackMessageContent::new()
+            .with_text("_Your message has been noted and will be picked up in the next step._".to_string());
+        let _ = api_session
+            .chat_update(&SlackApiChatUpdateRequest::new(
+                channel.clone(),
+                content,
+                status_ts,
+            ))
+            .await;
+        return Ok(());
+    } else {
+        match state.handle.chat(session_ctx, &text, confirmer).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(error = %e, "Core dispatch failed");
+                let content = SlackMessageContent::new()
+                    .with_text("_An internal error occurred._".to_string());
+                let _ = api_session
+                    .chat_update(&SlackApiChatUpdateRequest::new(
+                        channel.clone(),
+                        content,
+                        status_ts,
+                    ))
+                    .await;
+                return Ok(());
+            }
         }
     };
 
