@@ -15,6 +15,7 @@ use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
 use crate::mcp::McpRegistry;
+use crate::middleware::{SharedMiddlewares, SparkOutcome};
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
@@ -145,6 +146,7 @@ pub struct Executor {
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
     activity_log: Option<Arc<ActivityLogStore>>,
+    middlewares: SharedMiddlewares,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +184,7 @@ impl Executor {
         observer: ObserverHandle,
         langfuse: SharedLangfuse,
         activity_log: Option<Arc<ActivityLogStore>>,
+        middlewares: SharedMiddlewares,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
@@ -199,6 +202,7 @@ impl Executor {
             loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
             activity_log,
+            middlewares,
         }
     }
 
@@ -225,6 +229,25 @@ impl Executor {
 
     fn current_activity_context() -> Option<ActivityContext> {
         ACTIVITY_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+    }
+
+    /// Call all registered middlewares before an LLM invocation.
+    pub async fn invoke_before_model_call(&self, session_id: &str, ghost: &str) {
+        for mw in &self.middlewares {
+            mw.before_model_call(session_id, ghost).await;
+        }
+    }
+
+    /// Call all registered middlewares after a spark completes (success or failure).
+    pub async fn invoke_after_spark_complete(
+        &self,
+        session_id: &str,
+        ghost: &str,
+        outcome: &SparkOutcome,
+    ) {
+        for mw in &self.middlewares {
+            mw.after_spark_complete(session_id, ghost, outcome).await;
+        }
     }
 
     /// Run a task contract using the specified ghost
@@ -305,6 +328,7 @@ impl Executor {
                 }
 
                 // Run the strategy loop
+                let session_id = session.session_id().to_string();
                 let result = strategy
                     .run(
                         contract,
@@ -321,6 +345,12 @@ impl Executor {
 
                 // Always clean up the container
                 self.close_session(session).await;
+
+                let spark_outcome = match &result {
+                    Ok(o) => SparkOutcome::Success(o.clone()),
+                    Err(e) => SparkOutcome::Failure(e.to_string()),
+                };
+                self.invoke_after_spark_complete(&session_id, &ghost.name, &spark_outcome).await;
 
                 match result {
                     Ok(output) => {
@@ -598,6 +628,56 @@ impl Executor {
         }
 
         output
+    }
+}
+
+#[cfg(test)]
+mod middleware_tests {
+    use super::*;
+    use crate::middleware::{SharedMiddlewares, SparkMiddleware, SparkOutcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Spy {
+        before: Arc<AtomicUsize>,
+        after: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SparkMiddleware for Spy {
+        async fn before_model_call(&self, _s: &str, _g: &str) {
+            self.before.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn after_spark_complete(&self, _s: &str, _g: &str, _o: &SparkOutcome) {
+            self.after.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_helpers_call_all_middlewares() {
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+        let mws: SharedMiddlewares = vec![
+            Arc::new(Spy { before: before.clone(), after: after.clone() }),
+            Arc::new(Spy { before: before.clone(), after: after.clone() }),
+        ];
+
+        struct MiddlewareRunner(SharedMiddlewares);
+        impl MiddlewareRunner {
+            async fn before(&self, s: &str, g: &str) {
+                for mw in &self.0 { mw.before_model_call(s, g).await; }
+            }
+            async fn after(&self, s: &str, g: &str, o: &SparkOutcome) {
+                for mw in &self.0 { mw.after_spark_complete(s, g, o).await; }
+            }
+        }
+
+        let runner = MiddlewareRunner(mws);
+        runner.before("sess", "coder").await;
+        runner.before("sess", "coder").await;
+        runner.after("sess", "coder", &SparkOutcome::Success("ok".into())).await;
+
+        assert_eq!(before.load(Ordering::SeqCst), 4); // 2 calls × 2 middlewares
+        assert_eq!(after.load(Ordering::SeqCst), 2);  // 1 call × 2 middlewares
     }
 }
 

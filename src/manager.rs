@@ -182,6 +182,7 @@ impl Manager {
             observer.clone(),
             langfuse.clone(),
             Some(activity_log),
+            vec![],
         );
 
         // Discover host tools for direct execution fast path
