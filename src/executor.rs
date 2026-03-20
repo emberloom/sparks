@@ -42,6 +42,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::{DockerConfig, GhostConfig, LoopGuardConfig};
+use crate::todo::TodoSessions;
 use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
@@ -185,14 +186,15 @@ pub struct Executor {
     pub inject_queue: InjectQueue,
     pub active_sessions: Arc<Mutex<HashSet<String>>>,
     max_queued_messages: usize,
+    pub todo_sessions: TodoSessions,
 }
 
 #[derive(Debug, Clone)]
-struct ActivityContext {
-    ghost: String,
-    session_key: String,
+pub(crate) struct ActivityContext {
+    pub(crate) ghost: String,
+    pub(crate) session_key: String,
     /// Row id of the parent task_start entry for execution tree linking.
-    parent_id: Option<i64>,
+    pub(crate) parent_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +247,7 @@ impl Executor {
             inject_queue: Arc::new(Mutex::new(HashMap::new())),
             active_sessions: Arc::new(Mutex::new(HashSet::new())),
             max_queued_messages,
+            todo_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -269,7 +272,7 @@ impl Executor {
         ACTIVITY_BASE.try_with(|base| base.clone()).ok()
     }
 
-    fn current_activity_context() -> Option<ActivityContext> {
+    pub(crate) fn current_activity_context() -> Option<ActivityContext> {
         ACTIVITY_CONTEXT.try_with(|ctx| ctx.clone()).ok()
     }
 
@@ -298,6 +301,26 @@ impl Executor {
             active: self.active_sessions.clone(),
             max_queued: self.max_queued_messages,
         }
+    }
+
+    pub fn todo_write(&self, session_id: &str, items: Vec<String>) {
+        let mut sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.entry(session_id.to_string()).or_default().write(items);
+    }
+
+    pub fn todo_check(&self, session_id: &str, index: usize) -> crate::error::Result<()> {
+        let mut sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.entry(session_id.to_string()).or_default().check(index)
+    }
+
+    pub fn todo_render(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.render_progress()).unwrap_or_default()
+    }
+
+    pub fn todo_json(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.to_json()).unwrap_or_else(|| "[]".to_string())
     }
 
     /// Run a task contract using the specified ghost
@@ -438,6 +461,7 @@ impl Executor {
 
     async fn close_session(&self, session: DockerSession) {
         self.loop_guard.clear_session(session.session_id());
+        self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner()).remove(session.session_id());
         if let Err(e) = session.close().await {
             tracing::warn!("Failed to close container: {}", e);
         }
@@ -687,6 +711,19 @@ impl Executor {
         }
 
         output
+    }
+}
+
+#[cfg(test)]
+mod todo_executor_tests {
+    use super::*;
+
+    #[test]
+    fn executor_todo_write_and_render() {
+        use crate::todo::TodoList;
+        let mut list = TodoList::new();
+        list.write(vec!["step a".into()]);
+        assert!(!list.render_progress().is_empty());
     }
 }
 
