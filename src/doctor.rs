@@ -2023,6 +2023,84 @@ pub async fn run_funnel_health(config: &Config, skip_llm: bool) -> anyhow::Resul
     Ok(overall)
 }
 
+/// Validate tool profile references and tool registration.
+/// Returns a list of warning strings (not errors — startup continues).
+pub fn validate_tool_profiles(
+    profiles: &crate::config::ToolProfiles,
+    referenced_profiles: &[String],
+    registered_tools: &[String],
+) -> Vec<String> {
+    let registered: std::collections::HashSet<_> = registered_tools.iter().collect();
+    let mut issues = Vec::new();
+
+    for profile_ref in referenced_profiles {
+        if !profiles.contains_key(profile_ref) {
+            issues.push(format!(
+                "Ghost references unknown tool profile '{}' — check [tool_profiles] in config",
+                profile_ref
+            ));
+        }
+    }
+
+    for (profile_name, tools) in profiles {
+        for tool in tools {
+            if !registered.contains(tool) {
+                issues.push(format!(
+                    "Tool profile '{}' references unregistered tool '{}' — may be an MCP tool not yet connected",
+                    profile_name, tool
+                ));
+            }
+        }
+    }
+
+    issues
+}
+
+#[cfg(test)]
+mod profile_validation_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn validate_profiles_finds_missing_profile_reference() {
+        let mut profiles: crate::config::ToolProfiles = HashMap::new();
+        profiles.insert("researcher".to_string(), vec!["web_search".to_string()]);
+
+        let issues = validate_tool_profiles(
+            &profiles,
+            &["nonexistent_profile".to_string()], // ghost references this
+            &["web_search".to_string()],           // registered tools
+        );
+        assert!(issues.iter().any(|i| i.contains("nonexistent_profile")));
+    }
+
+    #[test]
+    fn validate_profiles_finds_unregistered_tool_in_profile() {
+        let mut profiles: crate::config::ToolProfiles = HashMap::new();
+        profiles.insert("test".to_string(), vec!["phantom_tool".to_string()]);
+
+        let issues = validate_tool_profiles(
+            &profiles,
+            &["test".to_string()],
+            &["web_search".to_string()], // phantom_tool not registered
+        );
+        assert!(issues.iter().any(|i| i.contains("phantom_tool")));
+    }
+
+    #[test]
+    fn validate_profiles_no_issues_when_valid() {
+        let mut profiles: crate::config::ToolProfiles = HashMap::new();
+        profiles.insert("researcher".to_string(), vec!["web_search".to_string()]);
+
+        let issues = validate_tool_profiles(
+            &profiles,
+            &["researcher".to_string()],
+            &["web_search".to_string()],
+        );
+        assert!(issues.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

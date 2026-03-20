@@ -983,6 +983,20 @@ async fn main() -> anyhow::Result<()> {
             security,
             json,
         }) => {
+            let profile_refs: Vec<String> = config
+                .ghosts
+                .iter()
+                .filter_map(|g| g.profile.clone())
+                .collect();
+            // Use empty slice for registered_tools if not readily available
+            let registered_tools: Vec<String> = vec![];
+            for issue in doctor::validate_tool_profiles(
+                &config.tool_profiles,
+                &profile_refs,
+                &registered_tools,
+            ) {
+                tracing::warn!("[doctor] {}", issue);
+            }
             let overall = if security {
                 doctor::run_security_attestation(&config, json).await?
             } else {
