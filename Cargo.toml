@@ -39,7 +39,7 @@ teloxide = { version = "0.13", features = ["macros"], optional = true }
 ort = "2.0.0-rc.11"
 tokenizers = "0.21"
 ndarray = "0.17"
-rand = "0.8"
+rand = "0.10"
 hex = "0.4"
 sha2 = "0.10"
 url = "2"
