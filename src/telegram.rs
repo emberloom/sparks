@@ -1011,7 +1011,7 @@ async fn command_session(
         })
         .unwrap_or_else(|| "none".to_string());
 
-    let html = format!(
+    let mut html = format!(
         "<b>Session</b>\n\n         <b>Key:</b> <code>{}</code>\n         <b>Model:</b> <code>{}</code>\n         <b>Turns:</b> <code>{}</code>\n         <b>Est. tokens:</b> <code>~{}</code>\n         <b>Context:</b> <code>{:.0}%</code> of <code>{}</code>\n         <b>Last message:</b>\n<i>{}</i>",
         escape_html(&session_key),
         escape_html(&current_model),
@@ -1021,6 +1021,11 @@ async fn command_session(
         format_tokens(context_window),
         escape_html(&last_preview),
     );
+    let todos = state.handle.session_todos(&session_key);
+    if !todos.is_empty() {
+        html.push_str("\n\n<b>Todo List:</b>\n");
+        html.push_str(&format!("<pre>{}</pre>", escape_html(&todos)));
+    }
     send_html(bot, chat_id, &html).await
 }
 
@@ -1970,19 +1975,34 @@ async fn dispatch_to_core_with_followup(
     tracing::debug!(msg_id = %status_msg.id, "Status message sent");
 
     tracing::debug!("Sending to core via handle.chat()");
-    let events = match state.handle.chat(session, &text, confirmer).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "handle.chat() failed");
-            let _ = bot
-                .edit_message_text(
-                    chat_id,
-                    status_msg.id,
-                    "<i>An error occurred while processing your request.</i>",
-                )
-                .parse_mode(ParseMode::Html)
-                .await;
-            return Ok(());
+    let session_key = session.session_key();
+    let events = if state.handle.is_session_active(&session_key) {
+        state.handle.inject(&session_key, text.clone());
+        tracing::debug!(session_key = %session_key, "Mid-run message injected into active session");
+        let _ = bot
+            .edit_message_text(
+                chat_id,
+                status_msg.id,
+                "<i>Your message has been noted and will be picked up in the next step.</i>",
+            )
+            .parse_mode(ParseMode::Html)
+            .await;
+        return Ok(());
+    } else {
+        match state.handle.chat(session, &text, confirmer).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(error = %e, "handle.chat() failed");
+                let _ = bot
+                    .edit_message_text(
+                        chat_id,
+                        status_msg.id,
+                        "<i>An error occurred while processing your request.</i>",
+                    )
+                    .parse_mode(ParseMode::Html)
+                    .await;
+                return Ok(());
+            }
         }
     };
 

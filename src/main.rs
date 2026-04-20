@@ -23,6 +23,7 @@ mod langfuse;
 mod llm;
 mod manager;
 mod mcp;
+mod middleware;
 mod memory;
 mod mood;
 mod observer;
@@ -48,6 +49,7 @@ mod slack;
 #[cfg(feature = "teams")]
 mod teams;
 mod ticket_intake;
+mod todo;
 mod tool_usage;
 mod tools;
 
@@ -982,6 +984,20 @@ async fn main() -> anyhow::Result<()> {
             security,
             json,
         }) => {
+            let profile_refs: Vec<String> = config
+                .ghosts
+                .iter()
+                .filter_map(|g| g.profile.clone())
+                .collect();
+            // Use empty slice for registered_tools if not readily available
+            let registered_tools: Vec<String> = vec![];
+            for issue in doctor::validate_tool_profiles(
+                &config.tool_profiles,
+                &profile_refs,
+                &registered_tools,
+            ) {
+                tracing::warn!("[doctor] {}", issue);
+            }
             let overall = if security {
                 doctor::run_security_attestation(&config, json).await?
             } else {
@@ -7844,6 +7860,7 @@ mod tests {
                 soul: None,
                 skill: None,
                 image: None,
+                profile: None,
             },
             crate::config::GhostConfig {
                 name: "architect".to_string(),
@@ -7858,6 +7875,7 @@ mod tests {
                 soul: None,
                 skill: None,
                 image: None,
+                profile: None,
             },
         ];
         let selected = select_self_build_dispatch_ghost(&config).unwrap();

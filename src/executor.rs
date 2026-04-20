@@ -1,12 +1,53 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+
+pub type InjectQueue = Arc<Mutex<HashMap<String, VecDeque<String>>>>;
+
+pub fn drain_inject_queue(queue: &InjectQueue, session_id: &str) -> Vec<String> {
+    let mut q = match queue.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    q.get_mut(session_id)
+        .map(|vq| vq.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Thin handle to the executor's inject capability — safe to clone onto CoreHandle.
+#[derive(Clone)]
+pub struct ExecutorInjectHandle {
+    queue: InjectQueue,
+    active: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    max_queued: usize,
+    todo_sessions: crate::todo::TodoSessions,
+}
+
+impl ExecutorInjectHandle {
+    pub fn inject_message(&self, session_id: &str, message: String) -> bool {
+        let is_active = self.active.lock().unwrap_or_else(|p| p.into_inner()).contains(session_id);
+        if !is_active { return false; }
+        let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let vq = q.entry(session_id.to_string()).or_default();
+        vq.push_back(message);
+        while vq.len() > self.max_queued { vq.pop_front(); }
+        true
+    }
+    pub fn is_active(&self, session_id: &str) -> bool {
+        self.active.lock().unwrap_or_else(|p| p.into_inner()).contains(session_id)
+    }
+    pub fn todo_render(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.render_progress()).unwrap_or_default()
+    }
+}
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::{DockerConfig, GhostConfig, LoopGuardConfig};
+use crate::todo::TodoSessions;
 use crate::confirm::{Confirmer, SensitivePatterns};
 use crate::core::CoreEvent;
 use crate::docker::DockerSession;
@@ -15,6 +56,7 @@ use crate::knobs::SharedKnobs;
 use crate::langfuse::{ActiveTrace, SharedLangfuse};
 use crate::llm::LlmProvider;
 use crate::mcp::McpRegistry;
+use crate::middleware::{SharedMiddlewares, SparkOutcome};
 use crate::observer::{ObserverCategory, ObserverHandle};
 use crate::reason_codes::{self, REASON_LOOP_GUARD_TRIGGERED};
 use crate::self_heal;
@@ -145,14 +187,19 @@ pub struct Executor {
     #[allow(dead_code, reason = "retained for serde/db compatibility")]
     langfuse: SharedLangfuse,
     activity_log: Option<Arc<ActivityLogStore>>,
+    middlewares: SharedMiddlewares,
+    pub(crate) inject_queue: InjectQueue,
+    pub(crate) active_sessions: Arc<Mutex<HashSet<String>>>,
+    max_queued_messages: usize,
+    pub(crate) todo_sessions: TodoSessions,
 }
 
 #[derive(Debug, Clone)]
-struct ActivityContext {
-    ghost: String,
-    session_key: String,
+pub(crate) struct ActivityContext {
+    pub(crate) ghost: String,
+    pub(crate) session_key: String,
     /// Row id of the parent task_start entry for execution tree linking.
-    parent_id: Option<i64>,
+    pub(crate) parent_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +229,8 @@ impl Executor {
         observer: ObserverHandle,
         langfuse: SharedLangfuse,
         activity_log: Option<Arc<ActivityLogStore>>,
+        middlewares: SharedMiddlewares,
+        max_queued_messages: usize,
     ) -> Self {
         let compiled = SensitivePatterns::new(&sensitive_patterns);
         Self {
@@ -199,6 +248,11 @@ impl Executor {
             loop_guard: ToolLoopGuard::new(&loop_guard_config),
             langfuse,
             activity_log,
+            middlewares,
+            inject_queue: Arc::new(Mutex::new(HashMap::new())),
+            active_sessions: Arc::new(Mutex::new(HashSet::new())),
+            max_queued_messages,
+            todo_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -223,8 +277,56 @@ impl Executor {
         ACTIVITY_BASE.try_with(|base| base.clone()).ok()
     }
 
-    fn current_activity_context() -> Option<ActivityContext> {
+    pub(crate) fn current_activity_context() -> Option<ActivityContext> {
         ACTIVITY_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+    }
+
+    /// Call all registered middlewares before an LLM invocation.
+    pub async fn invoke_before_model_call(&self, session_id: &str, ghost: &str) {
+        for mw in &self.middlewares {
+            mw.before_model_call(session_id, ghost).await;
+        }
+    }
+
+    /// Call all registered middlewares after a spark completes (success or failure).
+    pub async fn invoke_after_spark_complete(
+        &self,
+        session_id: &str,
+        ghost: &str,
+        outcome: &SparkOutcome,
+    ) {
+        for mw in &self.middlewares {
+            mw.after_spark_complete(session_id, ghost, outcome).await;
+        }
+    }
+
+    pub fn inject_handle(&self) -> ExecutorInjectHandle {
+        ExecutorInjectHandle {
+            queue: self.inject_queue.clone(),
+            active: self.active_sessions.clone(),
+            max_queued: self.max_queued_messages,
+            todo_sessions: self.todo_sessions.clone(),
+        }
+    }
+
+    pub fn todo_write(&self, session_id: &str, items: Vec<String>) {
+        let mut sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.entry(session_id.to_string()).or_default().write(items);
+    }
+
+    pub fn todo_check(&self, session_id: &str, index: usize) -> crate::error::Result<()> {
+        let mut sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.entry(session_id.to_string()).or_default().check(index)
+    }
+
+    pub fn todo_render(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.render_progress()).unwrap_or_default()
+    }
+
+    pub fn todo_json(&self, session_id: &str) -> String {
+        let sessions = self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner());
+        sessions.get(session_id).map(|l| l.to_json()).unwrap_or_else(|| "[]".to_string())
     }
 
     /// Run a task contract using the specified ghost
@@ -272,6 +374,7 @@ impl Executor {
                     self.knobs.clone(),
                     self.github_token.clone(),
                     Some(self.usage_store.clone()),
+                    self.todo_sessions.clone(),
                 );
                 let strategy = strategy::strategy_from_config(&ghost.strategy)?;
 
@@ -305,6 +408,11 @@ impl Executor {
                 }
 
                 // Run the strategy loop
+                let session_id = session.session_id().to_string();
+                {
+                    let mut active = self.active_sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    active.insert(session_id.clone());
+                }
                 let result = strategy
                     .run(
                         contract,
@@ -321,6 +429,17 @@ impl Executor {
 
                 // Always clean up the container
                 self.close_session(session).await;
+                {
+                    let mut active = self.active_sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    active.remove(&session_id);
+                    self.inject_queue.lock().unwrap_or_else(|p| p.into_inner()).remove(&session_id);
+                }
+
+                let spark_outcome = match &result {
+                    Ok(o) => SparkOutcome::Success(o.clone()),
+                    Err(e) => SparkOutcome::Failure(e.to_string()),
+                };
+                self.invoke_after_spark_complete(&session_id, &ghost.name, &spark_outcome).await;
 
                 match result {
                     Ok(output) => {
@@ -349,6 +468,22 @@ impl Executor {
 
     async fn close_session(&self, session: DockerSession) {
         self.loop_guard.clear_session(session.session_id());
+        let todos_json = self.todo_json(session.session_id());
+        if todos_json != "[]" {
+            let session_key = Self::current_activity_context()
+                .map(|c| c.session_key.clone())
+                .unwrap_or_else(|| session.session_id().to_string());
+            let ghost_name = Self::current_activity_context()
+                .map(|c| c.ghost.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::info!(
+                session_key = %session_key,
+                ghost = %ghost_name,
+                items = %todos_json,
+                "spark_todos persisted"
+            );
+        }
+        self.todo_sessions.lock().unwrap_or_else(|p| p.into_inner()).remove(session.session_id());
         if let Err(e) = session.close().await {
             tracing::warn!("Failed to close container: {}", e);
         }
@@ -602,6 +737,67 @@ impl Executor {
 }
 
 #[cfg(test)]
+mod todo_executor_tests {
+    #[test]
+    fn executor_todo_write_and_render() {
+        use crate::todo::TodoList;
+        let mut list = TodoList::new();
+        list.write(vec!["step a".into()]);
+        assert!(!list.render_progress().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod middleware_tests {
+    use super::*;
+    use crate::middleware::{SharedMiddlewares, SparkMiddleware, SparkOutcome};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Spy {
+        before: Arc<AtomicUsize>,
+        after: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SparkMiddleware for Spy {
+        async fn before_model_call(&self, _s: &str, _g: &str) {
+            self.before.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn after_spark_complete(&self, _s: &str, _g: &str, _o: &SparkOutcome) {
+            self.after.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_helpers_call_all_middlewares() {
+        let before = Arc::new(AtomicUsize::new(0));
+        let after = Arc::new(AtomicUsize::new(0));
+        let mws: SharedMiddlewares = vec![
+            Arc::new(Spy { before: before.clone(), after: after.clone() }),
+            Arc::new(Spy { before: before.clone(), after: after.clone() }),
+        ];
+
+        struct MiddlewareRunner(SharedMiddlewares);
+        impl MiddlewareRunner {
+            async fn before(&self, s: &str, g: &str) {
+                for mw in &self.0 { mw.before_model_call(s, g).await; }
+            }
+            async fn after(&self, s: &str, g: &str, o: &SparkOutcome) {
+                for mw in &self.0 { mw.after_spark_complete(s, g, o).await; }
+            }
+        }
+
+        let runner = MiddlewareRunner(mws);
+        runner.before("sess", "coder").await;
+        runner.before("sess", "coder").await;
+        runner.after("sess", "coder", &SparkOutcome::Success("ok".into())).await;
+
+        assert_eq!(before.load(Ordering::SeqCst), 4); // 2 calls × 2 middlewares
+        assert_eq!(after.load(Ordering::SeqCst), 2);  // 1 call × 2 middlewares
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::ToolLoopGuard;
     use crate::config::LoopGuardConfig;
@@ -690,5 +886,36 @@ mod tests {
         assert!(guard
             .observe("session-e", "shell", &json!({ "command": "cargo check" }))
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod inject_tests {
+    use super::*;
+
+    #[test]
+    fn manager_config_default_max_queued() {
+        let cfg: crate::config::ManagerConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.max_queued_messages, 5);
+    }
+
+    #[test]
+    fn inject_queue_push_and_drain() {
+        let queue: InjectQueue = Arc::new(Mutex::new(HashMap::new()));
+        let session = "sess:user:chat";
+
+        // Push a message
+        {
+            let mut q = queue.lock().unwrap();
+            q.entry(session.to_string()).or_default().push_back("hello".to_string());
+        }
+
+        // Drain it
+        let msgs = drain_inject_queue(&queue, session);
+        assert_eq!(msgs, vec!["hello".to_string()]);
+
+        // Queue should be empty now
+        let msgs2 = drain_inject_queue(&queue, session);
+        assert!(msgs2.is_empty());
     }
 }

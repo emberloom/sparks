@@ -620,6 +620,7 @@ mod tests {
             soul: None,
             skill: None,
             image: None,
+            profile: None,
         }
     }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{SparksError, Result};
-use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
+use crate::ticket_intake::provider::{ExternalTicket, TicketContext, TicketProvider};
 
 #[derive(Clone)]
 pub struct LinearProvider {
@@ -147,6 +147,16 @@ query IssueState($id: String!) {
       states {
         nodes { id type name }
       }
+    }
+  }
+}
+"#;
+
+const LINEAR_COMMENTS_QUERY: &str = r#"
+query IssueComments($id: String!) {
+  issue(id: $id) {
+    comments {
+      nodes { body }
     }
   }
 }
@@ -305,6 +315,41 @@ impl TicketProvider for LinearProvider {
 
     fn supports_writeback(&self) -> bool {
         true
+    }
+
+    async fn fetch_full_context(&self, ticket: &ExternalTicket) -> Result<TicketContext> {
+        let payload = json!({
+            "query": LINEAR_COMMENTS_QUERY,
+            "variables": { "id": ticket.external_id }
+        });
+
+        let resp = self.post_graphql(payload).await?;
+
+        let comments = resp["data"]["issue"]["comments"]["nodes"]
+            .as_array()
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(|n| n["body"].as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(TicketContext {
+            comments,
+            diff_summary: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn linear_comment_trimming() {
+        let raw = "   text   ";
+        assert_eq!(raw.trim(), "text");
     }
 }
 

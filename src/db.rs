@@ -173,7 +173,25 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled
         ON review_alert_rules(enabled);",
+    // v18: spark todo lists — per-session task tracking
+    "CREATE TABLE IF NOT EXISTS spark_todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    ghost TEXT NOT NULL,
+    items_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_spark_todos_session ON spark_todos(session_key, created_at);",
 ];
+
+pub fn save_spark_todos(conn: &rusqlite::Connection, session_key: &str, ghost: &str, items_json: &str) -> crate::error::Result<()> {
+    conn.execute(
+        "INSERT INTO spark_todos (session_key, ghost, items_json) VALUES (?1, ?2, ?3)",
+        rusqlite::params![session_key, ghost, items_json],
+    ).map_err(crate::error::SparksError::Db)?;
+    Ok(())
+}
 
 pub fn init_db(path: &Path) -> Result<Connection> {
     // Ensure parent directory exists
@@ -202,7 +220,7 @@ fn current_version(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // First, ensure at least the base tables exist so we can query schema_version.
     // If this is a fresh DB, run migration 0 unconditionally.
     let has_schema_table: bool = conn
@@ -254,4 +272,20 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod todo_migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn spark_todos_table_created_by_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // If the table exists this won't error
+        conn.execute_batch(
+            "INSERT INTO spark_todos (session_key, ghost, items_json) VALUES ('s', 'g', '[]')"
+        ).unwrap();
+    }
 }

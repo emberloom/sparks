@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// Named tool lists — map of profile_name → Vec<tool_name>.
+pub type ToolProfiles = std::collections::HashMap<String, Vec<String>>;
+
 use crate::error::{SparksError, Result};
 use crate::llm::{
     LlmProvider, OllamaClient, OpenAiClient, OpenAiCompatibleClient, OpenAiCompatibleConfig,
@@ -75,6 +78,10 @@ pub struct Config {
     pub snapshot: SnapshotConfig,
     #[serde(default)]
     pub leaderboard: LeaderboardConfig,
+    #[serde(default)]
+    pub middleware: MiddlewareConfig,
+    #[serde(default)]
+    pub tool_profiles: ToolProfiles,
     #[serde(skip)]
     inline_secret_labels: Vec<String>,
 }
@@ -1040,6 +1047,12 @@ pub struct TicketIntakeConfig {
     pub webhook: TicketIntakeWebhookConfig,
     #[serde(default)]
     pub ci_autopilot: TicketIntakeCiAutopilotConfig,
+    /// Fetch full issue context (comments, PR diff) and inject into task context.
+    #[serde(default)]
+    pub inject_full_context: bool,
+    /// Char cap for injected rich context block (default: 4000).
+    #[serde(default = "default_rich_context_char_cap")]
+    pub rich_context_char_cap: usize,
 }
 
 impl Default for TicketIntakeConfig {
@@ -1051,12 +1064,18 @@ impl Default for TicketIntakeConfig {
             sources: Vec::new(),
             webhook: TicketIntakeWebhookConfig::default(),
             ci_autopilot: TicketIntakeCiAutopilotConfig::default(),
+            inject_full_context: false,
+            rich_context_char_cap: default_rich_context_char_cap(),
         }
     }
 }
 
 fn default_ticket_intake_interval() -> u64 {
     300
+}
+
+fn default_rich_context_char_cap() -> usize {
+    4_000
 }
 
 fn default_ticket_ci_autopilot_enabled() -> bool {
@@ -1203,6 +1222,9 @@ pub struct ManagerConfig {
     pub loop_guard: LoopGuardConfig,
     /// Directory containing dynamic tool YAML definitions (default: ~/.sparks/dynamic_tools/)
     pub dynamic_tools_path: Option<String>,
+    /// Max messages queued per session for mid-run injection. Oldest are dropped first.
+    #[serde(default = "default_max_queued_messages")]
+    pub max_queued_messages: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1294,6 +1316,11 @@ pub struct GhostConfig {
     pub skill: Option<String>,
     /// Docker image override (uses global docker.image if None)
     pub image: Option<String>,
+    /// Optional named tool profile. Resolved at startup by `profiles.rs`.
+    /// If set, the profile's tool list is merged into `tools` (profile tools appended
+    /// for any tool not already in `tools`; inline `tools` list takes precedence).
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -1377,6 +1404,9 @@ fn default_db_path() -> String {
 }
 fn default_max_steps() -> usize {
     15
+}
+fn default_max_queued_messages() -> usize {
+    5
 }
 fn default_loop_guard_enabled() -> bool {
     true
@@ -1464,6 +1494,7 @@ impl Default for ManagerConfig {
             sensitive_patterns: default_sensitive_patterns(),
             loop_guard: LoopGuardConfig::default(),
             dynamic_tools_path: None,
+            max_queued_messages: default_max_queued_messages(),
         }
     }
 }
@@ -1544,6 +1575,27 @@ impl Default for LeaderboardConfig {
     }
 }
 
+// ── Middleware config ──────────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MiddlewareConfig {
+    /// Enable the activity-log flush safety net (default: true)
+    #[serde(default = "default_true")]
+    pub activity_log_flush: bool,
+}
+
+impl Default for MiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            activity_log_flush: default_true(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1578,6 +1630,8 @@ impl Default for Config {
             sonarqube: SonarqubeConfig::default(),
             snapshot: SnapshotConfig::default(),
             leaderboard: LeaderboardConfig::default(),
+            middleware: MiddlewareConfig::default(),
+            tool_profiles: ToolProfiles::default(),
             inline_secret_labels: Vec::new(),
         }
     }
@@ -1603,6 +1657,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             soul: None,
             skill: None,
             image: None,
+            profile: None,
         },
         GhostConfig {
             name: "scout".into(),
@@ -1622,6 +1677,7 @@ fn default_ghosts() -> Vec<GhostConfig> {
             soul: None,
             skill: None,
             image: None,
+            profile: None,
         },
     ]
 }
@@ -2203,13 +2259,64 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 #[cfg(test)]
+mod tool_profile_tests {
+    use super::*;
+
+    #[test]
+    fn tool_profiles_deserialize_correctly() {
+        let toml = r#"
+[tool_profiles]
+researcher = ["web_search", "file_read", "memory_search"]
+devops = ["shell", "docker", "git"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.tool_profiles.get("researcher"),
+            Some(&vec!["web_search".to_string(), "file_read".to_string(), "memory_search".to_string()])
+        );
+        assert_eq!(config.tool_profiles.get("devops").map(|v| v.len()), Some(3));
+    }
+
+    #[test]
+    fn ghost_config_profile_field_deserializes() {
+        let toml = r#"
+[[ghosts]]
+name = "researcher"
+description = "Research ghost"
+profile = "researcher"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ghosts[0].profile.as_deref(), Some("researcher"));
+    }
+
+    #[test]
+    fn tool_profiles_default_to_empty_map() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.tool_profiles.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile};
+    use super::{compose_ghost_skill_bundle, resolve_ghost_skill_paths, Config, RuntimeProfile, TicketIntakeConfig};
     use std::path::Path;
     use std::sync::Mutex;
 
     // Serialize tests that mutate env vars to prevent parallel races.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn middleware_config_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.middleware.activity_log_flush); // on by default
+    }
+
+    #[test]
+    fn ticket_intake_config_rich_context_defaults() {
+        let config: TicketIntakeConfig = toml::from_str("").unwrap();
+        assert!(!config.inject_full_context); // off by default
+        assert_eq!(config.rich_context_char_cap, 4_000);
+    }
 
     #[test]
     fn runtime_profile_name_maps_standard_to_container_strict() {

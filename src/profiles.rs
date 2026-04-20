@@ -71,6 +71,11 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
     let mut ghosts: Vec<GhostConfig> = config.ghosts.clone();
     let mut skill_cache: HashMap<String, Option<String>> = HashMap::new();
 
+    // Resolve tool profiles for config-defined ghosts
+    for ghost in &mut ghosts {
+        resolve_ghost_profile(ghost, &config.tool_profiles);
+    }
+
     if home_profile_loading_disabled() {
         tracing::info!("Home ghost profiles disabled via SPARKS_DISABLE_HOME_PROFILES");
         return Ok(ghosts);
@@ -113,8 +118,9 @@ pub fn load_ghosts(config: &Config) -> Result<Vec<GhostConfig>> {
                     profile.name,
                     path.display()
                 );
-                let ghost =
+                let mut ghost =
                     build_ghost_from_profile(profile, &config.docker.image, &mut skill_cache);
+                resolve_ghost_profile(&mut ghost, &config.tool_profiles);
 
                 // Deduplicate: profile overrides config ghost with same name
                 ghosts.retain(|g| g.name != ghost.name);
@@ -218,6 +224,35 @@ fn build_ghost_from_profile(
         soul,
         skill,
         image: normalize_profile_image(profile.image, fallback_image),
+        profile: None,
+    }
+}
+
+/// Merge a named tool profile into a ghost's `tools` list.
+/// Inline `tools` entries always take precedence over profile entries.
+/// If the profile name is not found, log a warning and leave `tools` unchanged.
+pub fn resolve_ghost_profile(ghost: &mut crate::config::GhostConfig, profiles: &crate::config::ToolProfiles) {
+    let profile_name = match ghost.profile.as_ref() {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let profile_tools = match profiles.get(&profile_name) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                ghost = %ghost.name,
+                profile = %profile_name,
+                "Ghost references unknown tool profile — ignoring"
+            );
+            return;
+        }
+    };
+    // Append profile tools not already in the inline list
+    let existing: std::collections::HashSet<_> = ghost.tools.iter().cloned().collect();
+    for tool in profile_tools {
+        if !existing.contains(tool) {
+            ghost.tools.push(tool.clone());
+        }
     }
 }
 
@@ -229,6 +264,61 @@ fn load_profile(path: &PathBuf) -> Result<GhostProfile> {
         .map_err(|e| SparksError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
 
     Ok(profile)
+}
+
+#[cfg(test)]
+mod profile_resolution_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_profiles() -> crate::config::ToolProfiles {
+        let mut p = HashMap::new();
+        p.insert("researcher".to_string(), vec!["web_search".to_string(), "memory_search".to_string()]);
+        p
+    }
+
+    fn make_ghost(tools: Vec<String>, profile: Option<&str>) -> crate::config::GhostConfig {
+        crate::config::GhostConfig {
+            name: "test".to_string(),
+            description: "test ghost".to_string(),
+            tools,
+            profile: profile.map(|s| s.to_string()),
+            mounts: vec![],
+            role: crate::config::GhostRole::Worker,
+            strategy: "react".to_string(),
+            soul_file: None,
+            skill_file: None,
+            skill_files: Vec::new(),
+            soul: None,
+            skill: None,
+            image: None,
+        }
+    }
+
+    #[test]
+    fn resolve_profile_sets_tools_when_tools_empty() {
+        let profiles = make_profiles();
+        let mut ghost = make_ghost(vec![], Some("researcher"));
+        resolve_ghost_profile(&mut ghost, &profiles);
+        assert_eq!(ghost.tools, vec!["web_search", "memory_search"]);
+    }
+
+    #[test]
+    fn resolve_profile_inline_tools_take_precedence() {
+        let profiles = make_profiles();
+        let mut ghost = make_ghost(vec!["custom_tool".to_string()], Some("researcher"));
+        resolve_ghost_profile(&mut ghost, &profiles);
+        assert!(ghost.tools.contains(&"custom_tool".to_string()));
+        assert!(ghost.tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn resolve_profile_unknown_profile_logs_warning_and_continues() {
+        let profiles = make_profiles();
+        let mut ghost = make_ghost(vec![], Some("nonexistent"));
+        resolve_ghost_profile(&mut ghost, &profiles);
+        assert!(ghost.tools.is_empty());
+    }
 }
 
 #[cfg(test)]

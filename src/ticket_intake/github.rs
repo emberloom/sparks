@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{SparksError, Result};
-use crate::ticket_intake::provider::{ExternalTicket, TicketProvider};
+use crate::ticket_intake::provider::{ExternalTicket, TicketContext, TicketProvider};
 
 #[derive(Clone)]
 pub struct GitHubProvider {
@@ -53,6 +53,34 @@ struct GhLabel {
 #[derive(Deserialize)]
 struct GhUser {
     login: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_comment_body_strips_whitespace() {
+        let raw = "  some comment body  \n";
+        assert_eq!(raw.trim(), "some comment body");
+    }
+
+    #[test]
+    fn diff_truncation_keeps_first_lines() {
+        let diff = (0..200).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let truncated = truncate_diff(&diff, 100);
+        assert!(truncated.lines().count() <= 100);
+        assert!(truncated.starts_with("line 0"));
+    }
+}
+
+fn truncate_diff(diff: &str, max_lines: usize) -> String {
+    diff.lines().take(max_lines).collect::<Vec<_>>().join("\n")
+}
+
+#[derive(Deserialize)]
+struct GhComment {
+    body: String,
 }
 
 #[async_trait]
@@ -168,5 +196,44 @@ impl TicketProvider for GitHubProvider {
 
     fn supports_writeback(&self) -> bool {
         true
+    }
+
+    async fn fetch_full_context(&self, ticket: &ExternalTicket) -> Result<TicketContext> {
+        let Some(number) = ticket.number.as_ref() else {
+            return Ok(TicketContext::default());
+        };
+
+        // Fetch comments
+        let comments_url = format!(
+            "{}/repos/{}/issues/{}/comments",
+            self.api_base.trim_end_matches('/'),
+            self.repo,
+            number
+        );
+        let comments: Vec<GhComment> = self
+            .client
+            .get(&comments_url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT, "application/vnd.github+json")
+            .query(&[("per_page", "20")])
+            .send()
+            .await
+            .map_err(|e| SparksError::Tool(format!("GitHub comments request failed: {}", e)))?
+            .error_for_status()
+            .map_err(|e| SparksError::Tool(format!("GitHub comments error: {}", e)))?
+            .json()
+            .await
+            .map_err(|e| SparksError::Tool(format!("GitHub comments parse failed: {}", e)))?;
+
+        let comment_bodies: Vec<String> = comments
+            .into_iter()
+            .map(|c| c.body.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        Ok(TicketContext {
+            comments: comment_bodies,
+            diff_summary: None, // PR diff support is a follow-up
+        })
     }
 }

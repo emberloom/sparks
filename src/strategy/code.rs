@@ -518,6 +518,16 @@ impl CodeStrategy {
         for step in 0..MAX_EXPLORE_STEPS {
             tracing::debug!(step, path = "native", "EXPLORE step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into EXPLORE history");
+                history.push(ChatMessage::User(msg));
+            }
+
             // Get response (streaming or non-streaming)
             let (text_accum, tool_calls, usage) = if use_streaming {
                 let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
@@ -637,6 +647,13 @@ impl CodeStrategy {
              {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}"
                 .to_string(),
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
+        // Drain any messages injected while this step was executing.
+        let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+        for msg in injected {
+            tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into EXPLORE history");
+            history.push(ChatMessage::User(msg));
+        }
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         if let ChatResponse::Text(text) = &response {
             if let Some(plan) = extract_plan(text) {
@@ -675,6 +692,16 @@ impl CodeStrategy {
 
         for step in 0..MAX_EXPLORE_STEPS {
             tracing::debug!(step, path = "text", "EXPLORE step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into EXPLORE history");
+                history.push(Message::user(&msg));
+            }
 
             let response = llm.chat(&history).await?;
             history.push(Message::assistant(&response));
@@ -727,6 +754,13 @@ impl CodeStrategy {
             "You've used all exploration steps. Output your plan NOW as JSON:\n\
              {\"plan\": \"...\", \"context\": \"...\", \"files\": \"...\"}",
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
+        // Drain any messages injected while this step was executing.
+        let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+        for msg in injected {
+            tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into EXPLORE history");
+            history.push(Message::user(&msg));
+        }
         let response = llm.chat(&history).await?;
         if let Some(plan) = extract_plan(&response) {
             return Ok(plan);
@@ -941,6 +975,16 @@ impl CodeStrategy {
         for step in 0..MAX_VERIFY_STEPS {
             tracing::debug!(step, path = "native", "VERIFY step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into VERIFY history");
+                history.push(ChatMessage::User(msg));
+            }
+
             // Get response (streaming or non-streaming)
             let (text_accum, tool_calls, usage) = if use_streaming {
                 let mut rx = llm.chat_with_tools_stream(&history, &schemas).await?;
@@ -1033,6 +1077,13 @@ impl CodeStrategy {
         history.push(ChatMessage::User(
             "Verification step limit reached. Provide your final summary now.".to_string(),
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
+        // Drain any messages injected while this step was executing.
+        let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+        for msg in injected {
+            tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into VERIFY history");
+            history.push(ChatMessage::User(msg));
+        }
         let (response, _) = llm.chat_with_tools(&history, &[]).await?;
         match response {
             ChatResponse::Text(text) => Ok(text),
@@ -1070,6 +1121,16 @@ impl CodeStrategy {
 
         for step in 0..MAX_VERIFY_STEPS {
             tracing::debug!(step, path = "text", "VERIFY step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "code").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into VERIFY history");
+                history.push(Message::user(&msg));
+            }
 
             let response = llm.chat(&history).await?;
             history.push(Message::assistant(&response));
@@ -1111,6 +1172,13 @@ impl CodeStrategy {
         history.push(Message::user(
             "Verification step limit reached. Provide your final summary now.",
         ));
+        executor.invoke_before_model_call(docker.session_id(), "code").await;
+        // Drain any messages injected while this step was executing.
+        let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+        for msg in injected {
+            tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into VERIFY history");
+            history.push(Message::user(&msg));
+        }
         let response = llm.chat(&history).await?;
         Ok(response)
     }

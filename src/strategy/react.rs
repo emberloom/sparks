@@ -73,6 +73,16 @@ impl ReactStrategy {
         for step in 0..max_steps {
             tracing::debug!(step, path = "native", stream = use_streaming, "ReAct step");
 
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "react").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into history");
+                history.push(ChatMessage::User(msg));
+            }
+
             let gen =
                 trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));
 
@@ -282,6 +292,16 @@ impl ReactStrategy {
 
         for step in 0..max_steps {
             tracing::debug!(step, path = "text", "ReAct step");
+
+            // Fire before_model_call middleware before every LLM invocation.
+            executor.invoke_before_model_call(docker.session_id(), "react").await;
+
+            // Drain any messages injected while this step was executing.
+            let injected = crate::executor::drain_inject_queue(&executor.inject_queue, docker.session_id());
+            for msg in injected {
+                tracing::debug!(session_id = docker.session_id(), "Injecting mid-run message into history");
+                history.push(Message::user(&msg));
+            }
 
             let gen =
                 trace.map(|t| t.generation(&format!("react_step_{}", step), model_name, None));

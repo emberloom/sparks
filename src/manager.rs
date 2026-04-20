@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, GhostConfig, GhostRole};
+use crate::middleware::{ActivityLogFlushMiddleware, SharedMiddlewares};
 use crate::confirm::Confirmer;
 use crate::context_budget::{self, ContextAssemblyMetrics};
 use crate::core::{CoreEvent, SessionContext};
@@ -167,6 +168,13 @@ impl Manager {
     ) -> Self {
         let dynamic_tools_path = config.manager.resolve_dynamic_tools_path();
         let mcp_registry = crate::mcp::McpRegistry::from_config(&config.mcp, observer.clone());
+        let middlewares: SharedMiddlewares = {
+            let mut v: SharedMiddlewares = vec![];
+            if config.middleware.activity_log_flush {
+                v.push(Arc::new(ActivityLogFlushMiddleware));
+            }
+            v
+        };
         let executor = Executor::new(
             config.docker.clone(),
             config.self_dev_trusted_enabled(),
@@ -182,6 +190,8 @@ impl Manager {
             observer.clone(),
             langfuse.clone(),
             Some(activity_log),
+            middlewares,
+            config.manager.max_queued_messages,
         );
 
         // Discover host tools for direct execution fast path
@@ -262,6 +272,14 @@ impl Manager {
     /// Host workspace path.
     pub fn host_workspace(&self) -> &str {
         &self.host_workspace
+    }
+
+    pub fn inject_handle(&self) -> crate::executor::ExecutorInjectHandle {
+        self.executor.inject_handle()
+    }
+
+    pub fn session_todos(&self, session_key: &str) -> String {
+        self.executor.todo_render(session_key)
     }
 
     pub async fn with_activity_context_base<F, Fut, T>(

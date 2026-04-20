@@ -754,12 +754,20 @@ async fn dispatch_to_core(
     let confirmer = teams_confirmer(state, &activity);
     let status_id = post_message_get_id(state, &activity, initial_status).await;
 
-    let events = match state.handle.chat(session_ctx, &text, confirmer).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            tracing::error!(error = %e, "Teams core dispatch failed");
-            reply_text(state, &activity, "_An internal error occurred._").await;
-            return;
+    let session_key = session_ctx.session_key();
+    let events = if state.handle.is_session_active(&session_key) {
+        state.handle.inject(&session_key, text.clone());
+        tracing::debug!(session_key = %session_key, "Mid-run message injected into active session");
+        reply_text(state, &activity, "_Your message has been noted and will be picked up in the next step._").await;
+        return;
+    } else {
+        match state.handle.chat(session_ctx, &text, confirmer).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::error!(error = %e, "Teams core dispatch failed");
+                reply_text(state, &activity, "_An internal error occurred._").await;
+                return;
+            }
         }
     };
 
